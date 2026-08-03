@@ -20,13 +20,11 @@ Google Meet  →  Chrome Extension  →  .txt file  →  Desktop App
 
 ### Step 1. Install the desktop app
 
-1. Download the `.dmg` for your Mac:
-   - **Apple Silicon** (M1/M2/M3/M4): [Unlimeety-arm64.dmg](https://github.com/cardpay/unlimeety/releases/latest/download/Unlimeety-1.0.0-arm64.dmg)
-   - **Intel**: [Unlimeety-x64.dmg](https://github.com/cardpay/unlimeety/releases/latest/download/Unlimeety-1.0.0-x64.dmg)
+1. Download the `.dmg`: [Unlimeety-arm64.dmg](https://github.com/cardpay/unlimeety/releases/latest/download/Unlimeety-arm64.dmg)
 
    All releases: [github.com/cardpay/unlimeety/releases](https://github.com/cardpay/unlimeety/releases).
 
-   Not sure which one? Click the Apple menu → **About This Mac**. If "Chip" says *Apple M…*, take the arm64 build; if "Processor" says *Intel*, take the x64 build.
+   **Requires a Mac with Apple Silicon** (M1 or newer) running macOS 14.2+. Intel Macs are not supported — the on-device transcription helper is built for arm64 only. Check with the Apple menu → **About This Mac**: "Chip" should say *Apple M…*.
 2. Double-click the downloaded `.dmg` file
 3. Drag **Unlimeety** into the **Applications** folder (or `~/Applications`)
 4. Close the `.dmg` window
@@ -139,7 +137,7 @@ A transcript editor with a file library and summarization.
 - npm
 
 **macOS only** (needed for the Live tab — Swift helper that runs WhisperKit/SpeakerKit):
-- macOS 13 Ventura or newer
+- macOS 14.2 or newer on Apple Silicon (the `live-helper` package declares `.macOS("14.2")` and builds arm64-only)
 - Xcode Command Line Tools (`xcode-select --install`) — provides Swift 5.9+
   - For a fresh install of the full Xcode app: `xcode-select -s /Applications/Xcode.app/Contents/Developer`
 - First `swift build` will fetch and compile [`argmax-oss-swift`](https://github.com/argmaxinc/argmax-oss-swift) (WhisperKit + SpeakerKit). Expect 3–10 min and a few hundred MB in `live-helper/.build/`.
@@ -166,42 +164,29 @@ The helper binary lives at `desktop/live-helper/.build/release/unlimeety-live`. 
 cd desktop
 npm install
 
-# macOS — Apple Silicon (default, ~230 MB installed)
+# macOS — Apple Silicon (~230 MB installed)
 npm run build:mac
 # same, explicit:
 npm run build:mac:arm64
-
-# macOS — Intel
-npm run build:mac:intel
-
-# macOS — universal binary (both arm64 + x64 in one DMG, ~470 MB installed)
-npm run build:mac:universal
 
 # Windows / Linux (no Live tab — Swift helper is skipped automatically)
 npm run build:win
 npm run build:linux
 ```
 
-Every macOS build runs `npm run build:helper` first (`swift build -c release` inside `live-helper/`) and bundles the resulting binary into `Unlimeety.app/Contents/MacOS/unlimeety-live`. If Swift is not on `PATH`, the macOS build fails fast.
+Every macOS build runs `npm run build:helper` first (`swift build -c release` inside `live-helper/`) and bundles the resulting binary into `Unlimeety.app/Contents/MacOS/unlimeety-live`. If Swift is not on `PATH`, the macOS build fails fast. The helper is arm64-only, so there is no Intel or universal macOS target.
 
-Artifacts land in `desktop/dist/` as `Unlimeety-<version>-<arch>.dmg` (e.g. `Unlimeety-1.0.0-arm64.dmg`).
+Artifacts land in `desktop/dist/` as `Unlimeety-arm64.dmg` — the name carries no version, so the `releases/latest/download/...` URL above stays valid across releases.
 
 To install the built app into `~/Applications`:
 
 ```bash
-# Apple Silicon
 cp -r desktop/dist/mac-arm64/Unlimeety.app ~/Applications/
-# Intel
-cp -r desktop/dist/mac/Unlimeety.app ~/Applications/
-# Universal
-cp -r desktop/dist/mac-universal/Unlimeety.app ~/Applications/
 ```
-
-> **Why separate builds?** A universal DMG bundles both arm64 and x64 Electron binaries and weighs ~2× more. Building only for your target architecture keeps the installed app around 230 MB instead of 470 MB.
 
 ### Code signing
 
-The app is signed with an ad-hoc local identity (`"identity": "Unlimeety Local"` in `package.json`) — no Apple Developer account is needed to build, but users will see the "unidentified developer" warning on first launch and have to **Open Anyway** in System Settings. Notarization is disabled (`"notarize": false`).
+The app is signed with a *Developer ID Application* certificate (UNLIMINT EU LTD) with hardened runtime enabled, and both the `.app` and the `.dmg` are notarized by Apple — so users get no "unidentified developer" warning. Building a distributable therefore needs an Apple Developer account and a notarytool keychain profile; see [desktop/RELEASE.md](desktop/RELEASE.md) for the full setup. Without the certificate in the login keychain the `build:helper` step fails at `codesign`; without `APPLE_KEYCHAIN_PROFILE` the build completes but notarization is skipped.
 
 ### Load the extension for development
 
