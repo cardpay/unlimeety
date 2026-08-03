@@ -9,11 +9,10 @@
         "build:helper": "cd live-helper && swift build -c release && codesign --force --sign \"Developer ID Application\" --options runtime --entitlements ../build/entitlements.mac.inherit.plist --timestamp .build/release/unlimeety-live",
         "build:mac": "npm run build:helper && electron-builder --mac --arm64",
         "build:mac:arm64": "npm run build:helper && electron-builder --mac --arm64",
-        "build:mac:intel": "npm run build:helper && electron-builder --mac --x64",
-        "build:mac:universal": "npm run build:helper && electron-builder --mac --arm64 --x64",
+        "notarize:dmg": "codesign --force --sign \"Developer ID Application\" --timestamp dist/Unlimeety-arm64.dmg && xcrun notarytool submit dist/Unlimeety-arm64.dmg --keychain-profile \"$APPLE_KEYCHAIN_PROFILE\" --wait && xcrun stapler staple dist/Unlimeety-arm64.dmg",
         "build:win": "electron-builder --win",
         "build:linux": "electron-builder --linux",
-        "build:all": "electron-builder --mac --arm64 --x64 --win --linux"
+        "build:all": "electron-builder --mac --arm64 --win --linux"
     },
     "build": {
         "appId": "com.transcriber.desktop",
@@ -34,7 +33,7 @@
                     "target": "dmg"
                 }
             ],
-            "artifactName": "${productName}-${version}-${arch}.${ext}",
+            "artifactName": "${productName}-${arch}.${ext}",
             "extendInfo": {
                 "NSMicrophoneUsageDescription": "Unlimeety uses the microphone for live transcription.",
                 "NSAudioCaptureUsageDescription": "Unlimeety captures system audio for live transcription.",

@@ -2,12 +2,11 @@
 
 End-to-end checklist for cutting a new signed and notarized macOS build of Unlimeety and publishing it to GitHub Releases.
 
-The app is distributed **outside the Mac App Store**: signed with a *Developer ID Application* certificate and notarized through Apple's `notarytool`. After publication, two DMGs (arm64 and x64) appear at:
+The app is distributed **outside the Mac App Store**: signed with a *Developer ID Application* certificate and notarized through Apple's `notarytool`. Only Apple Silicon is shipped — the Swift live-helper builds for arm64 only, so an Intel DMG would carry a helper that cannot run. After publication a single DMG appears at:
 
-- `https://github.com/cardpay/unlimeety/releases/download/vX.Y.Z/Unlimeety-X.Y.Z-arm64.dmg`
-- `https://github.com/cardpay/unlimeety/releases/download/vX.Y.Z/Unlimeety-X.Y.Z-x64.dmg`
+- `https://github.com/cardpay/unlimeety/releases/download/vX.Y.Z/Unlimeety-arm64.dmg`
 
-The corresponding `/releases/latest/download/...` URL always points at the most recent release — this is what the root [README.md](../README.md) links to.
+The artifact name deliberately carries **no version**, so `https://github.com/cardpay/unlimeety/releases/latest/download/Unlimeety-arm64.dmg` always resolves to the most recent release — this is what the root [README.md](../README.md) links to, and it never needs editing on a version bump.
 
 ---
 
@@ -78,7 +77,7 @@ git commit -m "desktop: bump version to 1.0.1"
 git push origin main
 ```
 
-### Step 2. Build both DMGs
+### Step 2. Build the DMG
 
 ```bash
 cd unlimeety/desktop
@@ -86,20 +85,27 @@ export APPLE_KEYCHAIN_PROFILE=transcriber-notarize
 export APPLE_TEAM_ID=<YOUR_TEAM_ID>
 
 npm run build:mac          # arm64, ~5–10 min (notarize waits on Apple)
-npm run build:mac:intel    # x64
 ```
 
-Each build:
+The build:
 1. Compiles the Swift live-helper and signs it with hardened runtime.
 2. Packages the Electron `.app`, signs it, and embeds the helper.
-3. Submits to Apple's notary service via `notarytool submit --wait`.
-4. Staples the notarization ticket onto the DMG.
+3. Submits the `.app` to Apple's notary service via `notarytool submit --wait` and staples the ticket onto it.
 
-Output ends up in `desktop/dist/`:
-- `Unlimeety-X.Y.Z-arm64.dmg`
-- `Unlimeety-X.Y.Z-x64.dmg`
+Output: `desktop/dist/Unlimeety-arm64.dmg` (plus the unpacked `desktop/dist/mac-arm64/Unlimeety.app`).
 
-### Step 3. Verify
+### Step 3. Notarize the DMG itself
+
+electron-builder's `"notarize": true` covers the **`.app` only**. The DMG that wraps it comes out unsigned, and Gatekeeper assesses the DMG when a downloaded copy is mounted — leave this step out and users get an "Apple could not verify…" dialog even though the app inside is fine.
+
+```bash
+cd unlimeety/desktop
+npm run notarize:dmg       # codesign → notarytool submit --wait → stapler staple
+```
+
+Uses the same `APPLE_KEYCHAIN_PROFILE` exported in step 2. Another ~5 min of waiting on Apple.
+
+### Step 4. Verify
 
 Run every check below — none should fail.
 
@@ -122,15 +128,19 @@ codesign --display --entitlements - dist/mac-arm64/Unlimeety.app
 spctl --assess --type execute --verbose dist/mac-arm64/Unlimeety.app
 #   Expect: source=Notarized Developer ID
 
-# 5. The notarization ticket is stapled to the DMG
-xcrun stapler validate dist/Unlimeety-*-arm64.dmg
-xcrun stapler validate dist/Unlimeety-*-x64.dmg
+# 5. The notarization ticket is stapled to the DMG (step 3)
+xcrun stapler validate dist/Unlimeety-arm64.dmg
 #   Expect: The validate action worked!
+
+# 6. Gatekeeper accepts the DMG too
+spctl -a -t open --context context:primary-signature -v dist/Unlimeety-arm64.dmg
+#   Expect: accepted
+#   "rejected / source=no usable signature" means step 3 was skipped.
 ```
 
-Final smoke test: copy one of the DMGs onto a Mac that has never seen this app (or locally run `xattr -cr ~/Downloads/Unlimeety-*.dmg` to drop the Gatekeeper cache), mount it, and launch. There must be no "unidentified developer" dialog.
+Final smoke test: copy the DMG onto a Mac that has never seen this app (or locally run `xattr -cr ~/Downloads/Unlimeety-arm64.dmg` to drop the Gatekeeper cache), mount it, and launch. There must be no "unidentified developer" dialog.
 
-### Step 4. Tag and push
+### Step 5. Tag and push
 
 ```bash
 cd unlimeety
@@ -138,7 +148,7 @@ git tag vX.Y.Z
 git push origin main --tags
 ```
 
-### Step 5. Publish to GitHub Releases
+### Step 6. Publish to GitHub Releases
 
 ```bash
 cd unlimeety
@@ -146,11 +156,16 @@ gh release create vX.Y.Z \
   --repo cardpay/unlimeety \
   --title "Unlimeety X.Y.Z" \
   --notes "Release notes here." \
-  desktop/dist/Unlimeety-X.Y.Z-arm64.dmg \
-  desktop/dist/Unlimeety-X.Y.Z-x64.dmg
+  desktop/dist/Unlimeety-arm64.dmg
 ```
 
-That's it — the README links (`releases/latest/download/...`) now point at the new build automatically.
+That's it — the README link (`releases/latest/download/Unlimeety-arm64.dmg`) now points at the new build automatically, because the asset name is version-free.
+
+Verify the public URL actually serves the new file:
+
+```bash
+curl -fLI https://github.com/cardpay/unlimeety/releases/latest/download/Unlimeety-arm64.dmg | grep -E "^HTTP|content-length"
+```
 
 ---
 
@@ -163,6 +178,7 @@ That's it — the README links (`releases/latest/download/...`) now point at the
 | `stapler: could not validate` | Apple rejected the notarization. | Find the submission UUID in the build log, then `xcrun notarytool log <uuid> --keychain-profile transcriber-notarize`. Common causes: an unsigned binary inside the bundle, missing hardened runtime, or expired timestamp. |
 | `Killed: 9` / immediate crash on launch | Cached Gatekeeper verdict for a previous unsigned build. | `xattr -cr /Applications/Unlimeety.app` and retry. On developer machines that previously ran the self-signed version, also `sudo spctl --master-disable && sudo spctl --master-enable` to flush the cache. |
 | `notarize step skipped` shown in build log | `APPLE_KEYCHAIN_PROFILE` / `APPLE_TEAM_ID` aren't exported. | Export both before `npm run build:mac`. |
-| Bundle has a *Unlimeety Local* signature | You're running against the old self-signed identity left over in a local copy of `package.json`. | Make sure the merged change to `desktop/package.json` is present (no `"identity"` field, `notarize` is `true`). |
+| DMG: `code object is not signed at all` / `spctl` → `rejected, source=no usable signature` | Step 3 wasn't run — electron-builder notarizes the `.app`, never the DMG. | `npm run notarize:dmg`. |
+| `/releases/latest/download/...` returns 404 | The uploaded asset name doesn't match the URL — most likely `artifactName` in `package.json` grew a `${version}` back. | It must stay `${productName}-${arch}.${ext}`. |
 
 For anything not in this table, the build log from `electron-builder` is verbose and usually points right at the failing tool — read it before assuming the cert is broken.
