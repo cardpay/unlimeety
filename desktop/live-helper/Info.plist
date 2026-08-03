@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Embedded into the unlimeety-live executable's __TEXT,__info_plist
+         section at link time (see Package.swift). The helper is a bare CLI
+         tool, not an .app bundle, so TCC evaluates the request against THIS
+         binary's identity — without a usage-description string here macOS
+         silently denies calendar access and never shows a prompt. The parent
+         app's Info.plist keys don't cover a separately Developer-ID-signed,
+         hardened-runtime helper. CFBundleName makes the prompt read
+         "Unlimeety" rather than "unlimeety-live". -->
+    <key>CFBundleIdentifier</key>
+    <string>com.transcriber.desktop.live-helper</string>
+    <key>CFBundleName</key>
+    <string>Unlimeety</string>
+    <key>NSCalendarsUsageDescription</key>
+    <string>Unlimeety reads your calendar to suggest the meeting title and participants.</string>
+    <key>NSCalendarsFullAccessUsageDescription</key>
+    <string>Unlimeety reads your calendar to suggest the meeting title and participants.</string>
+</dict>
+</plist>

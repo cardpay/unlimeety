@@ -1,0 +1,202 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   Unlimeety — LIGHT THEME (desktop app)
+   Drop-in stylesheet. Link AFTER style.css / live.css / record.css:
+
+     <link rel="stylesheet" href="style.css" />
+     <link rel="stylesheet" href="live/live.css" />
+     <link rel="stylesheet" href="record/record.css" />
+     <link rel="stylesheet" href="theme-light.css" />   ← add this line
+
+   Then flip the theme by setting an attribute on <html>:
+     document.documentElement.dataset.theme = 'light';   // or 'dark'
+
+   When data-theme is absent the original dark look is untouched.
+   ---------------------------------------------------------------------------
+   Built on Unlimit Design System 3.0 light foundations:
+     • surface  = soft warm off-white   (canvas) / white (panels)
+     • accent   = brand purple #6B45E8   (lime is reserved for dark only)
+     • status   = 600-level tones for AA contrast on light
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ─── 1 · TOKENS ─────────────────────────────────────────────────────────────
+   Every surface in the app reads these vars, so re-mapping them flips ~90 %
+   of the UI automatically. The point-fixes in section 2 catch the literals. */
+:root[data-theme="light"] {
+    /* Surfaces — warm off-white canvas, white raised panels, warm-gray fills */
+    --bg-base: #faf9f6;      /* editor / main canvas (the "paper")           */
+    --bg-surface: #ffffff;   /* sidebar · rail · status bar · cards (raised) */
+    --bg-elevated: #f1f0ea;  /* input fills · chips · menus · hover cards     */
+    --bg-hover: #e7e5dd;     /* button / row hover                            */
+
+    --border: rgba(28, 26, 22, 0.10);
+    --border-strong: rgba(28, 26, 22, 0.18);
+    --border-focus: rgba(107, 69, 232, 0.55);
+
+    /* Accent → brand purple (UDS: lime only on pure black) */
+    --accent: #6b45e8;       /* purple-500          */
+    --accent-2: #5733ce;     /* purple-600 (hover)  */
+    --accent-fg: #ffffff;    /* text on purple      */
+    --accent-dim: rgba(107, 69, 232, 0.10);
+    --accent-glow: rgba(107, 69, 232, 0.22);
+
+    /* Legacy "lime" aliases also resolve to purple on light so the rail CTA,
+       New button, active meeting card, etc. stay on-brand. */
+    --accent-lime: #6b45e8;
+    --accent-lime-ink: #ffffff;
+    --accent-lime-soft: rgba(107, 69, 232, 0.10);
+    --accent-lime-border: rgba(107, 69, 232, 0.40);
+
+    /* Integration glyphs keep their identity */
+    --obsidian: #7c3aed;
+    --todoist: #e44332;
+
+    /* Text — warm near-black ramp */
+    --text-primary: #20201c;
+    --text-secondary: #5a574f;
+    --text-muted: #837f74;
+
+    /* Status — darkened to 600-level so they pass AA on light surfaces */
+    --dirty: #c27803;        /* warning-600 */
+    --saved: #1e8e3e;        /* success-600 */
+    --danger: #c62323;       /* danger-600  */
+    --info: #1e5fbf;         /* info-600    */
+    --rec: #dc2626;          /* recording red */
+}
+
+/* ─── 2 · POINT-FIXES — hardcoded literals that vars can't reach ───────────── */
+
+/* style.css ----------------------------------------------------------------- */
+
+/* Toolbar glass: was rgba(10,10,13,.85) */
+[data-theme="light"] #toolbar {
+    background: rgba(255, 255, 255, 0.78);
+    box-shadow: 0 1px 0 rgba(28, 26, 22, 0.04);
+}
+
+/* Drop overlay scrim */
+[data-theme="light"] #drop-overlay {
+    background: rgba(250, 249, 246, 0.82);
+}
+
+/* Primary button glow — soften the lime-era 18px halo into a purple lift */
+[data-theme="light"] .btn-primary {
+    box-shadow: 0 2px 10px rgba(107, 69, 232, 0.24);
+}
+[data-theme="light"] .btn-primary:hover {
+    box-shadow: 0 4px 16px rgba(107, 69, 232, 0.30);
+}
+
+/* Lime hover literals (#d6ff52) → purple pressed */
+[data-theme="light"] .meeting-new-btn:hover,
+[data-theme="light"] .btn-rail-primary:hover {
+    background: var(--accent-2);
+}
+
+/* Floating menus / popups / modals — swap inky shadows for soft light ones */
+[data-theme="light"] .meeting-menu,
+[data-theme="light"] .rename-popup {
+    box-shadow: 0 12px 32px rgba(28, 26, 22, 0.16), 0 2px 6px rgba(28, 26, 22, 0.06);
+}
+[data-theme="light"] .export-menu {
+    box-shadow: 0 8px 24px rgba(28, 26, 22, 0.14);
+}
+[data-theme="light"] .bg-summary-toolbar {
+    box-shadow: 0 12px 32px rgba(28, 26, 22, 0.16);
+}
+[data-theme="light"] .modal-overlay {
+    background: rgba(28, 26, 22, 0.38);
+}
+[data-theme="light"] .modal-box {
+    box-shadow: 0 24px 80px rgba(28, 26, 22, 0.22);
+}
+
+/* Chat: user bubble is purple now → white ink, not #000 */
+[data-theme="light"] .chat-message--user .chat-bubble {
+    color: #fff;
+}
+
+/* Progress tracks: bg-base is now near-white, so give them a visible groove */
+[data-theme="light"] .meeting-progress {
+    background: var(--bg-hover);
+}
+
+/* live.css ------------------------------------------------------------------ */
+
+/* Troubleshoot <pre>/<kbd> used white-on-dark fills */
+[data-theme="light"] .live-perm-troubleshoot-body pre,
+[data-theme="light"] .live-perm-troubleshoot-body kbd {
+    background: rgba(28, 26, 22, 0.05);
+}
+
+/* Ask-AI FAB: purple bg → white ink, soft shadow (was color:#000 + inky) */
+[data-theme="light"] .live-ask-ai-fab {
+    color: #fff;
+    box-shadow: 0 4px 12px rgba(28, 26, 22, 0.16), 0 1px 3px rgba(28, 26, 22, 0.08);
+}
+[data-theme="light"] .live-ask-ai-fab:hover:not(:disabled) {
+    box-shadow: 0 6px 16px rgba(28, 26, 22, 0.2), 0 2px 4px rgba(28, 26, 22, 0.1);
+}
+
+/* Live progress track groove */
+[data-theme="light"] .live-progress {
+    background: var(--bg-hover);
+}
+
+/* Speaker chips — bright pastels fail AA as text on light. Keep the tinted
+   pill but pull the label/border to a readable tone per hue. */
+[data-theme="light"] .live-segment.src-mic .live-seg-speaker { color: #1e8e3e; border-color: rgba(30, 142, 62, 0.4); }
+[data-theme="light"] .live-segment.src-system .live-seg-speaker { color: #1e5fbf; border-color: rgba(30, 95, 191, 0.4); }
+
+[data-theme="light"] .live-segment.speaker-alpha .live-seg-speaker,
+[data-theme="light"] .live-segment.speaker-iota .live-seg-speaker { color: #1e5fbf; border-color: rgba(30, 95, 191, 0.4); }
+[data-theme="light"] .live-segment.speaker-beta .live-seg-speaker,
+[data-theme="light"] .live-segment.speaker-kappa .live-seg-speaker { color: #5b34c4; border-color: rgba(91, 52, 196, 0.4); }
+[data-theme="light"] .live-segment.speaker-gamma .live-seg-speaker,
+[data-theme="light"] .live-segment.speaker-lambda .live-seg-speaker { color: #be2e74; border-color: rgba(190, 46, 116, 0.4); }
+[data-theme="light"] .live-segment.speaker-delta .live-seg-speaker,
+[data-theme="light"] .live-segment.speaker-mu .live-seg-speaker { color: #b45309; border-color: rgba(180, 83, 9, 0.4); }
+[data-theme="light"] .live-segment.speaker-epsilon .live-seg-speaker,
+[data-theme="light"] .live-segment.speaker-nu .live-seg-speaker { color: #92660a; border-color: rgba(146, 102, 10, 0.4); }
+[data-theme="light"] .live-segment.speaker-zeta .live-seg-speaker,
+[data-theme="light"] .live-segment.speaker-xi .live-seg-speaker { color: #0e7490; border-color: rgba(14, 116, 144, 0.4); }
+[data-theme="light"] .live-segment.speaker-eta .live-seg-speaker,
+[data-theme="light"] .live-segment.speaker-omicron .live-seg-speaker { color: #4338ca; border-color: rgba(67, 56, 202, 0.4); }
+[data-theme="light"] .live-segment.speaker-theta .live-seg-speaker,
+[data-theme="light"] .live-segment.speaker-pi .live-seg-speaker { color: #4d7c0f; border-color: rgba(77, 124, 15, 0.4); }
+
+/* record.css ---------------------------------------------------------------- */
+
+/* Selected recording row — lime wash → purple wash */
+[data-theme="light"] .record-sb-card.is-selected {
+    background: rgba(107, 69, 232, 0.07);
+}
+
+/* Source card "checked" border literal */
+[data-theme="light"] .record-source-card:has(input:checked) {
+    border-color: rgba(107, 69, 232, 0.35);
+}
+/* Toggle knob reads white once the track turns purple */
+[data-theme="light"] .record-source-card:has(input:checked) .record-source-switch::after {
+    background: #fff;
+}
+
+/* Big batch CTA glow */
+[data-theme="light"] .record-sb-cta-btn {
+    box-shadow: 0 2px 12px rgba(107, 69, 232, 0.22);
+}
+
+/* Active model card lime literals → purple */
+[data-theme="light"] .ts-model-card.is-active {
+    border-color: rgba(107, 69, 232, 0.45);
+    box-shadow: inset 0 0 0 1px rgba(107, 69, 232, 0.2);
+}
+
+/* "Transcription in progress" banner used undefined vars w/ dark fallbacks */
+[data-theme="light"] .record-trans-active-banner {
+    background: rgba(107, 69, 232, 0.06);
+    border-bottom-color: var(--border);
+    color: var(--text-secondary);
+}
+[data-theme="light"] .record-trans-active-dot {
+    background: var(--accent);
+}
