@@ -1,0 +1,434 @@
+/* ─────────────────────────────────────────────────────────────────────────────
+   Unlimeety — Google Meet widget
+   Dark surface, lime accent, Inter type. Logo: lowercase "un" wordmark.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+/* Bundled fonts — loaded from the extension package, no external request to Google. */
+@font-face { font-family: 'Inter'; font-style: normal; font-weight: 400; font-display: swap; src: url("fonts/Inter-400.woff2") format('woff2'); }
+@font-face { font-family: 'Inter'; font-style: normal; font-weight: 500; font-display: swap; src: url("fonts/Inter-500.woff2") format('woff2'); }
+@font-face { font-family: 'Inter'; font-style: normal; font-weight: 600; font-display: swap; src: url("fonts/Inter-600.woff2") format('woff2'); }
+@font-face { font-family: 'Inter'; font-style: normal; font-weight: 700; font-display: swap; src: url("fonts/Inter-700.woff2") format('woff2'); }
+@font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 400; font-display: swap; src: url("fonts/JetBrainsMono-400.woff2") format('woff2'); }
+@font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 500; font-display: swap; src: url("fonts/JetBrainsMono-500.woff2") format('woff2'); }
+
+#gmt-transcriber-widget {
+    /* Brand tokens — kept local so we never collide with Meet's vars */
+    --u-bg:        #111114;
+    --u-surface:   #18181d;
+    --u-elevated:  #22222a;
+    --u-hover:     #2a2a34;
+    --u-border:    rgba(255, 255, 255, 0.08);
+    --u-border-2:  rgba(255, 255, 255, 0.14);
+    --u-text:      #ededf0;
+    --u-text-2:    #8b8b94;
+    --u-text-3:    #5a5a63;
+
+    --u-lime:      #c6f432;
+    --u-lime-2:    #a8d728;
+    --u-lime-fg:   #0a0d04;
+    --u-lime-glow: rgba(198, 244, 50, 0.32);
+    --u-lime-dim:  rgba(198, 244, 50, 0.14);
+
+    --u-rec:       #ff5b5b;
+    --u-rec-dim:   rgba(255, 91, 91, 0.18);
+
+    position: fixed;
+    bottom: 96px;
+    right: 20px;
+    width: 220px;
+    background: var(--u-surface);
+    border: 1px solid var(--u-border);
+    border-radius: 14px;
+    box-shadow:
+        0 1px 0 rgba(255, 255, 255, 0.04) inset,
+        0 18px 48px rgba(0, 0, 0, 0.55),
+        0 2px 8px rgba(0, 0, 0, 0.35);
+    color: var(--u-text);
+    font-family: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    font-size: 12px;
+    line-height: 1.35;
+    z-index: 2147483600;
+    padding: 12px 12px 14px;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    transition: width 0.22s ease, padding 0.22s ease, border-radius 0.22s ease;
+    -webkit-font-smoothing: antialiased;
+}
+
+#gmt-transcriber-widget *,
+#gmt-transcriber-widget *::before,
+#gmt-transcriber-widget *::after {
+    box-sizing: border-box;
+}
+
+/* ─── Collapsed pill ────────────────────────────────────────────────────────── */
+#gmt-transcriber-widget.collapsed {
+    width: auto;
+    padding: 8px 12px 8px 10px;
+    border-radius: 999px;
+    gap: 0;
+}
+
+#gmt-transcriber-widget.collapsed .gmt-header {
+    border-bottom: none;
+    padding-bottom: 0;
+    margin-bottom: 0;
+    gap: 10px;
+}
+
+#gmt-transcriber-widget.collapsed .gmt-content {
+    display: none;
+}
+
+/* Keep the collapsed pill minimal — theme toggle lives in the expanded header. */
+#gmt-transcriber-widget.collapsed #gmt-theme-toggle {
+    display: none;
+}
+
+/* While collapsed: if recording, show a soft red dot next to the mark */
+#gmt-transcriber-widget.collapsed:has(#gmt-icon-stop[style*="block"]) .gmt-brand::after {
+    content: "";
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--u-rec);
+    box-shadow: 0 0 0 3px var(--u-rec-dim);
+    animation: gmt-pulse 1.4s ease-in-out infinite;
+}
+
+/* ─── Header ────────────────────────────────────────────────────────────────── */
+.gmt-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    cursor: grab;
+    user-select: none;
+    padding-bottom: 10px;
+    margin-bottom: 0;
+    border-bottom: 1px solid var(--u-border);
+}
+
+#gmt-transcriber-widget.gmt-dragging {
+    transition: none;
+    cursor: grabbing;
+}
+
+.gmt-brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: -0.005em;
+    color: var(--u-text);
+}
+
+.gmt-brand-mark {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
+    background: var(--u-lime);
+    color: var(--u-lime-fg);
+    font-family: "Inter", sans-serif;
+    font-weight: 700;
+    font-style: italic;
+    font-size: 12.5px;
+    letter-spacing: -0.06em;
+    line-height: 1;
+    padding-right: 1px;
+}
+
+.gmt-brand-label {
+    white-space: nowrap;
+}
+
+#gmt-transcriber-widget.collapsed .gmt-brand-label {
+    font-size: 12px;
+}
+
+/* Header action buttons: theme toggle + collapse / expand chevron */
+.gmt-header-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+}
+
+#gmt-toggle-collapse,
+#gmt-theme-toggle {
+    background: transparent;
+    border: 1px solid transparent;
+    cursor: pointer;
+    padding: 3px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 6px;
+    color: var(--u-text-2);
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+#gmt-toggle-collapse:hover,
+#gmt-theme-toggle:hover {
+    background: var(--u-hover);
+    color: var(--u-text);
+    border-color: var(--u-border);
+}
+
+#gmt-toggle-collapse svg {
+    width: 16px;
+    height: 16px;
+    fill: currentColor;
+}
+
+#gmt-theme-toggle svg {
+    width: 15px;
+    height: 15px;
+    fill: currentColor;
+}
+
+/* ─── Controls ──────────────────────────────────────────────────────────────── */
+.gmt-content {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.gmt-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.gmt-field-label {
+    display: block;
+    font-size: 9.5px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--u-text-3);
+    margin-bottom: 5px;
+}
+
+#gmt-language {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 100%;
+    padding: 7px 28px 7px 10px;
+    border-radius: 8px;
+    border: 1px solid var(--u-border);
+    background-color: var(--u-elevated);
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238b8b94' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>");
+    background-repeat: no-repeat;
+    background-position: right 9px center;
+    color: var(--u-text);
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    outline: none;
+    transition: border-color 0.15s, background-color 0.15s;
+}
+
+#gmt-language:hover {
+    background-color: var(--u-hover);
+}
+
+#gmt-language:focus {
+    border-color: rgba(198, 244, 50, 0.55);
+}
+
+#gmt-language option {
+    background: var(--u-elevated);
+    color: var(--u-text);
+}
+
+/* ─── Main control row ──────────────────────────────────────────────────────── */
+.gmt-main-controls {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: center;
+    gap: 8px;
+    padding-top: 2px;
+}
+
+/* Record button: lime "go" state. When recording, swap to red square. */
+#gmt-record-btn {
+    height: 40px;
+    width: 100%;
+    border-radius: 10px;
+    border: 1px solid var(--u-lime-2);
+    background: var(--u-lime);
+    color: var(--u-lime-fg);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 0 12px;
+    font-family: inherit;
+    font-size: 12.5px;
+    font-weight: 600;
+    letter-spacing: -0.005em;
+    box-shadow: 0 0 0 0 var(--u-lime-glow), 0 1px 0 rgba(255, 255, 255, 0.18) inset;
+    transition: background 0.15s, border-color 0.15s, color 0.15s, box-shadow 0.2s, transform 0.08s;
+    padding: 0;
+    position: relative;
+}
+
+#gmt-record-btn::after {
+    /* Text label, generated so we keep content.js untouched */
+    content: "Start recording";
+    font-family: inherit;
+    font-weight: 600;
+    font-size: 12.5px;
+    margin-left: 2px;
+}
+
+#gmt-record-btn:hover {
+    background: var(--u-lime-2);
+    border-color: var(--u-lime-2);
+    box-shadow: 0 0 22px var(--u-lime-glow), 0 1px 0 rgba(255, 255, 255, 0.18) inset;
+}
+
+#gmt-record-btn:active {
+    transform: scale(0.985);
+}
+
+#gmt-record-btn:disabled {
+    background: var(--u-elevated);
+    border-color: var(--u-border);
+    color: var(--u-text-3);
+    cursor: not-allowed;
+    box-shadow: none;
+}
+
+#gmt-record-btn:disabled::after {
+    content: "Join a meeting";
+    color: var(--u-text-3);
+}
+
+/* Recording state — detected via the inline "display:block" on the stop icon */
+#gmt-record-btn:has(#gmt-icon-stop[style*="block"]) {
+    background: var(--u-rec-dim);
+    border-color: rgba(255, 91, 91, 0.5);
+    color: var(--u-rec);
+    box-shadow: 0 0 0 3px rgba(255, 91, 91, 0.08);
+}
+
+#gmt-record-btn:has(#gmt-icon-stop[style*="block"])::after {
+    content: "Stop";
+    color: var(--u-rec);
+}
+
+#gmt-record-btn:has(#gmt-icon-stop[style*="block"])::before {
+    content: "";
+    position: absolute;
+    left: 12px;
+    top: 50%;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--u-rec);
+    box-shadow: 0 0 0 4px var(--u-rec-dim);
+    transform: translateY(-50%);
+    animation: gmt-pulse 1.4s ease-in-out infinite;
+}
+
+#gmt-record-btn:has(#gmt-icon-stop[style*="block"]):hover {
+    background: rgba(255, 91, 91, 0.22);
+}
+
+#gmt-record-btn svg {
+    width: 14px;
+    height: 14px;
+    fill: currentColor;
+    flex-shrink: 0;
+}
+
+/* ─── Save (download) button — ghost icon ───────────────────────────────────── */
+#gmt-save-btn {
+    width: 40px;
+    height: 40px;
+    flex-shrink: 0;
+    border-radius: 10px;
+    border: 1px solid var(--u-border);
+    background: var(--u-elevated);
+    color: var(--u-text-2);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s, border-color 0.15s, color 0.15s, transform 0.08s;
+    padding: 0;
+}
+
+#gmt-save-btn:hover {
+    background: var(--u-hover);
+    border-color: var(--u-border-2);
+    color: var(--u-text);
+}
+
+#gmt-save-btn:active {
+    transform: scale(0.96);
+}
+
+#gmt-save-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    background: var(--u-elevated);
+    color: var(--u-text-3);
+}
+
+#gmt-save-btn svg {
+    width: 16px;
+    height: 16px;
+    fill: currentColor;
+}
+
+/* ─── Status row (mono caption under controls) ──────────────────────────────── */
+.gmt-status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 10px;
+    color: var(--u-text-3);
+    letter-spacing: 0.02em;
+    padding-top: 2px;
+}
+
+.gmt-status-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--u-text-3);
+    flex-shrink: 0;
+}
+
+/* Idle (button enabled, not recording) → lime dot */
+#gmt-transcriber-widget:not(.collapsed):has(#gmt-record-btn:not(:disabled)) .gmt-status-dot {
+    background: var(--u-lime);
+    box-shadow: 0 0 0 3px var(--u-lime-dim);
+}
+
+/* Recording → red pulsing dot */
+#gmt-transcriber-widget:has(#gmt-icon-stop[style*="block"]) .gmt-status-dot {
+    background: var(--u-rec);
+    box-shadow: 0 0 0 3px var(--u-rec-dim);
+    animation: gmt-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes gmt-pulse {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.45; }
+}
+
+/* When recording, swap status label */
+.gmt-status-label::before { content: "Ready"; }
+#gmt-transcriber-widget:has(#gmt-record-btn:disabled) .gmt-status-label::before { content: "Waiting for meeting"; }
+#gmt-transcriber-widget:has(#gmt-icon-stop[style*="block"]) .gmt-status-label::before { content: "Recording · live captions"; }

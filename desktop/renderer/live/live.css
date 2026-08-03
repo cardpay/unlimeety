@@ -1,0 +1,657 @@
+/* ─── Live tab (isolated stylesheet) ────────────────────────────────────────
+ * Every selector below is scoped under #live-container or .live-*. Removing
+ * this file (and unlinking it from index.html) has no effect on the Editor.
+ * ─────────────────────────────────────────────────────────────────────── */
+
+#live-container {
+    position: fixed;
+    top: var(--toolbar-height);
+    left: 0;
+    right: 0;
+    bottom: 0;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-base);
+    overflow: hidden;
+}
+
+/* ─── Unsupported-OS banner ────────────────────────────────────────────── */
+.live-banner {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    color: var(--text-secondary);
+    text-align: center;
+    padding: 40px;
+}
+
+.live-banner svg {
+    color: var(--text-muted);
+}
+
+.live-banner h2 {
+    font-size: 20px;
+    color: var(--text-primary);
+    font-weight: 500;
+    margin: 0;
+}
+
+.live-banner p {
+    max-width: 440px;
+    font-size: 13px;
+    line-height: 1.6;
+}
+
+/* ─── Main wrapper ─────────────────────────────────────────────────────── */
+#live-main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+/* ─── Setup panel ──────────────────────────────────────────────────────── */
+#live-setup {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 40px 24px;
+    overflow-y: auto;
+}
+
+.live-setup-inner {
+    width: 100%;
+    max-width: 520px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+.live-setup-inner h2 {
+    font-size: 22px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin: 0;
+}
+
+.live-muted {
+    font-size: 13px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+    margin: -12px 0 0 0;
+}
+
+.live-row {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.live-label {
+    font-size: 11px;
+    font-weight: 500;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+}
+
+
+.live-setup-actions {
+    display: flex;
+    justify-content: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-top: 12px;
+}
+
+.btn-lg {
+    padding: 10px 20px;
+    font-size: 14px;
+}
+
+/* ─── Recording panel ──────────────────────────────────────────────────── */
+#live-recording {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.live-topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 24px;
+    background: var(--bg-surface);
+    border-bottom: 1px solid var(--border);
+}
+
+.live-topbar-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+
+.live-topbar-right {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+/* Prominent red Stop button — the only destructive action in this view, so
+   it deserves to be unmissable. */
+.btn-stop {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    height: 36px;
+    padding: 0 16px;
+    font-size: 13px;
+    font-weight: 600;
+    color: #fff;
+    background: #ef4444;
+    border: 1px solid #dc2626;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background 120ms ease, transform 80ms ease;
+}
+
+.btn-stop:hover    { background: #dc2626; }
+.btn-stop:active   { transform: translateY(1px); }
+.btn-stop:disabled { opacity: 0.65; cursor: progress; }
+
+.btn-stop-icon {
+    width: 11px;
+    height: 11px;
+    background: #fff;
+    border-radius: 2px;
+    display: inline-block;
+}
+
+.live-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    transition: background 0.2s;
+}
+
+.live-dot.dot-recording {
+    background: #ef4444;
+    box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7);
+    animation: live-pulse 1.4s ease-out infinite;
+}
+
+.live-dot.dot-loading {
+    background: var(--accent);
+}
+
+@keyframes live-pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.6); }
+    70%  { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+}
+
+.live-timer {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+}
+
+/* ─── Download progress ────────────────────────────────────────────────── */
+.live-download {
+    padding: 10px 24px;
+    background: var(--bg-elevated);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.live-download-label {
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.live-progress {
+    height: 4px;
+    background: var(--bg-base);
+    border-radius: 2px;
+    overflow: hidden;
+}
+
+.live-progress-bar {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, #7c3aed, #8b5cf6);
+    transition: width 0.2s ease-out;
+}
+
+/* ─── Permission hint in setup form ─────────────────────────────────── */
+.live-perm-hint {
+    margin: 8px 0 0;
+    padding: 0;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-muted);
+}
+
+.live-perm-link {
+    background: none;
+    border: none;
+    padding: 0;
+    margin-left: 4px;
+    color: var(--accent);
+    font-size: 12px;
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+
+.live-perm-link:hover { color: var(--text-primary); }
+
+/* ─── Permission troubleshoot disclosure ────────────────────────────────
+   Sits just below `.live-perm-hint`. Visible only when the user expands it,
+   so the setup form stays visually quiet for the common case. */
+.live-perm-troubleshoot {
+    margin-top: 10px;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+
+.live-perm-troubleshoot summary {
+    cursor: pointer;
+    color: var(--text-muted);
+    /* Keep the native disclosure triangle — restyling it across browsers /
+       chromium versions tends to cause inconsistencies, and the default
+       caret reads as "expandable" without further hinting. */
+    list-style: revert;
+    user-select: none;
+}
+
+.live-perm-troubleshoot summary:hover { color: var(--text-primary); }
+
+.live-perm-troubleshoot-body {
+    padding: 6px 0 0 14px;
+    line-height: 1.5;
+}
+
+.live-perm-troubleshoot-body p { margin: 6px 0; }
+
+.live-perm-troubleshoot-body ol {
+    margin: 6px 0;
+    padding-left: 20px;
+}
+
+.live-perm-troubleshoot-body li { margin: 4px 0; }
+
+.live-perm-troubleshoot-body pre {
+    margin: 6px 0 4px;
+    padding: 8px 10px;
+    background: rgba(255, 255, 255, 0.04);
+    border-radius: 6px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 11.5px;
+    white-space: pre-wrap;
+    word-break: break-all;
+}
+
+.live-perm-troubleshoot-body code {
+    font-family: inherit;
+    font-size: inherit;
+}
+
+.live-perm-troubleshoot-body kbd {
+    display: inline-block;
+    padding: 1px 5px;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    background: rgba(255, 255, 255, 0.04);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 11px;
+    line-height: 1.2;
+    color: var(--text-primary);
+}
+
+/* ─── Topbar level meters (mic + system) ───────────────────────────────
+   Two compact meters embedded in the topbar so the user can see at a glance
+   whether each source is actually producing audio, while the transcript area
+   below stays a single chronological stream (diarization handles speaker
+   identity, not column position). */
+.live-meters {
+    display: flex;
+    gap: 14px;
+    margin-left: 8px;
+    padding-left: 14px;
+    border-left: 1px solid var(--border);
+}
+
+.live-meter {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.live-meter-label {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+}
+
+.live-level-meter {
+    display: flex;
+    gap: 2px;
+    align-items: flex-end;
+    height: 12px;
+}
+
+.live-level-meter > span {
+    width: 3px;
+    background: var(--border);
+    border-radius: 1px;
+    transition: background 80ms linear;
+}
+
+.live-level-meter > span:nth-child(1) { height: 3px; }
+.live-level-meter > span:nth-child(2) { height: 5px; }
+.live-level-meter > span:nth-child(3) { height: 7px; }
+.live-level-meter > span:nth-child(4) { height: 9px; }
+.live-level-meter > span:nth-child(5) { height: 11px; }
+.live-level-meter > span:nth-child(6) { height: 12px; }
+.live-level-meter > span:nth-child(7) { height: 11px; }
+.live-level-meter > span:nth-child(8) { height: 9px; }
+.live-level-meter > span:nth-child(9) { height: 7px; }
+.live-level-meter > span:nth-child(10) { height: 5px; }
+
+.live-meter[data-source="mic"]    .live-level-meter > span.active { background: #34d399; }
+.live-meter[data-source="system"] .live-level-meter > span.active { background: #60a5fa; }
+
+/* ─── Single chronological transcript stream ───────────────────────────── */
+.live-stream-wrap {
+    flex: 1;
+    overflow: hidden;
+    display: flex;
+    min-height: 0;
+    position: relative;
+}
+
+/* Floating "Ask AI" bubble — pinned to the bottom-right of the live stream
+   so it's reachable while the transcript scrolls underneath. Disabled until
+   at least one segment lands; opens the shared #chat-modal via window.appChat. */
+.live-ask-ai-fab {
+    position: absolute;
+    right: 24px;
+    bottom: 20px;
+    z-index: 5;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 36px;
+    padding: 0 14px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--accent);
+    color: #000;
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35), 0 1px 3px rgba(0, 0, 0, 0.25);
+    transition: transform 0.12s ease, box-shadow 0.15s ease, opacity 0.15s ease;
+}
+.live-ask-ai-fab:hover:not(:disabled) {
+    transform: translateY(-1px);
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.4), 0 2px 4px rgba(0, 0, 0, 0.3);
+}
+.live-ask-ai-fab:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+    box-shadow: none;
+}
+
+.live-stream {
+    flex: 1;
+    overflow-y: auto;
+    padding: 22px 28px 28px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    line-height: 1.55;
+    color: var(--text-primary);
+    user-select: text;
+    max-width: 920px;
+    width: 100%;
+    margin: 0 auto;
+}
+
+.live-lane-empty {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    color: var(--text-muted);
+    font-family: var(--font-ui);
+    padding: 12px 4px;
+}
+
+.live-skeleton-row {
+    height: 12px;
+    border-radius: 6px;
+    background: linear-gradient(
+        90deg,
+        var(--bg-surface) 0%,
+        var(--bg-elevated) 50%,
+        var(--bg-surface) 100%
+    );
+    background-size: 200% 100%;
+    animation: live-shimmer 1.6s ease-in-out infinite;
+    width: 88%;
+}
+
+.live-skeleton-row.short { width: 56%; }
+
+@keyframes live-shimmer {
+    0%   { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+}
+
+.live-empty-hint {
+    margin: 6px 0 0;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-muted);
+}
+
+.live-empty-hint code {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    padding: 1px 5px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--text-secondary);
+}
+
+/* ─── Transcript segments ──────────────────────────────────────────────── */
+.live-segment {
+    display: grid;
+    grid-template-columns: 96px 1fr;
+    column-gap: 14px;
+    padding: 8px 0;
+    border-bottom: 1px solid transparent;
+}
+
+.live-segment + .live-segment {
+    border-top: 1px solid var(--border);
+}
+
+.live-segment.partial .live-seg-text {
+    opacity: 0.55;
+    font-style: italic;
+}
+
+.live-seg-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    align-items: flex-start;
+    padding-top: 1px;
+    font-family: var(--font-ui);
+    font-size: 11px;
+}
+
+/* Speaker chip — colour-coded by source/diarization output. */
+.live-seg-speaker {
+    display: inline-flex;
+    align-items: center;
+    height: 20px;
+    padding: 0 8px;
+    border-radius: 999px;
+    font-weight: 600;
+    font-size: 11px;
+    letter-spacing: 0.02em;
+    background: var(--bg-surface);
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
+    white-space: nowrap;
+}
+
+/* A stamped data-speaker-key means the chip is renamable — hint it. */
+.live-segment[data-speaker-key] .live-seg-speaker {
+    cursor: pointer;
+}
+.live-segment[data-speaker-key] .live-seg-speaker:hover {
+    filter: brightness(1.15);
+}
+
+.live-segment.src-mic .live-seg-speaker {
+    background: rgba(52, 211, 153, 0.16);
+    color: #34d399;
+    border-color: rgba(52, 211, 153, 0.35);
+}
+
+/* Default system-segment style — used as a fallback when diarization
+   hasn't tagged the segment with a specific speaker yet. The per-speaker
+   palette below overrides this whenever an identity is known. */
+.live-segment.src-system .live-seg-speaker {
+    background: rgba(96, 165, 250, 0.16);
+    color: #60a5fa;
+    border-color: rgba(96, 165, 250, 0.35);
+}
+
+/* Per-speaker palette — applied via the .speaker-<greek> class on the
+   .live-segment node. Eight distinct hues; speakers beyond Theta cycle
+   through the same colours (the Greek alphabet does the same in the label). */
+.live-segment.speaker-alpha   .live-seg-speaker { background: rgba(96, 165, 250, 0.16); color: #60a5fa; border-color: rgba(96, 165, 250, 0.35); }
+.live-segment.speaker-beta    .live-seg-speaker { background: rgba(167, 139, 250, 0.16); color: #a78bfa; border-color: rgba(167, 139, 250, 0.40); }
+.live-segment.speaker-gamma   .live-seg-speaker { background: rgba(244, 114, 182, 0.16); color: #f472b6; border-color: rgba(244, 114, 182, 0.40); }
+.live-segment.speaker-delta   .live-seg-speaker { background: rgba(251, 146, 60, 0.18); color: #fb923c; border-color: rgba(251, 146, 60, 0.40); }
+.live-segment.speaker-epsilon .live-seg-speaker { background: rgba(251, 191, 36, 0.18); color: #fbbf24; border-color: rgba(251, 191, 36, 0.40); }
+.live-segment.speaker-zeta    .live-seg-speaker { background: rgba(34, 211, 238, 0.16); color: #22d3ee; border-color: rgba(34, 211, 238, 0.40); }
+.live-segment.speaker-eta     .live-seg-speaker { background: rgba(129, 140, 248, 0.16); color: #818cf8; border-color: rgba(129, 140, 248, 0.40); }
+.live-segment.speaker-theta   .live-seg-speaker { background: rgba(163, 230, 53, 0.18); color: #a3e635; border-color: rgba(163, 230, 53, 0.40); }
+/* Cycle 2 (speakers 8-15) — same hues so a Greek-letter recycle reads as
+   visually consistent across overflow. */
+.live-segment.speaker-iota    .live-seg-speaker { background: rgba(96, 165, 250, 0.16); color: #60a5fa; border-color: rgba(96, 165, 250, 0.35); }
+.live-segment.speaker-kappa   .live-seg-speaker { background: rgba(167, 139, 250, 0.16); color: #a78bfa; border-color: rgba(167, 139, 250, 0.40); }
+.live-segment.speaker-lambda  .live-seg-speaker { background: rgba(244, 114, 182, 0.16); color: #f472b6; border-color: rgba(244, 114, 182, 0.40); }
+.live-segment.speaker-mu      .live-seg-speaker { background: rgba(251, 146, 60, 0.18); color: #fb923c; border-color: rgba(251, 146, 60, 0.40); }
+.live-segment.speaker-nu      .live-seg-speaker { background: rgba(251, 191, 36, 0.18); color: #fbbf24; border-color: rgba(251, 191, 36, 0.40); }
+.live-segment.speaker-xi      .live-seg-speaker { background: rgba(34, 211, 238, 0.16); color: #22d3ee; border-color: rgba(34, 211, 238, 0.40); }
+.live-segment.speaker-omicron .live-seg-speaker { background: rgba(129, 140, 248, 0.16); color: #818cf8; border-color: rgba(129, 140, 248, 0.40); }
+.live-segment.speaker-pi      .live-seg-speaker { background: rgba(163, 230, 53, 0.18); color: #a3e635; border-color: rgba(163, 230, 53, 0.40); }
+
+/* Pre-diarization placeholder — neutral grey, slightly muted. Wins over
+   the per-speaker palette while diarization is still running. */
+.live-segment.src-system.speaker-pending .live-seg-speaker {
+    background: var(--bg-surface);
+    color: var(--text-muted);
+    border-color: var(--border);
+}
+
+.live-seg-time {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 10px;
+    color: var(--text-muted);
+}
+
+.live-seg-text {
+    white-space: pre-wrap;
+    word-break: break-word;
+    line-height: 1.6;
+}
+
+/* ─── Footer explainer ─────────────────────────────────────────────────── */
+.live-explainer {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 10px 24px;
+    background: var(--bg-surface);
+    border-top: 1px solid var(--border);
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-secondary);
+}
+
+.live-explainer-icon {
+    font-size: 14px;
+    line-height: 1.4;
+    color: var(--accent);
+}
+
+.live-explainer code {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    padding: 1px 5px;
+    background: var(--bg-base);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+}
+
+/* ─── Diagnostics panel — last N lines from helper stderr. ────────────── */
+.live-diag-toggle {
+    margin-left: auto;
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 11px;
+    color: var(--text-muted);
+    cursor: pointer;
+}
+
+.live-diag-toggle:hover { color: var(--text-primary); border-color: var(--text-muted); }
+.live-diag-toggle[aria-expanded="true"] { color: var(--accent); border-color: var(--accent); }
+
+.live-diag-panel {
+    margin: 0;
+    padding: 10px 24px;
+    background: var(--bg-base);
+    border-top: 1px solid var(--border);
+    max-height: 220px;
+    overflow-y: auto;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    line-height: 1.5;
+    color: var(--text-secondary);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+/* ─── Narrow viewport adjustments ─────────────────────────────────────── */
+@media (max-width: 720px) {
+    .live-meters { display: none; }
+    .live-segment { grid-template-columns: 80px 1fr; }
+}

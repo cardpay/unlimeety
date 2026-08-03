@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; style-src 'unsafe-inline'; script-src 'self';" />
+  <title>Unlimeety</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body {
+      height: 100%;
+      background: transparent;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      -webkit-user-select: none;
+      cursor: default;
+      overflow: hidden;
+    }
+    .card {
+      height: 100%;
+      margin: 6px;
+      padding: 14px 16px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      background: #1b1b22;
+      border: 1px solid #2c2c36;
+      border-radius: 14px;
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+      /* let the whole card be a drag handle, except the buttons */
+      -webkit-app-region: drag;
+    }
+    .title {
+      font-size: 14px;
+      font-weight: 600;
+      color: #f2f2f5;
+      line-height: 1.35;
+    }
+    .subtitle {
+      margin-top: 3px;
+      font-size: 12px;
+      color: #9a9aa6;
+    }
+    .row {
+      display: flex;
+      gap: 8px;
+      -webkit-app-region: no-drag;
+    }
+    button {
+      flex: 1;
+      padding: 8px 10px;
+      font-size: 13px;
+      font-weight: 600;
+      border-radius: 9px;
+      border: 1px solid transparent;
+      cursor: pointer;
+      transition: background 0.12s ease, border-color 0.12s ease;
+    }
+    .primary { background: #d7263d; color: #fff; }
+    .primary:hover { background: #e23950; }
+    .ghost {
+      background: transparent;
+      color: #c7c7d1;
+      border-color: #3a3a45;
+    }
+    .ghost:hover { background: #25252e; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div>
+      <div class="title" id="title">Looks like a call just started</div>
+      <div class="subtitle" id="subtitle">Record this meeting?</div>
+    </div>
+    <div class="row">
+      <button class="primary" id="record-btn">Record</button>
+      <button class="ghost" id="dismiss-btn">Not now</button>
+      <button class="ghost" id="keep-btn" style="display:none">Keep recording</button>
+    </div>
+  </div>
+  <script src="prompt.js"></script>
+</body>
+</html>

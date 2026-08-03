@@ -1,0 +1,92 @@
+{
+    "name": "unlimeety-desktop",
+    "version": "1.2.5",
+    "description": "Companion desktop app for Unlimeety",
+    "main": "main.js",
+    "scripts": {
+        "start": "electron .",
+        "dev": "electron . --dev",
+        "build:helper": "cd live-helper && swift build -c release && codesign --force --sign \"Developer ID Application\" --options runtime --entitlements ../build/entitlements.mac.inherit.plist --timestamp .build/release/unlimeety-live",
+        "build:mac": "npm run build:helper && electron-builder --mac --arm64",
+        "build:mac:arm64": "npm run build:helper && electron-builder --mac --arm64",
+        "build:mac:intel": "npm run build:helper && electron-builder --mac --x64",
+        "build:mac:universal": "npm run build:helper && electron-builder --mac --arm64 --x64",
+        "build:win": "electron-builder --win",
+        "build:linux": "electron-builder --linux",
+        "build:all": "electron-builder --mac --arm64 --x64 --win --linux"
+    },
+    "build": {
+        "appId": "com.transcriber.desktop",
+        "productName": "Unlimeety",
+        "directories": {
+            "output": "dist"
+        },
+        "files": [
+            "main.js",
+            "preload.js",
+            "renderer/**",
+            "build/**"
+        ],
+        "mac": {
+            "category": "public.app-category.productivity",
+            "target": [
+                {
+                    "target": "dmg"
+                }
+            ],
+            "artifactName": "${productName}-${version}-${arch}.${ext}",
+            "extendInfo": {
+                "NSMicrophoneUsageDescription": "Unlimeety uses the microphone for live transcription.",
+                "NSAudioCaptureUsageDescription": "Unlimeety captures system audio for live transcription.",
+                "NSCalendarsUsageDescription": "Unlimeety reads your calendar to suggest the meeting title and participants.",
+                "NSCalendarsFullAccessUsageDescription": "Unlimeety reads your calendar to suggest the meeting title and participants."
+            },
+            "hardenedRuntime": true,
+            "gatekeeperAssess": false,
+            "notarize": true,
+            "entitlements": "build/entitlements.mac.plist",
+            "entitlementsInherit": "build/entitlements.mac.inherit.plist",
+            "extraFiles": [
+                {
+                    "from": "live-helper/.build/release/unlimeety-live",
+                    "to": "MacOS/unlimeety-live"
+                }
+            ]
+        },
+        "win": {
+            "target": [
+                {
+                    "target": "nsis",
+                    "arch": [
+                        "x64"
+                    ]
+                }
+            ]
+        },
+        "nsis": {
+            "oneClick": false,
+            "allowToChangeInstallationDirectory": true
+        },
+        "linux": {
+            "target": [
+                {
+                    "target": "AppImage",
+                    "arch": [
+                        "x64"
+                    ]
+                }
+            ],
+            "category": "Utility"
+        }
+    },
+    "keywords": [],
+    "author": "",
+    "license": "MIT",
+    "devDependencies": {
+        "electron": "^41.1.1",
+        "electron-builder": "^26.8.1"
+    },
+    "dependencies": {
+        "docx": "^9.7.1"
+    }
+}

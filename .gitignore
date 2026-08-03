@@ -1,0 +1,51 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+out/
+# root-level only — desktop/build/ holds electron-builder config, not output
+/build/
+
+# Chrome extension build artifacts
+*.crx
+*.pem
+*.zip
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment
+.env
+.env.local
+
+# Apple signing material — never commit
+*.p12
+*.p8
+*.cer
+*.certSigningRequest
+*.provisionprofile
+
+# Logs
+*.log
+npm-debug.log*
+
+# Swift / SwiftPM (desktop/live-helper)
+.build/
+.swiftpm/
+*.xcodeproj/
+
+# Claude Code local config
+.claude/
+.agents/
+
+# Design handoff artefacts (work-in inputs, not part of product)
+design_handoff_summarize_record/
+meeting-transcriber-record-design.zip

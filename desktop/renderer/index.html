@@ -1,0 +1,1325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'" />
+  <title>Unlimeety</title>
+  <script src="theme-init.js"></script>
+  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="live/live.css" />
+  <link rel="stylesheet" href="record/record.css" />
+  <link rel="stylesheet" href="theme-light.css" />
+</head>
+<body>
+  <!-- Toolbar -->
+  <header id="toolbar">
+    <div id="toolbar-left">
+      <!-- Library sidebar toggle -->
+      <button class="btn btn-ghost btn-icon" id="btn-library" title="Meetings library">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="3" width="18" height="18" rx="2"/>
+          <line x1="9" y1="3" x2="9" y2="21"/>
+        </svg>
+      </button>
+
+      <!-- Tab switcher: Editor / Live -->
+      <div id="tab-switch" role="tablist">
+        <button class="tab-btn tab-active" data-tab="editor" role="tab" title="Transcript editor">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+          </svg>
+          Transcripts
+        </button>
+        <button class="tab-btn" data-tab="record" role="tab" title="Record audio (transcribe later)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="none">
+            <circle cx="12" cy="12" r="6"/>
+          </svg>
+          Record
+        </button>
+        <button class="tab-btn" data-tab="live" role="tab" title="Live transcription">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="3" fill="currentColor" stroke="none"/>
+            <circle cx="12" cy="12" r="8"/>
+          </svg>
+          Live
+        </button>
+      </div>
+
+      <button id="recording-indicator" class="hidden" title="Recording in progress — click to return">
+        <span class="rec-indicator-dot"></span>
+        <span>Recording</span>
+      </button>
+      <button id="live-recording-indicator" class="hidden" title="Live transcription in progress — click to return">
+        <span class="rec-indicator-dot"></span>
+        <span>Live</span>
+      </button>
+    </div>
+
+    <div id="toolbar-right">
+      <button id="cal-smart-btn" title="Suggest a recording mode from your calendar">📅 From calendar</button>
+
+      <button class="btn btn-ghost btn-icon" id="btn-settings" title="Settings">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"/>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg>
+      </button>
+
+      <!-- Summarize placeholder — hidden until backend is ready -->
+      <button class="btn btn-primary hidden" id="btn-summarize" title="Summarize transcript" disabled>
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"/>
+          <line x1="12" y1="8" x2="12" y2="12"/>
+          <line x1="12" y1="16" x2="12.01" y2="16"/>
+        </svg>
+        Summarize
+      </button>
+
+    </div>
+  </header>
+
+  <!-- Drop Zone overlay -->
+  <div id="drop-overlay" class="hidden">
+    <div id="drop-message">
+      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+        <polyline points="17 8 12 3 7 8"/>
+        <line x1="12" y1="3" x2="12" y2="15"/>
+      </svg>
+      <span>Drop transcript file to open</span>
+    </div>
+  </div>
+
+  <!-- Main editor area (Editor tab) -->
+  <main id="editor-container" class="tab-panel">
+
+    <!-- Library panel (left) -->
+    <aside id="library-panel">
+
+      <!-- Header: title + count + New CTA -->
+      <div class="library-header">
+        <div class="library-header-left">
+          <span class="library-title">Meetings</span>
+          <span id="library-count" class="library-count"></span>
+        </div>
+        <button id="btn-open" class="meeting-open-btn" title="Open transcript file (⌘O)">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+          </svg>
+          Open
+        </button>
+        <button id="btn-meeting-new" class="meeting-new-btn" title="New meeting">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="12" y1="5" x2="12" y2="19"/>
+            <line x1="5" y1="12" x2="19" y2="12"/>
+          </svg>
+          New
+        </button>
+      </div>
+
+      <!-- Search -->
+      <div class="library-search">
+        <svg class="library-search-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="11" cy="11" r="7"/>
+          <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+        </svg>
+        <input id="meeting-search" type="text" placeholder="Search meetings, speakers…" autocomplete="off" spellcheck="false" />
+        <span class="library-search-kbd">⌘K</span>
+      </div>
+
+      <!-- Filter chips — "Audio" chip lands once IPC reports audio artifacts (Phase 4). -->
+      <div class="library-filters" role="tablist">
+        <button class="filter-chip active" data-filter="all" role="tab">All <span class="filter-count" data-count="all">0</span></button>
+        <button class="filter-chip" data-filter="transcribed" role="tab">Transcribed <span class="filter-count" data-count="transcribed">0</span></button>
+        <button class="filter-chip" data-filter="summarized" role="tab">Summarized <span class="filter-count" data-count="summarized">0</span></button>
+      </div>
+
+      <!-- Meetings list -->
+      <div id="library-list">
+        <div id="library-empty" class="library-empty hidden">
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+          </svg>
+          <p>No meetings yet</p>
+        </div>
+      </div>
+
+    </aside>
+
+    <!-- Editor wrap (flex: 1) -->
+    <div id="editor-wrap">
+      <!-- Editor action bar: Cancel changes / Save As — visible only when a file is open -->
+      <div id="editor-toolbar" class="hidden">
+        <button class="btn btn-ghost btn-sm" id="btn-save" title="Cancel changes" disabled>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 7v6h6"/>
+            <path d="M3 13a9 9 0 1 0 3-7.7L3 8"/>
+          </svg>
+          Cancel changes
+        </button>
+        <button class="btn btn-ghost btn-sm" id="btn-save-as" title="Save As (⌘⇧S)" disabled>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
+            <polyline points="17 21 17 13 7 13 7 21"/>
+            <polyline points="7 3 7 8 15 8"/>
+            <line x1="12" y1="17" x2="12" y2="11"/>
+            <line x1="9" y1="14" x2="15" y2="14"/>
+          </svg>
+          Save As…
+        </button>
+        <div class="export-wrap">
+          <button class="btn btn-ghost btn-sm" id="btn-export" title="Export to PDF / DOCX" disabled>
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="7 10 12 15 17 10"/>
+              <line x1="12" y1="15" x2="12" y2="3"/>
+            </svg>
+            Export
+          </button>
+          <div class="export-menu hidden" id="export-menu-editor">
+            <button type="button" data-export="transcript" data-format="pdf">PDF</button>
+            <button type="button" data-export="transcript" data-format="docx">DOCX</button>
+          </div>
+        </div>
+        <div class="toolbar-sep"></div>
+        <button class="btn btn-ghost btn-sm" id="btn-toggle-view" title="Switch between view and edit mode">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+            <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+          </svg>
+          Edit
+        </button>
+      </div>
+
+      <!-- Audio player — visible only when the open transcript has audio -->
+      <div id="audio-player" class="hidden">
+        <audio id="audio-el" preload="metadata"></audio>
+        <button id="ap-play" class="ap-play" title="Play / Pause">
+          <svg id="ap-icon-play" width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+            <polygon points="5,3 19,12 5,21"/>
+          </svg>
+          <svg id="ap-icon-pause" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" class="hidden">
+            <rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>
+          </svg>
+        </button>
+        <div class="ap-main">
+          <div id="ap-waveform" class="ap-waveform"></div>
+          <span id="ap-time" class="ap-time">0:00 / 0:00</span>
+        </div>
+        <button id="ap-speed" class="ap-speed">1×</button>
+      </div>
+
+      <!-- Transcript view — rendered segments for audio sync, replaces textarea when audio is present -->
+      <div id="transcript-view" class="hidden"></div>
+
+      <!-- Empty state -->
+      <div id="empty-state">
+        <div id="empty-icon">
+          <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+            <line x1="16" y1="13" x2="8" y2="13"/>
+            <line x1="16" y1="17" x2="8" y2="17"/>
+          </svg>
+        </div>
+        <h2>No transcript open</h2>
+        <p>Open a transcript file, paste one in, or drag & drop one here</p>
+        <div class="empty-actions">
+          <button class="btn btn-primary btn-lg" id="btn-open-empty">
+            Open Transcript
+          </button>
+          <button class="btn btn-ghost btn-lg" id="btn-new-empty">
+            Paste Transcript…
+          </button>
+        </div>
+      </div>
+
+      <!-- Editor -->
+      <textarea id="editor" class="hidden" spellcheck="false" placeholder="Start typing…"></textarea>
+    </div>
+
+    <!-- Summary rail (right) — populated by renderSummaryRail() -->
+    <aside id="summary-rail" class="hidden" aria-label="Meeting summary">
+      <div id="summary-rail-body"></div>
+      <div id="summary-rail-footer">
+        <button class="btn-rail-primary" id="btn-rail-resummarize" type="button">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true">
+            <path d="M12 2l1.6 4.6L18 8l-4.4 1.4L12 14l-1.6-4.6L6 8l4.4-1.4L12 2z"/>
+          </svg>
+          <span id="btn-rail-resummarize-label">Summarize</span>
+        </button>
+        <button class="btn-rail-primary" id="btn-rail-ask-ai" type="button" title="Ask AI about this meeting (⌘/)">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+          </svg>
+          Ask AI
+        </button>
+        <div class="rail-footer-icons">
+          <button class="btn-rail-icon" id="btn-rail-share" type="button" data-tooltip="Share" aria-label="Share">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M13 4 L21.5 12 L13 20 V15 C8.5 15 5 16.5 2.7 20.3 C2.4 20.8 1.6 20.6 1.7 20 C2.6 11.5 6.5 9 13 9 Z"/>
+            </svg>
+          </button>
+          <button class="btn-rail-icon" id="btn-rail-followup" type="button" data-tooltip="Draft follow-up" aria-label="Draft follow-up message">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+            </svg>
+          </button>
+          <button class="btn-rail-icon" id="btn-rail-edit" type="button" data-tooltip="Edit summary" aria-label="Edit summary">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12 20h9"/>
+              <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/>
+            </svg>
+          </button>
+          <button class="btn-rail-icon" id="btn-rail-copy" type="button" data-tooltip="Copy" aria-label="Copy summary">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+    </aside>
+
+  </main>
+
+  <!-- Live recording area (Live tab) — fully isolated from the editor -->
+  <main id="live-container" class="tab-panel hidden">
+
+    <!-- Unsupported-OS banner -->
+    <div id="live-unsupported" class="live-banner hidden">
+      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="10"/>
+        <line x1="12" y1="8" x2="12" y2="12"/>
+        <line x1="12" y1="16" x2="12.01" y2="16"/>
+      </svg>
+      <h2>Live recording requires macOS</h2>
+      <p>System-audio capture relies on ScreenCaptureKit, which is only available on macOS 13 or later.</p>
+    </div>
+
+    <!-- Main Live UI -->
+    <div id="live-main" class="hidden">
+
+      <!-- Setup panel (before recording) -->
+      <section id="live-setup">
+        <div class="live-setup-inner">
+          <h2>Live recording</h2>
+          <p class="live-muted">Transcribe your microphone and the call's system audio in real time. Nothing leaves your Mac.</p>
+
+          <div class="live-row">
+            <label class="live-label">Model</label>
+            <!-- Same card style as the Record tab's batch settings; live UI
+                 keeps only the three smallest WhisperKit variants because
+                 real-time transcription cares much more about latency than
+                 about the last few accuracy percent. -->
+            <div id="live-model-grid" class="ts-model-grid live-model-grid">
+              <button type="button" class="ts-model-card" data-model="openai_whisper-tiny" data-speed="1.0" data-quality="0.30" data-realtime="20">
+                <div class="ts-model-top">
+                  <span class="ts-radio"></span>
+                  <span class="ts-model-name">tiny</span>
+                </div>
+                <div class="ts-model-bars">
+                  <div class="ts-bar-row"><span class="ts-bar-label">Speed</span><div class="ts-bar-track"><span class="ts-bar-fill" style="width:100%"></span></div></div>
+                  <div class="ts-bar-row"><span class="ts-bar-label">Quality</span><div class="ts-bar-track"><span class="ts-bar-fill" style="width:30%"></span></div></div>
+                </div>
+                <div class="ts-model-footer"><span>75 MB</span><span class="ts-dim">·</span><span>99 languages</span><span class="ts-spacer"></span><span class="ts-badge-download" data-action="download-model" title="Download model">↓ download</span><span class="ts-model-delete" data-action="delete-model" title="Delete from disk" aria-label="Delete model from disk"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/></svg></span></div>
+              </button>
+              <button type="button" class="ts-model-card is-active" data-model="openai_whisper-base" data-speed="0.95" data-quality="0.48" data-realtime="12">
+                <div class="ts-model-top">
+                  <span class="ts-radio"><span class="ts-radio-dot"></span></span>
+                  <span class="ts-model-name">base</span>
+                  <span class="ts-model-tag is-on">Recommended</span>
+                </div>
+                <div class="ts-model-bars">
+                  <div class="ts-bar-row"><span class="ts-bar-label">Speed</span><div class="ts-bar-track"><span class="ts-bar-fill" style="width:95%"></span></div></div>
+                  <div class="ts-bar-row"><span class="ts-bar-label">Quality</span><div class="ts-bar-track"><span class="ts-bar-fill" style="width:48%"></span></div></div>
+                </div>
+                <div class="ts-model-footer"><span>145 MB</span><span class="ts-dim">·</span><span>99 languages</span><span class="ts-spacer"></span><span class="ts-badge-download" data-action="download-model" title="Download model">↓ download</span><span class="ts-model-delete" data-action="delete-model" title="Delete from disk" aria-label="Delete model from disk"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/></svg></span></div>
+              </button>
+              <button type="button" class="ts-model-card" data-model="openai_whisper-small" data-speed="0.80" data-quality="0.62" data-realtime="8">
+                <div class="ts-model-top">
+                  <span class="ts-radio"></span>
+                  <span class="ts-model-name">small</span>
+                  <span class="ts-model-tag">Best quality</span>
+                </div>
+                <div class="ts-model-bars">
+                  <div class="ts-bar-row"><span class="ts-bar-label">Speed</span><div class="ts-bar-track"><span class="ts-bar-fill" style="width:80%"></span></div></div>
+                  <div class="ts-bar-row"><span class="ts-bar-label">Quality</span><div class="ts-bar-track"><span class="ts-bar-fill" style="width:62%"></span></div></div>
+                </div>
+                <div class="ts-model-footer"><span>480 MB</span><span class="ts-dim">·</span><span>99 languages</span><span class="ts-spacer"></span><span class="ts-badge-download" data-action="download-model" title="Download model">↓ download</span><span class="ts-model-delete" data-action="delete-model" title="Delete from disk" aria-label="Delete model from disk"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/></svg></span></div>
+              </button>
+            </div>
+          </div>
+
+          <div class="live-row">
+            <label class="live-label">Language</label>
+            <div id="live-language" class="ts-seg-wrap">
+              <button type="button" class="ts-seg is-active" data-lang="ru">Russian</button>
+              <button type="button" class="ts-seg" data-lang="en">English</button>
+              <button type="button" class="ts-seg" data-lang="sr">Serbian</button>
+              <button type="button" class="ts-seg" data-lang="auto">Auto-detect</button>
+            </div>
+          </div>
+
+          <div class="live-row">
+            <label class="live-label">Sources</label>
+            <div class="record-sources">
+              <label class="record-source-card" id="live-source-mic">
+                <span class="record-source-icon">🎙</span>
+                <div class="record-source-text">
+                  <div class="record-source-title">Microphone</div>
+                  <div class="record-source-sub">Your voice</div>
+                </div>
+                <input type="checkbox" id="live-src-mic" checked />
+                <span class="record-source-switch"></span>
+              </label>
+              <label class="record-source-card" id="live-source-system">
+                <span class="record-source-icon">🖥</span>
+                <div class="record-source-text">
+                  <div class="record-source-title">System audio</div>
+                  <div class="record-source-sub">Others in the call · captured via ScreenCaptureKit</div>
+                </div>
+                <input type="checkbox" id="live-src-system" checked />
+                <span class="record-source-switch"></span>
+              </label>
+            </div>
+            <p class="live-perm-hint">
+              First launch: macOS will ask for Microphone and Screen Recording permission.
+              After granting Screen Recording you must <strong>fully quit</strong> (Cmd+Q) and relaunch the app.
+              <button type="button" class="live-perm-link" id="live-open-screen-settings">Open Privacy Settings →</button>
+            </p>
+            <details class="live-perm-troubleshoot">
+              <summary>Already enabled but it still doesn't work?</summary>
+              <div class="live-perm-troubleshoot-body">
+                <p>macOS sometimes desyncs between the Privacy &amp; Security toggle and the actual permission state — this happens when the app's signature changes between builds, or when a previous prompt was denied.</p>
+                <p>Reset the saved decisions and grant fresh:</p>
+                <ol>
+                  <li>Quit the app fully (<kbd>Cmd</kbd>+<kbd>Q</kbd>).</li>
+                  <li>Open <strong>Terminal</strong> and run:
+                    <pre><code id="live-tcc-reset-cmd">tccutil reset ScreenCapture com.transcriber.desktop &amp;&amp; tccutil reset Microphone com.transcriber.desktop</code></pre>
+                    <button type="button" class="live-perm-link" id="live-copy-tcc-cmd">Copy command</button>
+                  </li>
+                  <li>Remove the existing <em>Unlimeety</em> entry from <em>Privacy &amp; Security → Screen Recording</em> using the <strong>−</strong> button.</li>
+                  <li>Relaunch the app and click <strong>Allow</strong> on the prompts that appear.</li>
+                </ol>
+              </div>
+            </details>
+          </div>
+
+          <div class="live-row">
+            <label class="live-label" for="live-title">Title</label>
+            <input type="text" id="live-title" class="modal-input" placeholder="optional — defaults to date/time" />
+            <button type="button" id="live-cal-btn" class="cal-pick-btn" title="Fill from calendar">📅 From calendar</button>
+          </div>
+
+          <div id="live-setup-error" class="modal-error-text hidden"></div>
+
+          <div class="live-setup-actions">
+            <button class="btn btn-primary btn-lg" id="live-btn-start">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="6"/></svg>
+              Start recording
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Recording panel (during + after) -->
+      <section id="live-recording" class="hidden">
+        <div class="live-topbar">
+          <div class="live-topbar-left">
+            <span id="live-status-dot" class="live-dot"></span>
+            <span id="live-status-text">Preparing…</span>
+            <span id="live-timer" class="live-timer">00:00</span>
+            <div class="live-meters" id="live-meters">
+              <div class="live-meter" data-source="mic">
+                <span class="live-meter-label">mic</span>
+                <div class="live-level-meter" data-meter="mic">
+                  <span></span><span></span><span></span><span></span><span></span>
+                  <span></span><span></span><span></span><span></span><span></span>
+                </div>
+              </div>
+              <div class="live-meter" data-source="system">
+                <span class="live-meter-label">sys</span>
+                <div class="live-level-meter" data-meter="system">
+                  <span></span><span></span><span></span><span></span><span></span>
+                  <span></span><span></span><span></span><span></span><span></span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="live-topbar-right">
+            <button class="btn btn-ghost hidden" id="live-btn-discard">New recording</button>
+            <button class="btn btn-stop" id="live-btn-stop">
+              <span class="btn-stop-icon" aria-hidden="true"></span>
+              <span>Stop &amp; save</span>
+            </button>
+          </div>
+        </div>
+
+        <div id="live-download" class="live-download hidden">
+          <div class="live-download-label">Downloading model…</div>
+          <div class="live-progress"><div class="live-progress-bar" id="live-progress-bar"></div></div>
+        </div>
+
+        <div id="live-stream-wrap" class="live-stream-wrap">
+          <div id="live-stream" class="live-stream" data-stream="all">
+            <div id="live-stream-empty" class="live-lane-empty">
+              <div class="live-skeleton-row"></div>
+              <div class="live-skeleton-row short"></div>
+              <p class="live-empty-hint">Speak into the mic or play audio in your meeting — transcripts will appear here in real time. Speakers from system audio are labelled <code>S?</code> while recording, then auto-resolved to <code>S1</code>, <code>S2</code>… when you press <strong>Stop &amp; save</strong>.</p>
+            </div>
+          </div>
+          <button type="button" class="live-ask-ai-fab" id="live-btn-ask-ai" disabled title="Ask AI about what's been said so far">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+            </svg>
+            <span>Ask AI</span>
+          </button>
+        </div>
+
+        <footer class="live-explainer">
+          <span class="live-explainer-icon" aria-hidden="true">&#9432;</span>
+          <span>When you press <strong>Stop &amp; save</strong>, system-audio speakers are auto-labeled and the transcript is saved to <code>~/Downloads/Meet_Transcripts/</code>. Everything is processed locally on your Mac.</span>
+          <button type="button" class="live-diag-toggle" id="live-diag-toggle" aria-expanded="false">Diagnostics</button>
+        </footer>
+        <pre class="live-diag-panel hidden" id="live-diag-panel" aria-live="polite"></pre>
+      </section>
+
+    </div>
+  </main>
+
+  <!-- Record-only area (Record tab) — isolated from Editor and Live -->
+  <main id="record-container" class="tab-panel hidden">
+
+    <!-- Unsupported-OS banner -->
+    <div id="record-unsupported" class="live-banner hidden">
+      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="10"/>
+        <line x1="12" y1="8" x2="12" y2="12"/>
+        <line x1="12" y1="16" x2="12.01" y2="16"/>
+      </svg>
+      <h2>Recording requires macOS</h2>
+      <p>System-audio capture relies on ScreenCaptureKit, which is only available on macOS 13 or later.</p>
+    </div>
+
+    <div id="record-main" class="hidden">
+
+      <!-- Sidebar: recordings library + batch CTA -->
+      <aside id="record-sidebar" class="record-sidebar">
+        <div class="record-sb-header">
+          <span>RECORDINGS</span>
+          <span class="record-sb-count" id="record-sb-count">0</span>
+        </div>
+        <div class="record-sb-selection" id="record-sb-selection">
+          <label class="record-sb-master">
+            <input type="checkbox" id="record-sb-master-cb" />
+            <span class="record-sb-master-visual"></span>
+          </label>
+          <span class="record-sb-summary-label" id="record-sb-summary-label">0 selected</span>
+          <button type="button" class="record-sb-link" data-action="select-all" id="record-sb-select-all">Select all</button>
+          <button type="button" class="record-sb-link" data-action="clear" id="record-sb-clear">Clear</button>
+          <button type="button" class="record-sb-link record-sb-link-danger hidden" data-action="delete" id="record-sb-delete">Delete</button>
+        </div>
+        <div id="record-sb-list" class="record-sb-list"></div>
+        <div id="record-sb-empty" class="record-sb-empty hidden">
+          No recordings yet.
+        </div>
+        <!-- Inline audio player — visible only while a recording is loaded -->
+        <div id="record-ap" class="record-ap hidden">
+          <audio id="record-audio-el" preload="metadata"></audio>
+          <button id="record-ap-play" class="ap-play" title="Play / Pause">
+            <svg id="record-ap-icon-play" width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+              <polygon points="5,3 19,12 5,21"/>
+            </svg>
+            <svg id="record-ap-icon-pause" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" class="hidden">
+              <rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>
+            </svg>
+          </button>
+          <div class="ap-main">
+            <div id="record-ap-waveform" class="ap-waveform"></div>
+            <span id="record-ap-time" class="ap-time">0:00 / 0:00</span>
+          </div>
+          <button id="record-ap-speed" class="ap-speed">1×</button>
+        </div>
+        <div class="record-sb-cta">
+          <button id="record-btn-transcribe-all" class="record-sb-cta-btn" disabled>
+            <span class="record-sb-cta-spark">✦</span>
+            <span id="record-sb-cta-label">Select recordings to transcribe</span>
+          </button>
+          <div class="record-sb-cta-meta">
+            <span id="record-sb-cta-eta">—</span>
+            <button type="button" class="record-sb-link" id="record-sb-settings">Settings…</button>
+          </div>
+        </div>
+      </aside>
+
+      <!-- Right-pane container for the four phase sections -->
+      <div class="record-main-pane">
+
+      <!-- Setup (idle) -->
+      <section id="record-setup">
+        <div id="record-trans-active-banner" class="record-trans-active-banner hidden">
+          <span class="record-trans-active-dot"></span>
+          <span>Transcription in progress</span>
+          <button class="btn btn-ghost btn-xs" id="record-btn-view-queue">View queue</button>
+        </div>
+        <div class="record-setup-scroll">
+          <h2 class="record-setup-title">Record audio <kbd class="record-kbd">⌘R</kbd></h2>
+          <p class="record-setup-desc">Capture audio for transcription. You can record your microphone, system audio, or both.</p>
+
+          <div class="record-section">
+            <div class="record-section-label">SOURCES</div>
+            <div class="record-sources">
+              <label class="record-source-card" id="record-source-mic">
+                <span class="record-source-icon">🎙</span>
+                <div class="record-source-text">
+                  <div class="record-source-title">Microphone</div>
+                  <div class="record-source-sub">Your voice · MacBook Pro Microphone</div>
+                </div>
+                <input type="checkbox" id="record-src-mic" checked />
+                <span class="record-source-switch"></span>
+              </label>
+              <label class="record-source-card" id="record-source-system">
+                <span class="record-source-icon">🖥</span>
+                <div class="record-source-text">
+                  <div class="record-source-title">System audio</div>
+                  <div class="record-source-sub">Others in the call · captured via ScreenCaptureKit, diarized later</div>
+                </div>
+                <input type="checkbox" id="record-src-system" checked />
+                <span class="record-source-switch"></span>
+              </label>
+            </div>
+          </div>
+
+          <div class="record-section">
+            <div class="record-section-label">TITLE — OPTIONAL</div>
+            <input id="record-title" class="modal-input record-title-input" type="text" placeholder="defaults to date/time, e.g. Recording — 2026-05-13 10:42" />
+            <button type="button" id="record-cal-btn" class="cal-pick-btn" title="Fill from calendar">📅 From calendar</button>
+          </div>
+
+          <div class="record-section">
+            <div class="record-section-label">SAVE TO</div>
+            <div class="record-folder-row">
+              <span class="record-folder-path" id="record-folder-label">~/Downloads/Meet_Transcripts</span>
+              <button type="button" id="record-btn-change-folder" class="record-folder-change">Change…</button>
+            </div>
+          </div>
+
+          <div class="record-perm-strip">
+            <div class="record-perm-head"><span class="record-perm-dot"></span><span>Permissions granted</span></div>
+            <div class="record-perm-body">Microphone ✓ · Screen Recording ✓ · Calendar ✓ · <button type="button" id="record-open-screen-settings" class="record-perm-link">Open Privacy Settings →</button></div>
+          </div>
+
+          <div id="record-setup-error" class="record-setup-error hidden"></div>
+
+          <div class="record-action-row">
+            <button id="record-btn-start" class="btn record-btn-start"><span class="record-btn-start-dot"></span>Start recording</button>
+            <button id="record-btn-import" class="btn btn-ghost record-btn-import">⬆ Import audio file…</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Recording in progress -->
+      <section id="record-recording" class="hidden">
+        <div class="record-rec-topbar">
+          <div class="record-rec-topbar-left">
+            <span class="record-rec-dot" id="record-status-dot"></span>
+            <span class="record-rec-label">RECORDING</span>
+            <span class="record-rec-timer tnum" id="record-timer">00:00:00</span>
+            <span id="record-status-text" class="hidden"></span>
+            <div id="record-meters" class="record-rec-meters">
+              <div class="record-meter-group" data-source="mic">
+                <span class="record-meter-label">mic</span>
+                <div class="live-meter live-level-meter" data-meter="mic">
+                  <span></span><span></span><span></span><span></span><span></span>
+                  <span></span><span></span><span></span><span></span><span></span>
+                </div>
+              </div>
+              <div class="record-meter-group" data-source="system">
+                <span class="record-meter-label">sys</span>
+                <div class="live-meter live-level-meter" data-meter="system">
+                  <span></span><span></span><span></span><span></span><span></span>
+                  <span></span><span></span><span></span><span></span><span></span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="record-rec-topbar-right">
+            <button class="btn record-btn-stop" id="record-btn-stop"><span class="record-btn-stop-sq"></span><span>Stop &amp; save</span></button>
+          </div>
+        </div>
+        <div class="record-rec-hero">
+          <div class="record-pulse-wrap">
+            <div class="record-pulse-ring"></div>
+            <div class="record-pulse-ring"></div>
+            <div class="record-pulse-ring"></div>
+            <div class="record-pulse-core"></div>
+          </div>
+          <div class="record-rec-hero-title">Recording to disk…</div>
+          <div class="record-waveform" id="record-waveform"></div>
+          <div class="record-file-card">
+            <div class="record-file-row"><div class="record-file-key">FILE</div><div class="record-file-val" id="record-file-name">—</div></div>
+            <div class="record-file-row"><div class="record-file-key">PATH</div><div class="record-file-val" id="record-output-path">—</div></div>
+            <div class="record-file-row"><div class="record-file-key">SIZE</div><div class="record-file-val" id="record-file-size">—</div></div>
+            <div class="record-file-row"><div class="record-file-key">SPEAKERS</div><div class="record-file-val" id="record-file-speakers">—</div></div>
+          </div>
+        </div>
+        <div class="record-rec-footer">ⓘ Audio streams directly to disk — no live transcription. After Stop &amp; save, you can transcribe locally with Whisper.</div>
+      </section>
+
+      <!-- Transcribe settings (Variant C — batch / single-file confirmation) -->
+      <section id="record-transcribe-settings" class="hidden">
+        <div class="ts-scroll">
+          <div class="ts-inner">
+
+            <!-- Header -->
+            <div class="ts-header">
+              <div class="ts-header-text">
+                <div class="ts-crumb">
+                  <button class="ts-crumb-link" id="ts-crumb-back">Record</button>
+                  <span class="ts-crumb-sep">›</span>
+                  <span class="ts-crumb-tail"><span id="ts-crumb-count">0</span> recordings</span>
+                </div>
+                <h2 class="ts-title">Transcription settings</h2>
+                <p class="ts-muted">These settings apply to every recording in the batch. Runs locally on your Mac — nothing leaves the machine.</p>
+              </div>
+              <kbd class="record-kbd ts-kbd">⌘⏎</kbd>
+            </div>
+
+            <!-- Batch summary -->
+            <div class="ts-batch-card">
+              <div class="ts-batch-top">
+                <span id="ts-batch-count" class="ts-batch-count">0</span>
+                <div class="ts-batch-headtext">
+                  <div class="ts-batch-title">recordings in this batch</div>
+                  <div class="ts-batch-sub" id="ts-batch-sub">— of audio · processed sequentially</div>
+                </div>
+                <button type="button" id="ts-edit-selection" class="ts-mini-btn">Edit selection…</button>
+              </div>
+              <div id="ts-batch-list" class="ts-batch-list"></div>
+            </div>
+
+            <!-- Preset bar -->
+            <div class="ts-preset-bar">
+              <span class="ts-preset-label">Preset</span>
+              <select id="ts-preset-select" class="ts-preset-select">
+                <option value="">Custom (unsaved)</option>
+              </select>
+              <span id="ts-preset-status" class="ts-preset-status"></span>
+              <span class="ts-spacer"></span>
+              <button type="button" id="ts-preset-delete" class="ts-mini-btn" disabled>Delete</button>
+            </div>
+
+            <!-- 01 Model -->
+            <div class="ts-sec">
+              <div class="ts-sec-head"><span class="ts-sec-kicker">01</span><h3 class="ts-sec-title">Model</h3></div>
+              <div class="ts-sec-hint">Bigger models are slower but more accurate. All models run locally with Metal acceleration.</div>
+            </div>
+            <div id="ts-model-grid" class="ts-model-grid">
+              <button type="button" class="ts-model-card" data-model="openai_whisper-large-v3_turbo" data-speed="0.92" data-quality="0.88" data-realtime="6">
+                <div class="ts-model-top">
+                  <span class="ts-radio"></span>
+                  <span class="ts-model-name">large-v3 turbo</span>
+                </div>
+                <div class="ts-model-bars">
+                  <div class="ts-bar-row"><span class="ts-bar-label">Speed</span><div class="ts-bar-track"><span class="ts-bar-fill" style="width:92%"></span></div></div>
+                  <div class="ts-bar-row"><span class="ts-bar-label">Quality</span><div class="ts-bar-track"><span class="ts-bar-fill" style="width:88%"></span></div></div>
+                </div>
+                <div class="ts-model-footer"><span>1.5 GB</span><span class="ts-dim">·</span><span>99 languages</span><span class="ts-spacer"></span><span class="ts-badge-installed">✓ installed</span><span class="ts-model-delete" data-action="delete-model" title="Delete from disk" aria-label="Delete model from disk"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/></svg></span></div>
+              </button>
+              <button type="button" class="ts-model-card is-active" data-model="openai_whisper-large-v3" data-speed="0.45" data-quality="0.98" data-realtime="3">
+                <div class="ts-model-top">
+                  <span class="ts-radio"><span class="ts-radio-dot"></span></span>
+                  <span class="ts-model-name">large-v3</span>
+                  <span class="ts-model-tag is-on">Recommended</span>
+                </div>
+                <div class="ts-model-bars">
+                  <div class="ts-bar-row"><span class="ts-bar-label">Speed</span><div class="ts-bar-track"><span class="ts-bar-fill" style="width:45%"></span></div></div>
+                  <div class="ts-bar-row"><span class="ts-bar-label">Quality</span><div class="ts-bar-track"><span class="ts-bar-fill" style="width:98%"></span></div></div>
+                </div>
+                <div class="ts-model-footer"><span>2.9 GB</span><span class="ts-dim">·</span><span>99 languages</span><span class="ts-spacer"></span><span class="ts-badge-installed">✓ installed</span><span class="ts-model-delete" data-action="delete-model" title="Delete from disk" aria-label="Delete model from disk"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/></svg></span></div>
+              </button>
+              <button type="button" class="ts-model-card" data-model="openai_whisper-medium" data-speed="0.65" data-quality="0.78" data-realtime="4">
+                <div class="ts-model-top">
+                  <span class="ts-radio"></span>
+                  <span class="ts-model-name">medium</span>
+                </div>
+                <div class="ts-model-bars">
+                  <div class="ts-bar-row"><span class="ts-bar-label">Speed</span><div class="ts-bar-track"><span class="ts-bar-fill" style="width:65%"></span></div></div>
+                  <div class="ts-bar-row"><span class="ts-bar-label">Quality</span><div class="ts-bar-track"><span class="ts-bar-fill" style="width:78%"></span></div></div>
+                </div>
+                <div class="ts-model-footer"><span>1.5 GB</span><span class="ts-dim">·</span><span>99 languages</span><span class="ts-spacer"></span><span class="ts-badge-installed">✓ installed</span><span class="ts-model-delete" data-action="delete-model" title="Delete from disk" aria-label="Delete model from disk"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/></svg></span></div>
+              </button>
+              <button type="button" class="ts-model-card" data-model="openai_whisper-small" data-speed="0.80" data-quality="0.62" data-realtime="8">
+                <div class="ts-model-top">
+                  <span class="ts-radio"></span>
+                  <span class="ts-model-name">small</span>
+                </div>
+                <div class="ts-model-bars">
+                  <div class="ts-bar-row"><span class="ts-bar-label">Speed</span><div class="ts-bar-track"><span class="ts-bar-fill" style="width:80%"></span></div></div>
+                  <div class="ts-bar-row"><span class="ts-bar-label">Quality</span><div class="ts-bar-track"><span class="ts-bar-fill" style="width:62%"></span></div></div>
+                </div>
+                <div class="ts-model-footer"><span>480 MB</span><span class="ts-dim">·</span><span>99 languages</span><span class="ts-spacer"></span><span class="ts-badge-download" data-action="download-model" title="Download model">↓ download</span><span class="ts-model-delete" data-action="delete-model" title="Delete from disk" aria-label="Delete model from disk"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/></svg></span></div>
+              </button>
+              <button type="button" class="ts-model-card" data-model="openai_whisper-base" data-speed="0.95" data-quality="0.48" data-realtime="12">
+                <div class="ts-model-top">
+                  <span class="ts-radio"></span>
+                  <span class="ts-model-name">base</span>
+                </div>
+                <div class="ts-model-bars">
+                  <div class="ts-bar-row"><span class="ts-bar-label">Speed</span><div class="ts-bar-track"><span class="ts-bar-fill" style="width:95%"></span></div></div>
+                  <div class="ts-bar-row"><span class="ts-bar-label">Quality</span><div class="ts-bar-track"><span class="ts-bar-fill" style="width:48%"></span></div></div>
+                </div>
+                <div class="ts-model-footer"><span>142 MB</span><span class="ts-dim">·</span><span>99 languages</span><span class="ts-spacer"></span><span class="ts-badge-download" data-action="download-model" title="Download model">↓ download</span><span class="ts-model-delete" data-action="delete-model" title="Delete from disk" aria-label="Delete model from disk"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/></svg></span></div>
+              </button>
+              <button type="button" class="ts-model-card" data-model="openai_whisper-tiny" data-speed="1.0" data-quality="0.30" data-realtime="20">
+                <div class="ts-model-top">
+                  <span class="ts-radio"></span>
+                  <span class="ts-model-name">tiny</span>
+                  <span class="ts-model-tag">Draft mode</span>
+                </div>
+                <div class="ts-model-bars">
+                  <div class="ts-bar-row"><span class="ts-bar-label">Speed</span><div class="ts-bar-track"><span class="ts-bar-fill" style="width:100%"></span></div></div>
+                  <div class="ts-bar-row"><span class="ts-bar-label">Quality</span><div class="ts-bar-track"><span class="ts-bar-fill" style="width:30%"></span></div></div>
+                </div>
+                <div class="ts-model-footer"><span>74 MB</span><span class="ts-dim">·</span><span>99 languages</span><span class="ts-spacer"></span><span class="ts-badge-download" data-action="download-model" title="Download model">↓ download</span><span class="ts-model-delete" data-action="delete-model" title="Delete from disk" aria-label="Delete model from disk"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2"/></svg></span></div>
+              </button>
+            </div>
+
+            <!-- 02 Language -->
+            <div class="ts-sec">
+              <div class="ts-sec-head"><span class="ts-sec-kicker">02</span><h3 class="ts-sec-title">Language</h3></div>
+              <div class="ts-sec-hint">Pick a language explicitly — picking up-front avoids detection drift on the first 30 seconds and makes runs reproducible across the batch.</div>
+            </div>
+            <div class="ts-lang-row">
+              <div id="ts-lang-seg" class="ts-seg-wrap">
+                <button type="button" class="ts-seg is-active" data-lang="ru">Russian</button>
+                <button type="button" class="ts-seg" data-lang="en">English</button>
+                <button type="button" class="ts-seg" data-lang="sr">Serbian</button>
+                <button type="button" class="ts-seg" data-lang="es">Spanish</button>
+                <button type="button" class="ts-seg" data-lang="de">German</button>
+                <button type="button" class="ts-seg" data-lang="fr">French</button>
+                <button type="button" class="ts-seg is-dim" data-lang="more">More…</button>
+              </div>
+            </div>
+
+            <!-- 03 Diarization -->
+            <div class="ts-sec">
+              <div class="ts-sec-head"><span class="ts-sec-kicker">03</span><h3 class="ts-sec-title">Speaker diarization</h3></div>
+              <div class="ts-sec-hint">Group lines by who's speaking. Voices are clustered as S1, S2…</div>
+            </div>
+            <div class="ts-dia-card">
+              <label class="ts-dia-top">
+                <div class="ts-dia-text">
+                  <div class="ts-dia-title">Diarize speakers</div>
+                  <div class="ts-dia-sub">pyannote 3.1 · runs after Whisper · adds ~30% to total time</div>
+                </div>
+                <input type="checkbox" id="ts-diarize-toggle" checked />
+                <span class="ts-switch"></span>
+              </label>
+              <div class="ts-dia-inner" id="ts-dia-inner">
+                <div class="ts-dia-field">
+                  <label class="ts-field-tiny">Expected speakers</label>
+                  <div id="ts-spk-pills" class="ts-spk-row">
+                    <button type="button" class="ts-spk-pill" data-spk="auto">Auto</button>
+                    <button type="button" class="ts-spk-pill" data-spk="2">2</button>
+                    <button type="button" class="ts-spk-pill is-active" data-spk="3">3</button>
+                    <button type="button" class="ts-spk-pill" data-spk="4">4</button>
+                    <button type="button" class="ts-spk-pill" data-spk="5">5</button>
+                    <button type="button" class="ts-spk-pill" data-spk="6+">6+</button>
+                  </div>
+                </div>
+                <label class="ts-check-row">
+                  <input type="checkbox" id="ts-merge-adjacent" checked />
+                  <span class="ts-check-visual"></span>
+                  <div>
+                    <div class="ts-check-title">Merge adjacent same-speaker turns</div>
+                    <div class="ts-check-sub">collapses 1–2s breaths into a single bubble</div>
+                  </div>
+                </label>
+              </div>
+            </div>
+
+            <!-- Advanced -->
+            <details class="ts-advanced">
+              <summary class="ts-adv-sum">
+                <span class="ts-adv-chev">›</span>
+                <span>Advanced</span>
+                <span class="ts-adv-hint">VAD · prompt · temperature</span>
+              </summary>
+              <div class="ts-adv-body">
+                <div>
+                  <label class="ts-field-tiny" for="ts-initial-prompt">Initial prompt<span class="ts-adv-opt">— optional</span></label>
+                  <textarea id="ts-initial-prompt" class="ts-textarea" rows="3" placeholder="Leave empty (recommended)"></textarea>
+                  <div class="ts-adv-caption">Best left empty. Any text here currently makes Whisper drop or garble speech — even a natural sentence can wipe the transcript, and a keyword list cuts it by half or more. Use only experimentally.</div>
+                </div>
+                <div>
+                  <label class="ts-field-tiny" for="ts-temperature">Temperature<span class="ts-adv-opt" id="ts-temperature-val">· 0.0</span></label>
+                  <input type="range" id="ts-temperature" class="ts-slider" min="0" max="1" step="0.05" value="0" />
+                  <div class="ts-adv-caption">0 = deterministic. Raise to escape repetition loops.</div>
+                </div>
+                <label class="ts-check-row">
+                  <input type="checkbox" id="ts-vad-filter" checked />
+                  <span class="ts-check-visual"></span>
+                  <div>
+                    <div class="ts-check-title">VAD filter (Silero)</div>
+                    <div class="ts-check-sub">skip silence — usually saves 10–15% on calls</div>
+                  </div>
+                </label>
+              </div>
+            </details>
+
+            <div id="ts-error" class="record-setup-error ts-error hidden"></div>
+
+            <!-- Footer -->
+            <div class="ts-footer">
+              <div class="ts-eta-box">
+                <div class="ts-eta-top"><span class="ts-eta-sparkle">✦</span><span>Estimated <b id="ts-eta-total">—</b> for the batch</span></div>
+                <div class="ts-eta-sub" id="ts-eta-sub">— · large-v3 turbo · ru · diarize 3 spk · ~6× realtime</div>
+              </div>
+              <span class="ts-spacer"></span>
+              <button type="button" class="btn btn-ghost" id="ts-btn-save-preset">Save as preset…</button>
+              <button type="button" class="btn btn-ghost ts-btn-cancel" id="ts-btn-cancel">Cancel</button>
+              <button type="button" class="btn btn-primary ts-btn-go" id="ts-btn-transcribe"><span class="ts-eta-sparkle">✦</span> <span id="ts-btn-transcribe-label">Transcribe</span></button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Transcribing -->
+      <section id="record-transcribing" class="hidden">
+        <div class="live-topbar">
+          <div class="live-topbar-left">
+            <span id="record-trans-dot" class="live-dot dot-loading"></span>
+            <span id="record-trans-status">Loading model…</span>
+          </div>
+          <div class="live-topbar-right">
+            <button class="btn btn-ghost" id="record-btn-new-recording">New recording</button>
+            <button class="btn btn-ghost" id="record-btn-cancel-trans">
+              <span>Cancel</span>
+            </button>
+          </div>
+        </div>
+
+        <div id="record-trans-download" class="live-download hidden">
+          <div class="live-download-label">Downloading model…</div>
+          <div class="live-progress"><div class="live-progress-bar" id="record-trans-progress-bar"></div></div>
+        </div>
+
+        <div id="record-trans-queue" class="record-trans-queue hidden">
+          <div class="record-trans-now">
+            <span class="record-trans-now-label">NOW</span>
+            <span id="record-trans-now-file" class="record-trans-now-file">—</span>
+          </div>
+          <div id="record-trans-pending" class="record-trans-pending hidden">
+            <span class="record-trans-pending-label">NEXT</span>
+            <ul id="record-trans-pending-list" class="record-trans-pending-list"></ul>
+          </div>
+        </div>
+
+        <div class="live-stream-wrap">
+          <div id="record-trans-stream" class="live-stream"></div>
+        </div>
+
+        <footer class="live-explainer">
+          <span class="live-explainer-icon" aria-hidden="true">&#9432;</span>
+          <span>Transcription runs locally via WhisperKit + SpeakerKit. The result will be saved to <code>~/Downloads/Meet_Transcripts/</code>.</span>
+        </footer>
+      </section>
+
+      </div>
+    </div>
+  </main>
+
+  <!-- Status Bar -->
+  <footer id="status-bar">
+    <span id="status-path">No file open</span>
+    <div id="status-right">
+      <span id="status-words">–</span>
+      <span class="status-divider">·</span>
+      <span id="status-lines">–</span>
+      <span class="status-divider">·</span>
+      <span id="status-dirty" class="hidden status-dirty">Unsaved changes</span>
+      <span id="status-saved" class="status-saved">Saved</span>
+    </div>
+  </footer>
+
+  <!-- New Transcript Modal -->
+  <div id="new-modal" class="modal-overlay hidden">
+    <div class="modal-box">
+      <div class="modal-header">
+        <span class="modal-title">New transcript</span>
+        <button class="modal-close-btn" id="new-modal-close" title="Close">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="modal-row">
+          <label class="modal-label" for="new-title-input">Title</label>
+          <input type="text" id="new-title-input" class="modal-input" placeholder="e.g. Product review — 2026-04-20" />
+          <button type="button" id="new-cal-btn" class="cal-pick-btn" title="Fill from calendar">📅 From calendar</button>
+        </div>
+        <div class="modal-row">
+          <label class="modal-label" for="new-participants-input">Participants</label>
+          <input type="text" id="new-participants-input" class="modal-input" placeholder="optional, comma-separated" />
+        </div>
+        <label class="modal-label" for="new-content-input">Transcript</label>
+        <textarea id="new-content-input" class="modal-textarea" rows="12" spellcheck="false" placeholder="Paste the transcript here…"></textarea>
+        <div id="new-modal-error" class="modal-error-text hidden" style="margin-top:10px"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" id="new-modal-cancel">Cancel</button>
+        <button class="btn btn-ghost" id="new-modal-create">Create</button>
+        <button class="btn btn-primary" id="new-modal-create-summarize">Create & Summarize</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Summarize Modal -->
+  <div id="summarize-modal" class="modal-overlay hidden">
+    <div class="modal-box">
+
+      <!-- Header (always visible) -->
+      <div class="modal-header">
+        <span class="modal-title" id="modal-title">Summarize meeting</span>
+        <button class="modal-close-btn" id="modal-close" title="Close">✕</button>
+      </div>
+
+      <!-- View: prompt editing -->
+      <div id="modal-view-prompt">
+        <div class="modal-body">
+          <div id="modal-busy-banner" class="modal-busy-banner hidden">
+            Wait for the current summarization to finish.
+          </div>
+          <div class="preset-segmented" id="modal-preset-segmented" role="tablist">
+            <button class="preset-segment" data-preset-id="meeting" aria-selected="true" role="tab">Meeting</button>
+            <button class="preset-segment" data-preset-id="daily" role="tab">Daily</button>
+            <button class="preset-segment" data-preset-id="one-on-one" role="tab">1-1</button>
+            <button class="preset-segment" data-preset-id="interview" role="tab">Interview</button>
+            <span class="preset-more-wrap">
+              <button class="preset-segment preset-more" data-preset-id="__more" role="tab" aria-haspopup="true" aria-expanded="false"><span class="preset-more-label">More</span><span class="preset-more-caret" aria-hidden="true">▾</span></button>
+              <div class="preset-menu hidden" id="modal-preset-menu" role="menu">
+                <button class="preset-menu-item" data-preset-id="retro" role="menuitem">Retro</button>
+                <button class="preset-menu-item" data-preset-id="project" role="menuitem">Project</button>
+                <button class="preset-menu-item" data-preset-id="negotiations" role="menuitem">Negotiations</button>
+              </div>
+            </span>
+            <button class="preset-segment" data-preset-id="custom" role="tab">Custom</button>
+          </div>
+          <div class="modal-prompt-label-row">
+            <label class="modal-label" for="modal-prompt-input">PROMPT</label>
+            <span class="modal-prompt-counter" id="modal-prompt-counter">0 chars · 0 lines</span>
+          </div>
+          <textarea id="modal-prompt-input" class="modal-textarea" rows="7" spellcheck="false"></textarea>
+          <div class="modal-row modal-folder-row">
+            <label class="modal-label">SAVE SUMMARY TO</label>
+            <span id="modal-folder-label" class="modal-folder-label">next to transcript</span>
+            <button class="btn btn-ghost btn-sm" id="modal-btn-change-folder">Change…</button>
+          </div>
+          <div class="modal-chip-strip" id="modal-chip-strip"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-ghost" id="modal-btn-cancel">Cancel</button>
+          <span class="modal-footer-hint" id="modal-footer-hint">Claude Code</span>
+          <button class="btn btn-primary" id="modal-btn-run">✦ Summarize</button>
+        </div>
+      </div>
+
+      <!-- View: loading -->
+      <div id="modal-view-loading" class="hidden">
+        <div class="modal-body modal-loading">
+          <div class="modal-spinner"></div>
+          <span id="modal-loading-text">Reading the transcript…</span>
+        </div>
+      </div>
+
+      <!-- View: result -->
+      <div id="modal-view-result" class="hidden">
+        <div class="modal-body">
+          <div class="smr-result-header">
+            <span class="smr-check" aria-hidden="true">✓</span>
+            <div>
+              <div class="smr-result-title">Summary ready</div>
+              <div class="smr-result-subtitle" id="modal-result-subtitle"></div>
+            </div>
+          </div>
+          <div id="modal-result-body" class="smr-result-body"></div>
+          <div id="modal-result-text" class="hidden"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-ghost" id="modal-btn-copy">Copy</button>
+          <button class="btn btn-ghost" id="modal-btn-back">← Edit prompt</button>
+          <span style="flex:1"></span>
+          <button class="btn btn-ghost" id="modal-btn-save-open">Save &amp; open</button>
+          <button class="btn btn-primary" id="modal-btn-done">Done</button>
+        </div>
+      </div>
+
+      <!-- View: error -->
+      <div id="modal-view-error" class="hidden">
+        <div class="modal-body">
+          <div id="modal-error-text" class="modal-error-text"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-ghost" id="modal-btn-err-back">← Back</button>
+          <button class="btn btn-primary" id="modal-btn-err-done">Done</button>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- Settings Modal -->
+  <div id="settings-modal" class="modal-overlay hidden">
+    <div class="modal-box">
+      <div class="modal-header">
+        <span class="modal-title">Settings</span>
+        <button class="modal-close-btn" id="settings-close" title="Close">✕</button>
+      </div>
+      <div class="modal-body">
+        <label class="modal-label">Appearance</label>
+        <div class="settings-provider-group" id="settings-theme-group">
+          <label class="settings-radio">
+            <input type="radio" name="settings-theme" value="dark" />
+            <span class="settings-radio-title">Dark</span>
+          </label>
+          <label class="settings-radio">
+            <input type="radio" name="settings-theme" value="light" />
+            <span class="settings-radio-title">Light</span>
+          </label>
+          <label class="settings-radio">
+            <input type="radio" name="settings-theme" value="system" />
+            <span class="settings-radio-title">System</span>
+            <span class="settings-radio-sub">Follow OS appearance</span>
+          </label>
+        </div>
+
+        <label class="modal-label">Summarizer</label>
+        <div class="settings-provider-group">
+          <label class="settings-radio">
+            <input type="radio" name="settings-provider" value="claude-code" />
+            <span class="settings-radio-title">Claude Code</span>
+            <span class="settings-radio-sub">Local CLI (claude.ai/code)</span>
+          </label>
+          <label class="settings-radio">
+            <input type="radio" name="settings-provider" value="openrouter" />
+            <span class="settings-radio-title">OpenRouter</span>
+            <span class="settings-radio-sub">Cloud — any model via one API key</span>
+          </label>
+          <label class="settings-radio">
+            <input type="radio" name="settings-provider" value="ollama" />
+            <span class="settings-radio-title">Ollama</span>
+            <span class="settings-radio-sub">Local model (e.g. llama3.1)</span>
+          </label>
+          <label class="settings-radio">
+            <input type="radio" name="settings-provider" value="openai-compatible" />
+            <span class="settings-radio-title">OpenAI-compatible</span>
+            <span class="settings-radio-sub">OpenAI · Groq · Anthropic · vLLM · LM Studio</span>
+          </label>
+        </div>
+
+        <div id="settings-section-openrouter" class="settings-section hidden">
+          <div class="modal-row">
+            <label class="modal-label" for="settings-or-key">API key</label>
+            <input type="password" id="settings-or-key" class="modal-input" placeholder="sk-or-…" autocomplete="off" />
+          </div>
+          <div class="modal-row">
+            <label class="modal-label" for="settings-or-model">Model</label>
+            <input type="text" id="settings-or-model" class="modal-input" placeholder="anthropic/claude-3.5-sonnet" />
+          </div>
+          <div class="modal-row">
+            <label class="modal-label" for="settings-or-url">Base URL</label>
+            <input type="text" id="settings-or-url" class="modal-input" placeholder="https://openrouter.ai/api/v1" />
+          </div>
+        </div>
+
+        <div id="settings-section-ollama" class="settings-section hidden">
+          <div class="modal-row">
+            <label class="modal-label" for="settings-ol-url">Base URL</label>
+            <input type="text" id="settings-ol-url" class="modal-input" placeholder="http://localhost:11434" />
+          </div>
+          <div class="modal-row">
+            <label class="modal-label" for="settings-ol-model">Model</label>
+            <input type="text" id="settings-ol-model" class="modal-input" placeholder="llama3.1" />
+          </div>
+        </div>
+
+        <div id="settings-section-openai" class="settings-section hidden">
+          <div class="settings-presets">
+            <button type="button" class="settings-preset" data-url="https://api.openai.com/v1" data-model="gpt-5.4-mini">OpenAI</button>
+            <button type="button" class="settings-preset" data-url="https://api.groq.com/openai/v1" data-model="llama-3.3-70b-versatile">Groq</button>
+            <button type="button" class="settings-preset" data-url="https://api.anthropic.com/v1" data-model="claude-opus-4-8">Anthropic</button>
+          </div>
+          <div class="modal-row">
+            <label class="modal-label" for="settings-oai-url">Base URL</label>
+            <input type="text" id="settings-oai-url" class="modal-input" placeholder="https://api.openai.com/v1" />
+          </div>
+          <div class="modal-row">
+            <label class="modal-label" for="settings-oai-key">API key (optional for local servers)</label>
+            <input type="password" id="settings-oai-key" class="modal-input" placeholder="sk-…" autocomplete="off" />
+          </div>
+          <div class="modal-row">
+            <label class="modal-label" for="settings-oai-model">Model</label>
+            <input type="text" id="settings-oai-model" class="modal-input" placeholder="gpt-5.4-mini" />
+          </div>
+        </div>
+
+        <!-- Calendars (macOS only): which calendars to pull meetings from -->
+        <div id="settings-section-calendars" class="settings-section hidden" style="margin-top:18px">
+          <label class="modal-label">Calendars</label>
+          <div class="settings-radio-sub" style="margin-bottom:8px">Pull meeting title &amp; participants from these calendars.</div>
+          <div id="settings-calendars-list"></div>
+        </div>
+
+        <label class="modal-label" style="margin-top:18px">Recording</label>
+        <label class="settings-radio" style="cursor:pointer">
+          <input type="checkbox" id="settings-autostop" />
+          <span class="settings-radio-title">Auto-stop when the meeting ends</span>
+          <span class="settings-radio-sub">For online calls recorded with mic + system audio. Shows a 15 s countdown you can cancel.</span>
+        </label>
+
+        <div id="settings-error" class="modal-error-text hidden" style="margin-top:10px"></div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" id="settings-cancel">Cancel</button>
+        <button class="btn btn-primary" id="settings-save">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Summary Share Modal -->
+  <div id="summary-share-modal" class="modal-overlay hidden">
+    <div class="modal-box">
+      <div class="modal-header">
+        <span class="modal-title">Share summary</span>
+        <button class="modal-close-btn" id="summary-share-modal-close" title="Close">✕</button>
+      </div>
+      <div class="followup-view">
+        <div class="modal-body">
+          <textarea id="summary-share-text" class="modal-textarea followup-textarea" spellcheck="false"></textarea>
+          <div class="followup-share-row">
+            <button class="followup-share-btn" id="summary-share-btn-email" type="button">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="4" width="20" height="16" rx="2"/><polyline points="2,4 12,13 22,4"/></svg>
+              Email
+            </button>
+            <button class="followup-share-btn" id="summary-share-btn-slack" type="button">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.5 10c-.83 0-1.5-.67-1.5-1.5v-5c0-.83.67-1.5 1.5-1.5s1.5.67 1.5 1.5v5c0 .83-.67 1.5-1.5 1.5z"/><path d="M20.5 10H19V8.5c0-.83.67-1.5 1.5-1.5s1.5.67 1.5 1.5-.67 1.5-1.5 1.5z"/><path d="M9.5 14c.83 0 1.5.67 1.5 1.5v5c0 .83-.67 1.5-1.5 1.5S8 21.33 8 20.5v-5c0-.83.67-1.5 1.5-1.5z"/><path d="M3.5 14H5v1.5c0 .83-.67 1.5-1.5 1.5S2 16.33 2 15.5 2.67 14 3.5 14z"/><path d="M14 14.5c0-.83.67-1.5 1.5-1.5h5c.83 0 1.5.67 1.5 1.5s-.67 1.5-1.5 1.5h-5c-.83 0-1.5-.67-1.5-1.5z"/><path d="M15.5 19H14v1.5c0 .83.67 1.5 1.5 1.5s1.5-.67 1.5-1.5-.67-1.5-1.5-1.5z"/><path d="M10 9.5C10 8.67 9.33 8 8.5 8h-5C2.67 8 2 8.67 2 9.5S2.67 11 3.5 11h5c.83 0 1.5-.67 1.5-1.5z"/><path d="M8.5 5H10V3.5C10 2.67 9.33 2 8.5 2S7 2.67 7 3.5 7.67 5 8.5 5z"/></svg>
+              Slack
+            </button>
+            <button class="followup-share-btn" id="summary-share-btn-telegram" type="button">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+              Telegram
+            </button>
+            <button class="followup-share-btn" id="summary-share-btn-copy" type="button">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              Copy
+            </button>
+            <button class="followup-share-btn" id="summary-share-btn-pdf" type="button">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+              PDF
+            </button>
+            <button class="followup-share-btn" id="summary-share-btn-docx" type="button">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+              DOCX
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Follow-Up Draft Modal -->
+  <div id="followup-modal" class="modal-overlay hidden">
+    <div class="modal-box">
+      <div class="modal-header">
+        <span class="modal-title">Draft follow-up message</span>
+        <button class="modal-close-btn" id="followup-modal-close" title="Close">✕</button>
+      </div>
+
+      <!-- View: loading -->
+      <div id="followup-view-loading" class="followup-view">
+        <div class="modal-body modal-loading">
+          <div class="modal-spinner"></div>
+          <span>Drafting follow-up…</span>
+        </div>
+      </div>
+
+      <!-- View: result -->
+      <div id="followup-view-result" class="followup-view hidden">
+        <div class="modal-body">
+          <textarea id="followup-result-text" class="modal-textarea followup-textarea" spellcheck="false"></textarea>
+          <div class="followup-share-row">
+            <button class="followup-share-btn" id="followup-btn-email" type="button">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="4" width="20" height="16" rx="2"/><polyline points="2,4 12,13 22,4"/></svg>
+              Email
+            </button>
+            <button class="followup-share-btn" id="followup-btn-slack" type="button">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.5 10c-.83 0-1.5-.67-1.5-1.5v-5c0-.83.67-1.5 1.5-1.5s1.5.67 1.5 1.5v5c0 .83-.67 1.5-1.5 1.5z"/><path d="M20.5 10H19V8.5c0-.83.67-1.5 1.5-1.5s1.5.67 1.5 1.5-.67 1.5-1.5 1.5z"/><path d="M9.5 14c.83 0 1.5.67 1.5 1.5v5c0 .83-.67 1.5-1.5 1.5S8 21.33 8 20.5v-5c0-.83.67-1.5 1.5-1.5z"/><path d="M3.5 14H5v1.5c0 .83-.67 1.5-1.5 1.5S2 16.33 2 15.5 2.67 14 3.5 14z"/><path d="M14 14.5c0-.83.67-1.5 1.5-1.5h5c.83 0 1.5.67 1.5 1.5s-.67 1.5-1.5 1.5h-5c-.83 0-1.5-.67-1.5-1.5z"/><path d="M15.5 19H14v1.5c0 .83.67 1.5 1.5 1.5s1.5-.67 1.5-1.5-.67-1.5-1.5-1.5z"/><path d="M10 9.5C10 8.67 9.33 8 8.5 8h-5C2.67 8 2 8.67 2 9.5S2.67 11 3.5 11h5c.83 0 1.5-.67 1.5-1.5z"/><path d="M8.5 5H10V3.5C10 2.67 9.33 2 8.5 2S7 2.67 7 3.5 7.67 5 8.5 5z"/></svg>
+              Slack
+            </button>
+            <button class="followup-share-btn" id="followup-btn-telegram" type="button">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+              Telegram
+            </button>
+            <button class="followup-share-btn" id="followup-btn-copy-followup" type="button">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+              Copy
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- View: error -->
+      <div id="followup-view-error" class="followup-view hidden">
+        <div class="modal-body">
+          <div id="followup-error-text" class="modal-error-text"></div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn btn-primary" id="followup-btn-err-done">Done</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Background summarization toolbar -->
+  <div id="bg-summary-toolbar" class="bg-summary-toolbar hidden" data-state="idle">
+    <div class="bg-summary-icon">
+      <div class="bg-summary-spinner"></div>
+      <div class="bg-summary-check">✓</div>
+      <div class="bg-summary-cross">✕</div>
+    </div>
+    <div class="bg-summary-info">
+      <div class="bg-summary-title" id="bg-summary-title">Summarizing…</div>
+      <div class="bg-summary-subtitle" id="bg-summary-subtitle"></div>
+    </div>
+    <div class="bg-summary-actions">
+      <button class="btn btn-ghost btn-sm hidden" id="bg-summary-view">View</button>
+      <button class="btn btn-ghost btn-sm bg-summary-close-btn" id="bg-summary-close" title="Dismiss">✕</button>
+    </div>
+  </div>
+
+  <!-- Chat Modal -->
+  <div id="chat-modal" class="modal-overlay hidden">
+    <div class="modal-box modal-box--chat">
+      <div class="modal-header">
+        <span class="modal-title" id="chat-modal-title">Ask about this meeting</span>
+        <button class="modal-close-btn" id="chat-modal-close" title="Close">✕</button>
+      </div>
+      <div class="chat-messages" id="chat-messages"></div>
+      <div class="chat-footer">
+        <textarea id="chat-input" class="chat-input" rows="2"
+          placeholder="Ask a question about this meeting…" spellcheck="false"></textarea>
+        <button class="btn btn-primary" id="chat-send-btn">Ask</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="calendar-picker.js"></script>
+  <script src="speaker-rename.js"></script>
+  <script src="app.js"></script>
+  <script src="live/live.js"></script>
+  <script src="record/record.js"></script>
+  <script src="calendar-smart.js"></script>
+</body>
+</html>
