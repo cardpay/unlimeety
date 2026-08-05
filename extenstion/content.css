@@ -247,6 +247,26 @@
     color: var(--u-text);
 }
 
+#gmt-notes-input {
+    width: 100%;
+    padding: 7px 10px;
+    border-radius: 8px;
+    border: 1px solid var(--u-border);
+    background-color: var(--u-elevated);
+    color: var(--u-text);
+    font-family: inherit;
+    font-size: 12px;
+}
+
+#gmt-notes-input:focus {
+    border-color: rgba(198, 244, 50, 0.55);
+}
+
+#gmt-notes-input:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
 /* ─── Main control row ──────────────────────────────────────────────────────── */
 .gmt-main-controls {
     display: grid;

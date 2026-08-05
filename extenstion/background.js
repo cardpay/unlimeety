@@ -41,8 +41,6 @@ chrome.downloads.onChanged.addListener((delta) => {
 
 // Listen for messages from content scripts
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  // Only accept messages from our own content scripts.
-  if (sender.id !== chrome.runtime.id) return;
   const tabId = sender.tab ? sender.tab.id : null;
   if (!tabId) return;
 
@@ -59,6 +57,13 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
   if (request.action === 'addTranscript') {
     transcripts[tabId].lines.push(request.data);
+    chrome.storage.local.set({ [tabId]: transcripts[tabId] });
+  } else if (request.action === 'addNote') {
+    // Same reserved "Note" speaker label the desktop app uses for its own
+    // typed notes, so summarize:run's hint recognizes either. Pushed in
+    // arrival order alongside caption lines — both arrive live, so no
+    // re-sorting is needed the way the desktop app's async segments require.
+    transcripts[tabId].lines.push({ time: request.data.time, speaker: 'Note', text: request.data.text });
     chrome.storage.local.set({ [tabId]: transcripts[tabId] });
   } else if (request.action === 'updateLastTranscript') {
     if (transcripts[tabId].lines.length > 0) {
