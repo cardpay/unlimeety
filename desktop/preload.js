@@ -129,4 +129,8 @@ contextBridge.exposeInMainWorld('promptApi', {
     dismiss: ()   => ipcRenderer.send('prompt:dismiss'),
     // Auto-stop countdown: user chose to keep recording → cancel the stop.
     keepRecording: () => ipcRenderer.send('prompt:keepRecording'),
+    // Auto-stop countdown: stop right now instead of waiting it out.
+    stopNow: () => ipcRenderer.send('prompt:stopNow'),
+    // Auto-stop countdown: hide the overlay, but let the countdown run out.
+    hide: () => ipcRenderer.send('prompt:hide'),
 });

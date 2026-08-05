@@ -3114,6 +3114,17 @@ function triggerAutoStop() {
 
 ipcMain.on('prompt:keepRecording', () => cancelAutoStop());
 
+// "Stop now" — the same stop+save the countdown would have done, just immediately.
+ipcMain.on('prompt:stopNow', () => {
+    if (autoStopTimer) { clearTimeout(autoStopTimer); autoStopTimer = null; }
+    closePromptWindow();
+    triggerAutoStop();
+});
+
+// "✕" — hide the overlay only. The countdown keeps running and stops us in the
+// background, exactly as if the prompt were still on screen.
+ipcMain.on('prompt:hide', () => closePromptWindow());
+
 // ─── Tray (background presence) ─────────────────────────────────────────────
 // Without a tray the app is gone once its window closes; the monitor needs the
 // process alive to catch calls. macOS-only for now (the monitor is too).
