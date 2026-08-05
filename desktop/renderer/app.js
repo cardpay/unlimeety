@@ -2645,6 +2645,13 @@ document.addEventListener("keydown", (e) => {
     meetingSearchInput?.focus();
     meetingSearchInput?.select();
   }
+  // Find within the open note — only on the Transcripts tab, where there is
+  // something to search.
+  if (mod && e.key === "f" && state.filePath &&
+      !document.getElementById("editor-container")?.classList.contains("hidden")) {
+    e.preventDefault();
+    window.findInNote?.open();
+  }
   if (mod && e.key === "r" && !e.shiftKey && !e.altKey) {
     e.preventDefault();
     document.querySelector('.tab-btn[data-tab="record"]')?.click();
