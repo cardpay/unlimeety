@@ -44,6 +44,10 @@
     const outputPathEl = $('record-output-path');
     const stopBtn     = $('record-btn-stop');
 
+    const notesListEl  = $('record-notes-list');
+    const notesEmptyEl = $('record-notes-empty');
+    const notesInputEl = $('record-notes-input');
+
     // Transcribe-settings screen (Variant C) refs.
     const tsCrumbCount   = $('ts-crumb-count');
     const tsBatchCount   = $('ts-batch-count');
@@ -364,6 +368,7 @@
         setStatus('loading', 'Preparing…');
         timerEl.textContent = '00:00';
         outputPathEl.textContent = '';
+        resetNotesList();
 
         const res = await api.start({
             sources,
@@ -383,6 +388,43 @@
         buildWaveform();
         fillRecordFileCard();
         updateStatusBar('recording');
+    });
+
+    // ─── Inline notes (freeform, timestamped) ───────────────────────────────
+    // Sent through the same window.notesApi/notes:add channel as the Live
+    // tab's floating notes window — main.js routes a note to whichever of
+    // live/recorder is currently active, so no Record-specific IPC is needed.
+    function resetNotesList() {
+        notesListEl.querySelectorAll('.record-note-row').forEach(row => row.remove());
+        notesEmptyEl.style.display = '';
+    }
+
+    function addNoteRow(text) {
+        notesEmptyEl.style.display = 'none';
+        const row = document.createElement('div');
+        row.className = 'record-note-row';
+
+        const time = document.createElement('div');
+        time.className = 'record-note-time';
+        time.textContent = formatHms((Date.now() - state.startedAt) / 1000);
+
+        const body = document.createElement('div');
+        body.className = 'record-note-text';
+        body.textContent = text;
+
+        row.appendChild(time);
+        row.appendChild(body);
+        notesListEl.appendChild(row);
+        notesListEl.scrollTop = notesListEl.scrollHeight;
+    }
+
+    notesInputEl.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter') return;
+        const text = notesInputEl.value.trim();
+        if (!text) return;
+        addNoteRow(text);
+        window.notesApi?.add(text);
+        notesInputEl.value = '';
     });
 
     let waveRaf = null;

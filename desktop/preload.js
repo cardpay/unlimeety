@@ -130,3 +130,14 @@ contextBridge.exposeInMainWorld('promptApi', {
     // Auto-stop countdown: user chose to keep recording → cancel the stop.
     keepRecording: () => ipcRenderer.send('prompt:keepRecording'),
 });
+
+// ─── Notes (isolated namespace) ──────────────────────────────────────────────
+// Freeform timestamped notes captured during a Live or Record session. Shared
+// across the floating notes window (Live) and the inline Record-tab control —
+// both call the same two methods.
+contextBridge.exposeInMainWorld('notesApi', {
+    add:          (text)      => ipcRenderer.send('notes:add', text),
+    close:        ()          => ipcRenderer.send('notes:close'),
+    reopen:       ()          => ipcRenderer.send('notes:reopen'),
+    setCollapsed: (collapsed) => ipcRenderer.send('notes:setCollapsed', collapsed),
+});

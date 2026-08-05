@@ -61,6 +61,10 @@ function injectUI() {
                         <svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
                     </button>
                 </div>
+                <div>
+                    <label class="gmt-field-label" for="gmt-notes-input">Note</label>
+                    <input id="gmt-notes-input" type="text" placeholder="Type and press Enter…" disabled />
+                </div>
                 <div class="gmt-status" aria-live="polite">
                     <span class="gmt-status-dot"></span>
                     <span class="gmt-status-label"></span>
@@ -183,6 +187,21 @@ function injectUI() {
         }
     });
 
+    // Freeform notes, timestamped and marked up the same way as the desktop
+    // app's Live/Record notes ("[time] Note:") so a shared summarizer prompt
+    // can recognize either. See background.js's 'addNote' handler.
+    document.getElementById('gmt-notes-input').addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter') return;
+        const input = e.target;
+        const text = input.value.trim();
+        if (!text) return;
+        chrome.runtime.sendMessage({
+            action: 'addNote',
+            data: { time: new Date().toLocaleTimeString(), text }
+        });
+        input.value = '';
+    });
+
     makeDraggable(container);
 }
 
@@ -259,6 +278,7 @@ function updateRecordButtonUI(recording) {
     const stopIcon = document.getElementById('gmt-icon-stop');
     const langSelect = document.getElementById('gmt-language');
     const btn = document.getElementById('gmt-record-btn');
+    const notesInput = document.getElementById('gmt-notes-input');
 
     if (recording) {
         playIcon.style.display = 'none';
@@ -269,6 +289,8 @@ function updateRecordButtonUI(recording) {
         stopIcon.style.display = 'none';
         btn.title = "Start Recording";
     }
+    // Notes only make sense once there's a transcript running to align them to.
+    notesInput.disabled = !recording;
 }
 
 function getMeetingTitle() {

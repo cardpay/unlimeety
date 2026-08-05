@@ -40,6 +40,7 @@
     const timerEl     = $('live-timer');
     const stopBtn     = $('live-btn-stop');
     const discardBtn  = $('live-btn-discard');
+    const notesBtn    = $('live-btn-notes');
     const liveRecordingIndicator = document.getElementById('live-recording-indicator');
 
     const downloadBox = $('live-download');
@@ -427,6 +428,10 @@
         if (state.running) return;
         returnToSetup();
     });
+
+    // Re-shows the floating notes window if the user closed it manually
+    // mid-session — a no-op (main.js) if it's already open.
+    notesBtn?.addEventListener('click', () => window.notesApi?.reopen());
 
     // ─── Helper events ───────────────────────────────────────────────────
     live.onEvent((event) => {

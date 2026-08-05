@@ -723,6 +723,56 @@ body[data-record-phase="recording"] .record-sidebar { display: none; }
     text-overflow: ellipsis;
     white-space: nowrap;
 }
+.record-notes {
+    width: 520px;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-surface);
+    border: 1px solid var(--accent-dim);
+    border-radius: 10px;
+    box-shadow: 0 0 0 1px var(--accent-dim);
+}
+.record-notes-label {
+    padding: 10px 14px 0;
+    text-transform: uppercase;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    color: var(--accent);
+}
+.record-notes-list {
+    overflow-y: auto;
+    max-height: 120px;
+    padding: 4px 14px;
+}
+.record-notes-empty {
+    padding: 8px 0;
+    font-size: 12px;
+    color: var(--text-muted);
+}
+.record-note-row {
+    display: flex;
+    gap: 10px;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+}
+.record-note-row:last-child { border-bottom: none; }
+.record-note-time {
+    flex: none;
+    font-family: var(--font-mono);
+    color: var(--text-secondary);
+}
+.record-note-text {
+    color: var(--text-primary);
+    word-break: break-word;
+    white-space: pre-wrap;
+}
+.record-notes-input-row {
+    padding: 8px 14px;
+    border-top: 1px solid var(--border);
+}
+.record-notes-input { width: 100%; height: 28px; }
 .record-rec-footer {
     padding: 12px 20px;
     border-top: 1px solid var(--border);
