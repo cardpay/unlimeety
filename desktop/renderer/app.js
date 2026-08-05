@@ -2645,10 +2645,13 @@ document.addEventListener("keydown", (e) => {
     meetingSearchInput?.focus();
     meetingSearchInput?.select();
   }
-  // Find within the open note — only on the Transcripts tab, where there is
-  // something to search.
-  if (mod && e.key === "f" && state.filePath &&
-      !document.getElementById("editor-container")?.classList.contains("hidden")) {
+  // Find within the open note — only on the Transcripts tab, with a note open
+  // and no modal on top (modals are body-level overlays, so the tab stays
+  // visible behind them). Keyed off e.code so the shortcut also works on a
+  // non-Latin layout, where ⌘F reports e.key === "а".
+  if (mod && e.code === "KeyF" && !e.shiftKey && !e.altKey && state.filePath &&
+      !document.getElementById("editor-container")?.classList.contains("hidden") &&
+      !document.querySelector(".modal-overlay:not(.hidden)")) {
     e.preventDefault();
     window.findInNote?.open();
   }
@@ -2665,6 +2668,11 @@ document.addEventListener("keydown", (e) => {
   }
   if (e.key === "Escape" && !document.getElementById("chat-modal").classList.contains("hidden")) {
     closeChatModal();
+  }
+  // Escape closes the find bar from anywhere — clicking a match to seek the
+  // audio moves focus out of the find input, and the shading has to go too.
+  else if (e.key === "Escape" && window.findInNote?.isOpen()) {
+    window.findInNote.close();
   }
 });
 
