@@ -19,9 +19,11 @@
   let bar = null;      // the find bar, built on first open
   let input = null;
   let counter = null;
-  let hits = [];       // [{ kind: "range", range } | { kind: "ta", start, len }]
+  // [{ kind: "range", range, scroller } | { kind: "ta", start, len }]
+  let hits = [];
   let idx = -1;
   let rescanTimer = null;
+  let typeTimer = null;
 
   function injectStyles() {
     const css = `
@@ -72,7 +74,11 @@
     input = bar.querySelector("input");
     counter = bar.querySelector("#find-count");
 
-    input.addEventListener("input", () => { scan(); goto(0); });
+    // Debounced: one keystroke on a long transcript builds a Range per match.
+    input.addEventListener("input", () => {
+      clearTimeout(typeTimer);
+      typeTimer = setTimeout(() => { scan(); goto(0); }, 100);
+    });
     input.addEventListener("keydown", (e) => {
       if (e.key === "Enter") { e.preventDefault(); step(e.shiftKey ? -1 : 1); }
       else if (e.key === "Escape") { e.preventDefault(); close(); }
@@ -86,31 +92,43 @@
 
     // The rail loads asynchronously and both panes re-render on note switch, so
     // re-run the query whenever their content changes (highlighting itself does
-    // not touch the DOM, so this can't loop).
-    const observer = new MutationObserver(() => {
-      if (!isOpen()) return;
-      clearTimeout(rescanTimer);
-      rescanTimer = setTimeout(() => { scan(); goto(0); }, 80);
-    });
+    // not touch the DOM, so this can't loop). Editing the note in the textarea
+    // emits no mutation records, so that needs its own listener.
+    const observer = new MutationObserver(rescan);
     for (const id of ["transcript-view", "summary-rail-body"]) {
       const el = document.getElementById(id);
       if (el) observer.observe(el, { childList: true, subtree: true, characterData: true });
     }
+    document.getElementById("editor")?.addEventListener("input", rescan);
+  }
+
+  // Content moved under us: refresh the matches but leave the caret, the focus
+  // and the scroll position where the user put them — a rescan is not
+  // navigation. The position is only clamped, not re-located, so it can drift
+  // by a match when text is inserted before the current one.
+  function rescan() {
+    if (!isOpen()) return;
+    clearTimeout(rescanTimer);
+    rescanTimer = setTimeout(() => {
+      const prev = idx;
+      scan();
+      idx = hits.length ? Math.min(Math.max(prev, 0), hits.length - 1) : -1;
+      paint();
+      updateCounter();
+    }, 80);
   }
 
   function isOpen() { return !!bar && !bar.classList.contains("hidden"); }
 
   const visible = (el) => !!el && !el.classList.contains("hidden");
 
-  // All match offsets of `q` in `text`, case-insensitive.
-  function offsets(text, q) {
-    const hay = text.toLowerCase(), needle = q.toLowerCase();
+  // Every match of `q` in `text`, case-insensitive, as {start, len} into `text`.
+  // Uses a regex rather than folding case by hand: toLowerCase() can change a
+  // string's length (İ → i̇), which would shift every later offset.
+  function matches(text, q) {
+    const re = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
     const out = [];
-    let i = hay.indexOf(needle);
-    while (i !== -1) {
-      out.push(i);
-      i = hay.indexOf(needle, i + needle.length);
-    }
+    for (let m = re.exec(text); m; m = re.exec(text)) out.push({ start: m.index, len: m[0].length });
     return out;
   }
 
@@ -118,11 +136,11 @@
     const out = [];
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
     for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-      for (const i of offsets(node.nodeValue, q)) {
+      for (const { start, len } of matches(node.nodeValue, q)) {
         const r = document.createRange();
-        r.setStart(node, i);
-        r.setEnd(node, i + q.length);
-        out.push({ kind: "range", range: r });
+        r.setStart(node, start);
+        r.setEnd(node, start + len);
+        out.push({ kind: "range", range: r, scroller: root });
       }
     }
     return out;
@@ -140,7 +158,7 @@
 
       if (visible(view)) hits.push(...rangesIn(view, q));
       else if (visible(editor)) {
-        for (const start of offsets(editor.value, q)) hits.push({ kind: "ta", start, len: q.length });
+        for (const { start, len } of matches(editor.value, q)) hits.push({ kind: "ta", start, len });
       }
       if (visible(rail) && railBody) hits.push(...rangesIn(railBody, q));
     }
@@ -149,19 +167,35 @@
 
   function paint() {
     if (!CAN_HIGHLIGHT) return;
-    const all = hits.filter(h => h.kind === "range").map(h => h.range);
-    if (all.length) CSS.highlights.set(HL_ALL, new Highlight(...all));
+    // Built with add() rather than new Highlight(...ranges): spreading tens of
+    // thousands of ranges blows V8's argument limit.
+    const all = new Highlight();
+    for (const h of hits) if (h.kind === "range") all.add(h.range);
+    if (all.size) CSS.highlights.set(HL_ALL, all);
     else CSS.highlights.delete(HL_ALL);
     const cur = hits[idx];
     if (cur && cur.kind === "range") CSS.highlights.set(HL_CUR, new Highlight(cur.range));
     else CSS.highlights.delete(HL_CUR);
   }
 
+  // Scroll from the range's own geometry: every hit in a note without timecodes
+  // shares one .tv-plain parent, so scrolling the parent into view would never
+  // follow the matches.
+  function scrollToRange(hit) {
+    const box = hit.range.getBoundingClientRect();
+    const view = hit.scroller.getBoundingClientRect();
+    if (!box.height) return;
+    if (box.top < view.top || box.bottom > view.bottom) {
+      hit.scroller.scrollTop += box.top - view.top - (view.height - box.height) / 2;
+    }
+  }
+
+  // Navigation — the only path allowed to move the scroll position or the focus.
   function goto(n) {
     idx = hits.length ? ((n % hits.length) + hits.length) % hits.length : -1;
     const hit = hits[idx];
     if (hit?.kind === "range") {
-      hit.range.startContainer.parentElement?.scrollIntoView({ block: "center" });
+      scrollToRange(hit);
     } else if (hit?.kind === "ta") {
       // Focus so Chromium scrolls the textarea to the selection, then hand focus
       // back to the find input; the selection stays drawn.
@@ -171,6 +205,10 @@
       input.focus();
     }
     paint();
+    updateCounter();
+  }
+
+  function updateCounter() {
     counter.textContent = !input.value ? "" : hits.length ? `${idx + 1}/${hits.length}` : "No results";
   }
 
@@ -180,6 +218,7 @@
   }
 
   function open() {
+    if (isOpen()) { input.focus(); input.select(); return; } // don't lose the position
     if (!bar) build();
     bar.classList.remove("hidden");
     // Seed from the current selection, the way a find bar usually does.
@@ -199,5 +238,5 @@
     if (CAN_HIGHLIGHT) { CSS.highlights.delete(HL_ALL); CSS.highlights.delete(HL_CUR); }
   }
 
-  window.findInNote = { open, close };
+  window.findInNote = { open, close, isOpen };
 })();
