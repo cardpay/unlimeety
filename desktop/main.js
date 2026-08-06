@@ -2818,6 +2818,9 @@ ipcMain.handle('record:transcribe', async (_e, opts) => {
     if (!spawnRes.ok) return { ok: false, error: spawnRes.error };
 
     transcriber.proc = spawnRes.proc;
+    // Cleared at the start of every run, so a cancel that lands on one run
+    // can't mark the next one partial. Every exit path below is covered.
+    transcriber.interrupted = false;
 
     transcriber.proc.on('exit', (code) => {
         recordSendToRenderer({ type: 'transcriberExited', code });
@@ -2890,8 +2893,9 @@ ipcMain.handle('record:transcribe', async (_e, opts) => {
     // real path rather than at it: `record:list` keys `hasTranscript` on
     // `<stem>.txt`, so a partial parked there would mark the recording as done
     // and nothing would ever offer to re-run it.
+    // Read-only here — the flag is cleared when a run starts, so the early
+    // `no segments` return can't strand it set for the next one.
     const interrupted = transcriber.interrupted;
-    transcriber.interrupted = false;
     const transcriptPath = interrupted
         ? recordingTranscriptPath(filePath).replace(/\.txt$/, '.partial.txt')
         : recordingTranscriptPath(filePath);
@@ -2931,7 +2935,13 @@ ipcMain.handle('record:transcribe', async (_e, opts) => {
         fs.writeFileSync(transcriptPath, content, 'utf-8');
         // Keep a partial out of Recent Documents — it isn't a document anyone
         // asked for, it's a salvage file.
-        if (!interrupted) app.addRecentDocument(transcriptPath);
+        if (!interrupted) {
+            app.addRecentDocument(transcriptPath);
+            // A completed run supersedes any salvage from an earlier attempt.
+            // Left behind it would double up in the Transcripts list and let a
+            // search hit land on the truncated copy.
+            try { fs.unlinkSync(transcriptPath.replace(/\.txt$/, '.partial.txt')); } catch { /* none */ }
+        }
         noteSessionFlushed();
         if (interrupted) return { ok: false, error: 'Transcription interrupted.', transcriptPath };
         return { ok: true, transcriptPath };
@@ -3208,6 +3218,10 @@ let autoStopTimer = null;
 // can run at once, and one meeting ending says nothing about the other session.
 let autoStopSlot = null;
 
+// One countdown at a time (the overlay window is a singleton): while one
+// session is counting down, the other's `meetingEnded` is dropped rather than
+// queued, and nothing re-arms it — that session just keeps recording until it
+// is stopped by hand. Fails safe, so a per-slot timer can wait.
 function onMeetingEnded(slot) {
     if (autoStopTimer) return;                                   // already counting down
     if (!(slot === 'live' ? live.proc : recorder.proc)) return;  // that one isn't recording
