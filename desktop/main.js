@@ -210,6 +210,13 @@ function noteSessionFlushed(slot) {
 
 app.on('before-quit', (e) => {
     if (quitting) return;                                    // already flushed
+    // A second before-quit during an in-flight flush must be deferred
+    // unconditionally: recomputing "pending" from proc handles here would miss
+    // a slot whose helper has already exited (proc nulled) but hasn't acked
+    // yet — e.g. Live's helper process exits before its renderer finishes
+    // mapping segments and calling live:saveTranscript. quitFlushing, not
+    // proc liveness, is what a flush in flight actually looks like.
+    if (quitFlushing) { e.preventDefault(); return; }
     // A recording can only be saved by the renderer that owns it; a
     // transcription is assembled here in main and needs no renderer at all.
     const rendererAlive = Boolean(mainWindow && !mainWindow.isDestroyed());
@@ -220,7 +227,6 @@ app.on('before-quit', (e) => {
     ].filter(Boolean));
     if (!pending.size) return;                               // nothing to lose
     e.preventDefault();
-    if (quitFlushing) return;                                // flush already running
     quitFlushing = true;
     quitFlushPending = pending;
 
@@ -2585,6 +2591,10 @@ ipcMain.handle('record:delete', async (_e, filePath) => {
     if (choice !== 0) return { ok: false, canceled: true };
     try {
         fs.unlinkSync(filePath);
+        // A partial's only link back to the audio is its own Source: header
+        // (its stem never matches a WAV's) — once the WAV is gone, keeping it
+        // just orphans it, the same way a stale rename target did.
+        try { fs.unlinkSync(recordingTranscriptPath(filePath).replace(/\.txt$/, '.partial.txt')); } catch { /* none */ }
         return { ok: true };
     } catch (err) {
         return { ok: false, error: err.message };
@@ -2616,6 +2626,7 @@ ipcMain.handle('record:deleteMany', async (_e, paths) => {
     for (const p of targets) {
         try {
             fs.unlinkSync(p);
+            try { fs.unlinkSync(recordingTranscriptPath(p).replace(/\.txt$/, '.partial.txt')); } catch { /* none */ }
             deleted++;
         } catch (err) {
             errors.push({ path: p, error: err.message });
@@ -2712,16 +2723,31 @@ ipcMain.handle('record:rename', async (_e, wavPath, newTitle) => {
         const hasTranscript = fs.existsSync(oldTranscriptPath);
         const oldSummaryPath = hasTranscript ? findExistingSummaryPath(oldTranscriptPath) : null;
 
-        if (newWavPath !== wavPath) {
-            fs.renameSync(wavPath, newWavPath);
-            // A cut-short transcription leaves `<stem>.partial.txt` next to the
-            // real transcript, keyed to the WAV's old stem — rename it alongside
-            // so it isn't orphaned under a WAV that no longer exists there.
-            // Independent of `hasTranscript`: a partial doesn't count as one.
-            const oldPartialPath = oldTranscriptPath.replace(/\.txt$/, '.partial.txt');
-            if (fs.existsSync(oldPartialPath)) {
-                const newPartialPath = path.join(TRANSCRIPTS_FOLDER, `${path.basename(newWavPath, '.wav')}.partial.txt`);
-                if (!fs.existsSync(newPartialPath)) fs.renameSync(oldPartialPath, newPartialPath);
+        if (newWavPath !== wavPath) fs.renameSync(wavPath, newWavPath);
+
+        // A cut-short transcription leaves `<stem>.partial.txt` next to the real
+        // transcript, keyed to the WAV's stem — and since that stem never
+        // matches a WAV's own (the whole point of `.partial`), `Source:` in its
+        // header is its *only* link back to the audio. Independent of
+        // `hasTranscript`: a partial doesn't count as one.
+        const oldPartialPath = oldTranscriptPath.replace(/\.txt$/, '.partial.txt');
+        if (fs.existsSync(oldPartialPath)) {
+            const titleLine = trimmed || oldStem;
+            const partialContent = fs.readFileSync(oldPartialPath, 'utf-8');
+            const updatedPartial = partialContent
+                .replace(/^Meeting: .*$/m, `Meeting: ${titleLine}`)
+                .replace(/^Source: .*$/m, `Source: ${newWavPath}`);
+            fs.writeFileSync(oldPartialPath, updatedPartial, 'utf-8');
+
+            if (newWavPath !== wavPath) {
+                const newPartialStem = path.basename(newWavPath, '.wav');
+                let newPartialPath = path.join(TRANSCRIPTS_FOLDER, `${newPartialStem}.partial.txt`);
+                let pn = 2;
+                while (fs.existsSync(newPartialPath)) {
+                    newPartialPath = path.join(TRANSCRIPTS_FOLDER, `${newPartialStem} (${pn}).partial.txt`);
+                    pn++;
+                }
+                fs.renameSync(oldPartialPath, newPartialPath);
             }
         }
 
