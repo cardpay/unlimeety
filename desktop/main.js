@@ -176,75 +176,6 @@ function getStartupFile(argv) {
 
 // ─── Window ──────────────────────────────────────────────────────────────────
 
-// Set once a Quit is cleared to proceed, so the close guard below lets the
-// window go.
-let quitting = false;
-
-// A recording only ever exists in the renderer that started it, so quitting
-// mid-session used to SIGTERM the helper (the handlers further down do that)
-// and drop the transcript on the floor — silently, 40 minutes in. Flush first:
-// run the renderer's own stop+save, then quit for real.
-//
-// Registered here on purpose: `before-quit` handlers run in registration order,
-// and the two that kill the helpers live later in this file.
-let quitFlushing = false;
-let quitFlushDone = null;                 // resolve fn while a flush is in flight
-let quitFlushRemaining = 0;               // acks still expected, one per busy slot
-const QUIT_FLUSH_TIMEOUT_MS = 10000;      // live:stop alone can take 5 s
-
-// Called by the handlers that complete a slot's work — `live:saveTranscript`
-// once the transcript is on disk, `record:stop` once the WAV is finalized,
-// `record:transcribe` once it has written (or given up on) its output. All
-// three can be in flight at once, so this counts down rather than resolving on
-// the first one. Outside a quit flush it does nothing.
-function noteSessionFlushed() {
-    if (!quitFlushDone) return;
-    quitFlushRemaining -= 1;
-    if (quitFlushRemaining > 0) return;
-    const resolve = quitFlushDone;
-    quitFlushDone = null;
-    resolve();
-}
-
-app.on('before-quit', (e) => {
-    if (quitting) return;                                    // already flushed
-    // A recording can only be saved by the renderer that owns it; a
-    // transcription is assembled here in main and needs no renderer at all.
-    const rendererAlive = Boolean(mainWindow && !mainWindow.isDestroyed());
-    const busy = [
-        rendererAlive && live.proc,
-        rendererAlive && recorder.proc,
-        transcriber.proc,
-    ].filter(Boolean).length;
-    if (!busy) return;                                       // nothing to lose
-    e.preventDefault();
-    if (quitFlushing) return;                                // flush already running
-    quitFlushing = true;
-    quitFlushRemaining = busy;
-
-    cancelAutoStop();     // whatever the countdown was going to do, we're doing now
-    const saved = new Promise((resolve) => { quitFlushDone = resolve; });
-    if (rendererAlive) {
-        showMainWindow();  // the user should see "Finalizing…", not a Quit that hangs
-        triggerAutoStop(['live', 'record']); // renderers run the same stop+save as their Stop buttons
-    }
-    // Closing the transcriber's stdin cancels its run — it can't be waited out
-    // inside a quit — but `record:transcribe` then writes the segments it has
-    // instead of losing them to the SIGTERM below. Flagged as interrupted so
-    // that partial output is written as a `.partial.txt` and never passes for
-    // a finished transcript.
-    if (transcriber.proc) {
-        transcriber.interrupted = true;
-        try { transcriber.proc.stdin.end(); } catch { /* already closed */ }
-    }
-
-    const timedOut = new Promise((resolve) => setTimeout(resolve, QUIT_FLUSH_TIMEOUT_MS));
-    Promise.race([saved, timedOut]).then(() => {
-        quitting = true;
-        app.quit();
-    });
-});
-
 function createWindow() {
     mainWindow = new BrowserWindow({
         width: 1200,
@@ -293,28 +224,7 @@ function createWindow() {
     });
 
     // Edits autosave (renderer flushes on editor/window blur), so closing never
-    // risks unsaved work — no confirmation dialog needed. A recording is the one
-    // thing closing could still lose, which is what the guard below is for; Quit
-    // is handled by the flush registered next to `quitting`.
-
-    // A recording session lives in the renderer: the transcript, the Stop button
-    // and the auto-stop delegation are all its state. Destroying the window
-    // mid-recording therefore strands the helper — nothing can stop it short of
-    // Quit, and the transcript is lost. Hide the window instead; the tray item
-    // and the Dock icon bring it back, and every stop path keeps working.
-    mainWindow.on('close', (e) => {
-        if (quitting) return;
-        if (!live.proc && !recorder.proc) return;
-        e.preventDefault();
-        // Hiding a fullscreen window leaves its Space behind as an empty desktop
-        // the user has to swipe out of, so drop out of fullscreen first.
-        if (mainWindow.isFullScreen()) {
-            mainWindow.once('leave-full-screen', () => mainWindow.hide());
-            mainWindow.setFullScreen(false);
-        } else {
-            mainWindow.hide();
-        }
-    });
+    // risks unsaved work — no confirmation dialog needed.
 }
 
 function updateTitle() {
@@ -1857,8 +1767,8 @@ function liveHandleEvent(event) {
     if (!event || typeof event.type !== 'string') return;
 
     // Auto-stop signals are handled in main; not forwarded to the renderer.
-    if (event.type === 'meetingEnded') { onMeetingEnded('live'); return; }
-    if (event.type === 'meetingResumed') { cancelAutoStop('live'); return; }
+    if (event.type === 'meetingEnded') { onMeetingEnded(); return; }
+    if (event.type === 'meetingResumed') { cancelAutoStop(); return; }
 
     if (event.type === 'segment' && event.final === true) {
         live.segments.push(event);
@@ -2108,7 +2018,7 @@ ipcMain.handle('live:start', async (_e, opts) => {
         proc.on('exit', (code) => {
             liveSendToRenderer({ type: 'exited', code });
             live.proc = null;
-            cancelAutoStop('live');
+            cancelAutoStop();
         });
 
         proc.on('error', (err) => {
@@ -2283,12 +2193,8 @@ ipcMain.handle('live:saveTranscript', async (_e, payload) => {
         fs.writeFileSync(filePath, content, 'utf-8');
         app.addRecentDocument(filePath);
         live.outputPath = null;
-        noteSessionFlushed();
         return { ok: true, filePath, audioPath: wavPath };
     } catch (err) {
-        // A failed save is still the end of the session — don't make a pending
-        // Quit sit out its whole timeout waiting for a save that won't come.
-        noteSessionFlushed();
         return { ok: false, error: err.message };
     }
 });
@@ -2323,11 +2229,6 @@ const recorder = {
 const transcriber = {
     proc: null,
     stdoutBuf: '',
-    // Set when we cut a run short (quit flush, or the user's Cancel). Closing
-    // the helper's stdin cancels the in-flight FileTranscriber task rather than
-    // letting it finish, so whatever `record:transcribe` writes afterwards is a
-    // prefix of the real transcript and must not pass for a complete one.
-    interrupted: false,
 };
 
 function recordSendToRenderer(event) {
@@ -2336,8 +2237,8 @@ function recordSendToRenderer(event) {
 }
 
 function recordHandleEvent(event) {
-    if (event && event.type === 'meetingEnded') { onMeetingEnded('record'); return; }
-    if (event && event.type === 'meetingResumed') { cancelAutoStop('record'); return; }
+    if (event && event.type === 'meetingEnded') { onMeetingEnded(); return; }
+    if (event && event.type === 'meetingResumed') { cancelAutoStop(); return; }
     recordSendToRenderer(event);
 }
 
@@ -2440,7 +2341,7 @@ ipcMain.handle('record:start', async (_e, opts) => {
         recordSendToRenderer({ type: 'recorderExited', code });
         recorder.proc = null;
         recorder.outputPath = null;
-        cancelAutoStop('record');
+        cancelAutoStop();
     });
     recorder.proc.on('error', (err) => {
         recordSendToRenderer({ type: 'error', message: `helper spawn error: ${err.message}` });
@@ -2476,7 +2377,6 @@ ipcMain.handle('record:stop', async () => {
     // guard. Synchronously nulling here closes that race.
     recorder.proc = null;
     recorder.outputPath = null;
-    noteSessionFlushed();
     return { ok: true };
 });
 
@@ -2818,9 +2718,6 @@ ipcMain.handle('record:transcribe', async (_e, opts) => {
     if (!spawnRes.ok) return { ok: false, error: spawnRes.error };
 
     transcriber.proc = spawnRes.proc;
-    // Cleared at the start of every run, so a cancel that lands on one run
-    // can't mark the next one partial. Every exit path below is covered.
-    transcriber.interrupted = false;
 
     transcriber.proc.on('exit', (code) => {
         recordSendToRenderer({ type: 'transcriberExited', code });
@@ -2857,7 +2754,6 @@ ipcMain.handle('record:transcribe', async (_e, opts) => {
     }
 
     if (!segments.length) {
-        noteSessionFlushed();
         return { ok: false, error: 'Transcription produced no text.' };
     }
 
@@ -2889,16 +2785,7 @@ ipcMain.handle('record:transcribe', async (_e, opts) => {
         }
     }
 
-    // A cut-short run yields a prefix of the transcript. Write it beside the
-    // real path rather than at it: `record:list` keys `hasTranscript` on
-    // `<stem>.txt`, so a partial parked there would mark the recording as done
-    // and nothing would ever offer to re-run it.
-    // Read-only here — the flag is cleared when a run starts, so the early
-    // `no segments` return can't strand it set for the next one.
-    const interrupted = transcriber.interrupted;
-    const transcriptPath = interrupted
-        ? recordingTranscriptPath(filePath).replace(/\.txt$/, '.partial.txt')
-        : recordingTranscriptPath(filePath);
+    const transcriptPath = recordingTranscriptPath(filePath);
     try {
         if (!fs.existsSync(TRANSCRIPTS_FOLDER)) fs.mkdirSync(TRANSCRIPTS_FOLDER, { recursive: true });
         const title = path.basename(filePath, path.extname(filePath));
@@ -2919,7 +2806,6 @@ ipcMain.handle('record:transcribe', async (_e, opts) => {
             recordedAtIso = new Date(wavStat.birthtimeMs || wavStat.mtimeMs).toISOString();
         } catch { /* file vanished — fall back to generated time */ }
         const headerLines = [`Meeting: ${title}`];
-        if (interrupted) headerLines.push('Status: PARTIAL — transcription was interrupted, re-run it for the full text');
         if (recordedAtIso) headerLines.push(`Recorded-At: ${recordedAtIso}`);
         headerLines.push(`Generated: ${new Date().toLocaleString()}`);
         if (participants.length) headerLines.push(`Participants: ${participants.join(', ')}`);
@@ -2933,29 +2819,15 @@ ipcMain.handle('record:transcribe', async (_e, opts) => {
         }).join('\n\n');
         const content = headerLines.join('\n') + '\n\n' + body + (body ? '\n' : '');
         fs.writeFileSync(transcriptPath, content, 'utf-8');
-        // Keep a partial out of Recent Documents — it isn't a document anyone
-        // asked for, it's a salvage file.
-        if (!interrupted) {
-            app.addRecentDocument(transcriptPath);
-            // A completed run supersedes any salvage from an earlier attempt.
-            // Left behind it would double up in the Transcripts list and let a
-            // search hit land on the truncated copy.
-            try { fs.unlinkSync(transcriptPath.replace(/\.txt$/, '.partial.txt')); } catch { /* none */ }
-        }
-        noteSessionFlushed();
-        if (interrupted) return { ok: false, error: 'Transcription interrupted.', transcriptPath };
+        app.addRecentDocument(transcriptPath);
         return { ok: true, transcriptPath };
     } catch (err) {
-        noteSessionFlushed();
         return { ok: false, error: err.message };
     }
 });
 
 ipcMain.handle('record:cancelTranscribe', async () => {
     if (!transcriber.proc) return { ok: false, error: 'No transcription in progress.' };
-    // Same prefix-not-a-transcript problem as the quit flush: the run stops
-    // where it stops, so whatever gets written is partial.
-    transcriber.interrupted = true;
     try { transcriber.proc.stdin.write(JSON.stringify({ cmd: 'stop' }) + '\n'); } catch {}
     await new Promise((resolve) => {
         const t = setTimeout(() => {
@@ -3214,57 +3086,39 @@ ipcMain.on('prompt:dismiss', () => {
 // active renderer so Live keeps its transcript-save flow.
 const AUTOSTOP_COUNTDOWN_SEC = 15;
 let autoStopTimer = null;
-// Which session's meeting ended — 'live' or 'record'. Live and a WAV recording
-// can run at once, and one meeting ending says nothing about the other session.
-let autoStopSlot = null;
 
-// One countdown at a time (the overlay window is a singleton): while one
-// session is counting down, the other's `meetingEnded` is dropped rather than
-// queued, and nothing re-arms it — that session just keeps recording until it
-// is stopped by hand. Fails safe, so a per-slot timer can wait.
-function onMeetingEnded(slot) {
-    if (autoStopTimer) return;                                   // already counting down
-    if (!(slot === 'live' ? live.proc : recorder.proc)) return;  // that one isn't recording
-    autoStopSlot = slot;
+function onMeetingEnded() {
+    if (autoStopTimer) return;                 // already counting down
+    if (!live.proc && !recorder.proc) return;  // nothing is recording
     showPromptWindow({ mode: 'autostop', seconds: AUTOSTOP_COUNTDOWN_SEC });
     autoStopTimer = setTimeout(() => {
         autoStopTimer = null;
-        autoStopSlot = null;
         closePromptWindow();
-        triggerAutoStop([slot]);
+        triggerAutoStop();
     }, AUTOSTOP_COUNTDOWN_SEC * 1000);
 }
 
-// `slot` scopes the cancel to the session that reported it (a resumed meeting
-// or a dead helper says nothing about the other one). Omit it to cancel
-// whatever is pending.
-function cancelAutoStop(slot) {
+function cancelAutoStop() {
     if (!autoStopTimer) return;
-    if (slot && autoStopSlot !== slot) return;
     clearTimeout(autoStopTimer);
     autoStopTimer = null;
-    autoStopSlot = null;
     closePromptWindow();
 }
 
-// Delegate to the named renderers: each runs the same stop+save path as its
-// Stop button (Live's transcript assembly lives in the renderer). The countdown
-// passes the one slot whose meeting ended; the quit flush passes both.
-function triggerAutoStop(slots) {
-    if (slots.includes('live') && live.proc) liveSendToRenderer({ type: 'autoStop' });
-    if (slots.includes('record') && recorder.proc) recordSendToRenderer({ type: 'autoStop' });
+// Delegate to whichever renderer is recording: it runs the same stop+save path
+// as its Stop button (Live's transcript assembly lives in the renderer).
+function triggerAutoStop() {
+    if (live.proc) liveSendToRenderer({ type: 'autoStop' });
+    else if (recorder.proc) recordSendToRenderer({ type: 'autoStop' });
 }
 
 ipcMain.on('prompt:keepRecording', () => cancelAutoStop());
 
-// "Stop now" — the same stop+save the countdown would have done, just
-// immediately, and to the same single session.
+// "Stop now" — the same stop+save the countdown would have done, just immediately.
 ipcMain.on('prompt:stopNow', () => {
-    const slot = autoStopSlot;
     if (autoStopTimer) { clearTimeout(autoStopTimer); autoStopTimer = null; }
-    autoStopSlot = null;
     closePromptWindow();
-    if (slot) triggerAutoStop([slot]);
+    triggerAutoStop();
 });
 
 // "✕" — hide the overlay only. The countdown keeps running and stops us in the
@@ -3278,13 +3132,7 @@ ipcMain.on('prompt:hide', () => closePromptWindow());
 function showMainWindow() {
     if (process.platform === 'darwin') app.setActivationPolicy('regular');
     if (!mainWindow || mainWindow.isDestroyed()) createWindow();
-    else {
-        // show() alone orders a miniaturized window front without deminiaturizing
-        // it, so a Dock click on a minimized window would look like a no-op.
-        if (mainWindow.isMinimized()) mainWindow.restore();
-        mainWindow.show();
-        mainWindow.focus();
-    }
+    else { mainWindow.show(); mainWindow.focus(); }
 }
 
 // Menu-bar icon embedded as a data URL (36 px PNG of the app logo). It cannot
@@ -3345,13 +3193,12 @@ app.whenReady().then(() => {
     buildTray();
     if (autoDetectEnabled()) startCallMonitor();
 
-    // A window hidden by the close guard still counts as a window, so re-show
-    // rather than only creating one when none exist.
-    app.on('activate', () => showMainWindow());
+    app.on('activate', () => {
+        if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    });
 });
 
 app.on('before-quit', () => {
-    quitting = true;
     stopCallMonitor();
 });
 
