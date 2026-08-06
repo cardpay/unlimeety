@@ -1827,7 +1827,7 @@ ipcMain.handle('transcripts:rename', async (_e, filePath, newTitle) => {
         const oldSummaryPath = findExistingSummaryPath(filePath);
 
         const content = fs.readFileSync(filePath, 'utf-8');
-        const updated = content.replace(/^Meeting: .*$/m, `Meeting: ${trimmed}`);
+        const updated = content.replace(/^Meeting: .*$/m, () => `Meeting: ${trimmed}`);
         fs.writeFileSync(filePath, updated, 'utf-8');
 
         const newBase = sanitizeFilenameBase(trimmed);
@@ -3025,7 +3025,16 @@ ipcMain.handle('record:transcribe', async (_e, opts) => {
                 const escapedStem = stem.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
                 const partialPattern = new RegExp(`^${escapedStem}( \\(\\d+\\))?\\.partial\\.txt$`);
                 for (const name of fs.readdirSync(TRANSCRIPTS_FOLDER)) {
-                    if (partialPattern.test(name)) fs.unlinkSync(path.join(TRANSCRIPTS_FOLDER, name));
+                    if (!partialPattern.test(name)) continue;
+                    // `<stem> (N).partial.txt` is ambiguous: it's either our own
+                    // salvage bumped by a rename collision, or a sibling
+                    // recording's own partial (record:start/record:rename both
+                    // hand out "<stem> (N)" for a genuinely different WAV). A
+                    // WAV actually claiming that stem means it's the sibling's -
+                    // leave it alone.
+                    const candidateStem = name.slice(0, -'.partial.txt'.length);
+                    if (candidateStem !== stem && fs.existsSync(path.join(RECORDINGS_FOLDER, `${candidateStem}.wav`))) continue;
+                    fs.unlinkSync(path.join(TRANSCRIPTS_FOLDER, name));
                 }
             } catch { /* none */ }
         }
