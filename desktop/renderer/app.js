@@ -2626,6 +2626,13 @@ dropOverlay.addEventListener("drop", async (e) => {
 });
 
 // ─── Keyboard shortcuts ───────────────────────────────────────────────────────
+
+// Anything layered over the editor: the six .modal-overlay modals plus the two
+// popovers built in JS (meeting rename, speaker rename).
+function anyOverlayOpen() {
+  return !!document.querySelector(".modal-overlay:not(.hidden), .rename-overlay, .spk-rename");
+}
+
 document.addEventListener("keydown", (e) => {
   const mod = e.metaKey || e.ctrlKey;
   if (mod && e.key === "s") {
@@ -2646,12 +2653,13 @@ document.addEventListener("keydown", (e) => {
     meetingSearchInput?.select();
   }
   // Find within the open note — only on the Transcripts tab, with a note open
-  // and no modal on top (modals are body-level overlays, so the tab stays
-  // visible behind them). Keyed off e.code so the shortcut also works on a
-  // non-Latin layout, where ⌘F reports e.key === "а".
+  // and nothing layered on top: modals and popovers are body-level, so the tab
+  // stays visible behind them, and stealing focus from the speaker-rename
+  // popover would commit a half-typed name on blur. Keyed off e.code so the
+  // shortcut also works on a non-Latin layout, where ⌘F reports e.key === "а".
   if (mod && e.code === "KeyF" && !e.shiftKey && !e.altKey && state.filePath &&
       !document.getElementById("editor-container")?.classList.contains("hidden") &&
-      !document.querySelector(".modal-overlay:not(.hidden)")) {
+      !anyOverlayOpen()) {
     e.preventDefault();
     window.findInNote?.open();
   }
@@ -2671,7 +2679,9 @@ document.addEventListener("keydown", (e) => {
   }
   // Escape closes the find bar from anywhere — clicking a match to seek the
   // audio moves focus out of the find input, and the shading has to go too.
-  else if (e.key === "Escape" && window.findInNote?.isOpen()) {
+  // Skipped while anything is layered on top: those have their own Escape
+  // listeners, and one keypress must not close both.
+  else if (e.key === "Escape" && window.findInNote?.isOpen() && !anyOverlayOpen()) {
     window.findInNote.close();
   }
 });

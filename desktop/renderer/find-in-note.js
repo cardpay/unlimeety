@@ -104,15 +104,21 @@
 
   // Content moved under us: refresh the matches but leave the caret, the focus
   // and the scroll position where the user put them — a rescan is not
-  // navigation. The position is only clamped, not re-located, so it can drift
-  // by a match when text is inserted before the current one.
+  // navigation. The position survives a re-render of the pane the user is not
+  // in (typically the rail loading its summary); it is only clamped, not
+  // re-located, so it can still drift by a match when text is inserted before
+  // the current one. If the text the current match lived in is gone — a note
+  // switch replaces the whole pane — the position is meaningless, so go back to
+  // the first match. Removing a text node collapses the ranges inside it onto
+  // its former parent (isConnected stays true, so that would be no signal).
   function rescan() {
     if (!isOpen()) return;
     clearTimeout(rescanTimer);
     rescanTimer = setTimeout(() => {
-      const prev = idx;
+      const prevIdx = idx, prevHit = hits[idx];
+      const survived = prevHit?.kind === "ta" || (!!prevHit && !prevHit.range.collapsed);
       scan();
-      idx = hits.length ? Math.min(Math.max(prev, 0), hits.length - 1) : -1;
+      idx = hits.length ? (survived ? Math.min(Math.max(prevIdx, 0), hits.length - 1) : 0) : -1;
       paint();
       updateCounter();
     }, 80);
@@ -122,21 +128,27 @@
 
   const visible = (el) => !!el && !el.classList.contains("hidden");
 
-  // Every match of `q` in `text`, case-insensitive, as {start, len} into `text`.
-  // Uses a regex rather than folding case by hand: toLowerCase() can change a
-  // string's length (İ → i̇), which would shift every later offset.
-  function matches(text, q) {
-    const re = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+  // Case-insensitive search for the query. A regex rather than a hand-rolled
+  // case fold: toLowerCase() can change a string's length (İ → i̇), which would
+  // shift every later offset. Compiled once per scan — a segmented transcript
+  // has thousands of text nodes.
+  function queryRe(q) {
+    return new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
+  }
+
+  // Every match of `re` in `text`, as {start, len} offsets into `text`.
+  function matches(text, re) {
+    re.lastIndex = 0;
     const out = [];
     for (let m = re.exec(text); m; m = re.exec(text)) out.push({ start: m.index, len: m[0].length });
     return out;
   }
 
-  function rangesIn(root, q) {
+  function rangesIn(root, re) {
     const out = [];
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
     for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-      for (const { start, len } of matches(node.nodeValue, q)) {
+      for (const { start, len } of matches(node.nodeValue, re)) {
         const r = document.createRange();
         r.setStart(node, start);
         r.setEnd(node, start + len);
@@ -146,23 +158,25 @@
     return out;
   }
 
+  // Collects the matches only — callers decide the position and then paint, so
+  // the highlight set is never built twice for one scan.
   function scan() {
     hits = [];
     idx = -1;
     const q = input.value;
     if (q) {
+      const re = queryRe(q);
       const view = document.getElementById("transcript-view");
       const editor = document.getElementById("editor");
       const rail = document.getElementById("summary-rail");
       const railBody = document.getElementById("summary-rail-body");
 
-      if (visible(view)) hits.push(...rangesIn(view, q));
+      if (visible(view)) hits.push(...rangesIn(view, re));
       else if (visible(editor)) {
-        for (const { start, len } of matches(editor.value, q)) hits.push({ kind: "ta", start, len });
+        for (const { start, len } of matches(editor.value, re)) hits.push({ kind: "ta", start, len });
       }
-      if (visible(rail) && railBody) hits.push(...rangesIn(railBody, q));
+      if (visible(rail) && railBody) hits.push(...rangesIn(railBody, re));
     }
-    paint();
   }
 
   function paint() {
