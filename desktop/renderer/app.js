@@ -657,8 +657,7 @@ const btnLibrary = document.getElementById("btn-library");
 const statusPath = document.getElementById("status-path");
 const statusWords = document.getElementById("status-words");
 const statusLines = document.getElementById("status-lines");
-const statusDirty = document.getElementById("status-dirty");
-const statusSaved = document.getElementById("status-saved");
+const saveChip = document.getElementById("save-chip");
 
 // Library DOM refs
 const libraryPanel = document.getElementById("library-panel");
@@ -1080,17 +1079,34 @@ async function saveFile() {
   if (result.ok) {
     state.savedContent = editor.value;
     setDirty(false);
+    // Pulse the chip so an autosave the user did not trigger is still visible.
+    saveChip.classList.remove("flash");
+    void saveChip.offsetWidth; // restart CSS animation
+    saveChip.classList.add("flash");
   } else {
     console.error("Save failed:", result.error);
+    setSaveChip("error");
   }
 }
 
 // Autosave: persist silently whenever there is something new on disk to write.
-// Editing is save-by-default now — speaker renames save immediately, free text
-// saves when the editor (or window) loses focus.
+// Editing is save-by-default — speaker renames save immediately, free text
+// saves a beat after the last keystroke and when focus leaves the editor.
+let autosaveTimer = null;
+
 async function autosave() {
+  clearTimeout(autosaveTimer);
   if (!state.filePath || editor.value === state.savedContent) return;
   await saveFile();
+}
+
+// Typing keeps rescheduling the write, so a pause of AUTOSAVE_DELAY_MS is what
+// commits it. Without this, edits only reached disk on blur — the chip claimed
+// "Saved" while the buffer was still unwritten, and a crash lost the text.
+const AUTOSAVE_DELAY_MS = 1000;
+function scheduleAutosave() {
+  clearTimeout(autosaveTimer);
+  autosaveTimer = setTimeout(autosave, AUTOSAVE_DELAY_MS);
 }
 
 async function saveAsFile() {
@@ -1127,9 +1143,20 @@ function setDirty(dirty) {
   state.isDirty = dirty;
   api.setDirty(dirty);
 
-  statusDirty.classList.toggle("hidden", !dirty);
-  statusSaved.classList.toggle("hidden", dirty);
+  setSaveChip(dirty ? "pending" : "saved");
   updateCancelBtn();
+}
+
+// The only save indicator in the UI. "Saving…" covers the window between a
+// keystroke and the autosave that follows it, so the chip never claims the text
+// is on disk before it is.
+function setSaveChip(status) {
+  saveChip.textContent =
+    status === "pending" ? "Saving…" :
+    status === "error" ? "⚠ Save failed" :
+    "✓ Saved";
+  saveChip.classList.toggle("chip-error", status === "error");
+  saveChip.classList.toggle("chip-pending", status === "pending");
 }
 
 // The former Save button is now "Cancel changes": enabled only while the text
@@ -2549,6 +2576,7 @@ editor.addEventListener("input", () => {
   if (!state.isDirty && editor.value !== state.savedContent) setDirty(true);
   else if (state.isDirty && editor.value === state.savedContent)
     setDirty(false);
+  scheduleAutosave();
   updateStats();
   updateCancelBtn();
 });
@@ -3783,7 +3811,6 @@ promptsReady = loadCustomPrompts();
 libraryPanel.classList.add("open");
 btnLibrary.classList.add("active");
 
-statusSaved.classList.add("hidden");
 btnSave.disabled = true;
 btnSaveAs.disabled = true;
 btnExport.disabled = true;
