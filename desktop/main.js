@@ -189,30 +189,51 @@ let quitting = false;
 // and the two that kill the helpers live later in this file.
 let quitFlushing = false;
 let quitFlushDone = null;                 // resolve fn while a flush is in flight
+let quitFlushRemaining = 0;               // acks still expected, one per busy slot
 const QUIT_FLUSH_TIMEOUT_MS = 10000;      // live:stop alone can take 5 s
 
-// Called by the handlers that complete a session — `live:saveTranscript` once
-// the transcript is on disk, `record:stop` once the WAV is finalized. Outside a
-// quit flush it does nothing.
+// Called by the handlers that complete a slot's work — `live:saveTranscript`
+// once the transcript is on disk, `record:stop` once the WAV is finalized,
+// `record:transcribe` once it has written (or given up on) its output. All
+// three can be in flight at once, so this counts down rather than resolving on
+// the first one. Outside a quit flush it does nothing.
 function noteSessionFlushed() {
     if (!quitFlushDone) return;
+    quitFlushRemaining -= 1;
+    if (quitFlushRemaining > 0) return;
     const resolve = quitFlushDone;
     quitFlushDone = null;
     resolve();
 }
 
 app.on('before-quit', (e) => {
-    if (quitting) return;                                   // already flushed
-    if (!live.proc && !recorder.proc) return;                // nothing to lose
-    if (!mainWindow || mainWindow.isDestroyed()) return;     // no renderer to save it
+    if (quitting) return;                                    // already flushed
+    // A recording can only be saved by the renderer that owns it; a
+    // transcription is assembled here in main and needs no renderer at all.
+    const rendererAlive = Boolean(mainWindow && !mainWindow.isDestroyed());
+    const busy = [
+        rendererAlive && live.proc,
+        rendererAlive && recorder.proc,
+        transcriber.proc,
+    ].filter(Boolean).length;
+    if (!busy) return;                                       // nothing to lose
     e.preventDefault();
     if (quitFlushing) return;                                // flush already running
     quitFlushing = true;
+    quitFlushRemaining = busy;
 
     cancelAutoStop();     // whatever the countdown was going to do, we're doing now
-    showMainWindow();     // the user should see "Finalizing…", not a Quit that hangs
     const saved = new Promise((resolve) => { quitFlushDone = resolve; });
-    triggerAutoStop();    // renderer runs the same stop+save as its Stop button
+    if (rendererAlive) {
+        showMainWindow();  // the user should see "Finalizing…", not a Quit that hangs
+        triggerAutoStop(); // renderer runs the same stop+save as its Stop button
+    }
+    // The transcriber helper parks on readLine() once its file is done, so
+    // closing stdin is the graceful stop: `record:transcribe` unblocks and
+    // writes the segments it has instead of losing them to the SIGTERM below.
+    if (transcriber.proc) {
+        try { transcriber.proc.stdin.end(); } catch { /* already closed */ }
+    }
 
     const timedOut = new Promise((resolve) => setTimeout(resolve, QUIT_FLUSH_TIMEOUT_MS));
     Promise.race([saved, timedOut]).then(() => {
@@ -2825,6 +2846,7 @@ ipcMain.handle('record:transcribe', async (_e, opts) => {
     }
 
     if (!segments.length) {
+        noteSessionFlushed();
         return { ok: false, error: 'Transcription produced no text.' };
     }
 
@@ -2891,8 +2913,10 @@ ipcMain.handle('record:transcribe', async (_e, opts) => {
         const content = headerLines.join('\n') + '\n\n' + body + (body ? '\n' : '');
         fs.writeFileSync(transcriptPath, content, 'utf-8');
         app.addRecentDocument(transcriptPath);
+        noteSessionFlushed();
         return { ok: true, transcriptPath };
     } catch (err) {
+        noteSessionFlushed();
         return { ok: false, error: err.message };
     }
 });
@@ -3178,9 +3202,12 @@ function cancelAutoStop() {
 
 // Delegate to whichever renderer is recording: it runs the same stop+save path
 // as its Stop button (Live's transcript assembly lives in the renderer).
+// Both can run at once (Live in one tab, a WAV recording in the other), and
+// each renderer ignores an event for a session it isn't running — so tell both
+// rather than picking one.
 function triggerAutoStop() {
     if (live.proc) liveSendToRenderer({ type: 'autoStop' });
-    else if (recorder.proc) recordSendToRenderer({ type: 'autoStop' });
+    if (recorder.proc) recordSendToRenderer({ type: 'autoStop' });
 }
 
 ipcMain.on('prompt:keepRecording', () => cancelAutoStop());
