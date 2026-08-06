@@ -176,8 +176,50 @@ function getStartupFile(argv) {
 
 // ─── Window ──────────────────────────────────────────────────────────────────
 
-// Set on `before-quit` so the close guard below lets the window go on a real Quit.
+// Set once a Quit is cleared to proceed, so the close guard below lets the
+// window go.
 let quitting = false;
+
+// A recording only ever exists in the renderer that started it, so quitting
+// mid-session used to SIGTERM the helper (the handlers further down do that)
+// and drop the transcript on the floor — silently, 40 minutes in. Flush first:
+// run the renderer's own stop+save, then quit for real.
+//
+// Registered here on purpose: `before-quit` handlers run in registration order,
+// and the two that kill the helpers live later in this file.
+let quitFlushing = false;
+let quitFlushDone = null;                 // resolve fn while a flush is in flight
+const QUIT_FLUSH_TIMEOUT_MS = 10000;      // live:stop alone can take 5 s
+
+// Called by the handlers that complete a session — `live:saveTranscript` once
+// the transcript is on disk, `record:stop` once the WAV is finalized. Outside a
+// quit flush it does nothing.
+function noteSessionFlushed() {
+    if (!quitFlushDone) return;
+    const resolve = quitFlushDone;
+    quitFlushDone = null;
+    resolve();
+}
+
+app.on('before-quit', (e) => {
+    if (quitting) return;                                   // already flushed
+    if (!live.proc && !recorder.proc) return;                // nothing to lose
+    if (!mainWindow || mainWindow.isDestroyed()) return;     // no renderer to save it
+    e.preventDefault();
+    if (quitFlushing) return;                                // flush already running
+    quitFlushing = true;
+
+    cancelAutoStop();     // whatever the countdown was going to do, we're doing now
+    showMainWindow();     // the user should see "Finalizing…", not a Quit that hangs
+    const saved = new Promise((resolve) => { quitFlushDone = resolve; });
+    triggerAutoStop();    // renderer runs the same stop+save as its Stop button
+
+    const timedOut = new Promise((resolve) => setTimeout(resolve, QUIT_FLUSH_TIMEOUT_MS));
+    Promise.race([saved, timedOut]).then(() => {
+        quitting = true;
+        app.quit();
+    });
+});
 
 function createWindow() {
     mainWindow = new BrowserWindow({
@@ -227,7 +269,9 @@ function createWindow() {
     });
 
     // Edits autosave (renderer flushes on editor/window blur), so closing never
-    // risks unsaved work — no confirmation dialog needed.
+    // risks unsaved work — no confirmation dialog needed. A recording is the one
+    // thing closing could still lose, which is what the guard below is for; Quit
+    // is handled by the flush registered next to `quitting`.
 
     // A recording session lives in the renderer: the transcript, the Stop button
     // and the auto-stop delegation are all its state. Destroying the window
@@ -238,7 +282,14 @@ function createWindow() {
         if (quitting) return;
         if (!live.proc && !recorder.proc) return;
         e.preventDefault();
-        mainWindow.hide();
+        // Hiding a fullscreen window leaves its Space behind as an empty desktop
+        // the user has to swipe out of, so drop out of fullscreen first.
+        if (mainWindow.isFullScreen()) {
+            mainWindow.once('leave-full-screen', () => mainWindow.hide());
+            mainWindow.setFullScreen(false);
+        } else {
+            mainWindow.hide();
+        }
     });
 }
 
@@ -2208,8 +2259,12 @@ ipcMain.handle('live:saveTranscript', async (_e, payload) => {
         fs.writeFileSync(filePath, content, 'utf-8');
         app.addRecentDocument(filePath);
         live.outputPath = null;
+        noteSessionFlushed();
         return { ok: true, filePath, audioPath: wavPath };
     } catch (err) {
+        // A failed save is still the end of the session — don't make a pending
+        // Quit sit out its whole timeout waiting for a save that won't come.
+        noteSessionFlushed();
         return { ok: false, error: err.message };
     }
 });
@@ -2392,6 +2447,7 @@ ipcMain.handle('record:stop', async () => {
     // guard. Synchronously nulling here closes that race.
     recorder.proc = null;
     recorder.outputPath = null;
+    noteSessionFlushed();
     return { ok: true };
 });
 
@@ -3147,7 +3203,13 @@ ipcMain.on('prompt:hide', () => closePromptWindow());
 function showMainWindow() {
     if (process.platform === 'darwin') app.setActivationPolicy('regular');
     if (!mainWindow || mainWindow.isDestroyed()) createWindow();
-    else { mainWindow.show(); mainWindow.focus(); }
+    else {
+        // show() alone orders a miniaturized window front without deminiaturizing
+        // it, so a Dock click on a minimized window would look like a no-op.
+        if (mainWindow.isMinimized()) mainWindow.restore();
+        mainWindow.show();
+        mainWindow.focus();
+    }
 }
 
 // Menu-bar icon embedded as a data URL (36 px PNG of the app logo). It cannot
