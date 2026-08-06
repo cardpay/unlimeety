@@ -799,6 +799,17 @@ body.mode-record #btn-ask-ai {
     padding: 0 1px;
 }
 
+/* Find in note (⌘F) — all matches dimmed, the current one on the accent. */
+::highlight(find-all) {
+    background: var(--accent-dim);
+    color: var(--text-primary);
+}
+
+::highlight(find-cur) {
+    background: var(--accent);
+    color: var(--bg-base);
+}
+
 .meeting-more {
     display: none;
     background: transparent;
