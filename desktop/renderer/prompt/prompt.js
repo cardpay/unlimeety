@@ -13,6 +13,7 @@ const dismissBtn = document.getElementById('dismiss-btn');
 const keepBtn = document.getElementById('keep-btn');
 const stopBtn = document.getElementById('stop-btn');
 const closeBtn = document.getElementById('close-btn');
+const textEl = document.getElementById('text');
 
 let countdownTimer = null;
 
@@ -27,6 +28,7 @@ function renderCall(app) {
     keepBtn.style.display = 'none';
     stopBtn.style.display = 'none';
     closeBtn.style.display = 'none';
+    textEl.classList.remove('with-close');
 }
 
 function renderAutoStop(seconds) {
@@ -37,6 +39,7 @@ function renderAutoStop(seconds) {
     stopBtn.style.display = '';
     keepBtn.style.display = '';
     closeBtn.style.display = '';
+    textEl.classList.add('with-close');
 
     const paint = () => { subtitle.textContent = `Stopping recording in ${remaining}s…`; };
     paint();

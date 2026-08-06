@@ -176,6 +176,9 @@ function getStartupFile(argv) {
 
 // ─── Window ──────────────────────────────────────────────────────────────────
 
+// Set on `before-quit` so the close guard below lets the window go on a real Quit.
+let quitting = false;
+
 function createWindow() {
     mainWindow = new BrowserWindow({
         width: 1200,
@@ -225,6 +228,18 @@ function createWindow() {
 
     // Edits autosave (renderer flushes on editor/window blur), so closing never
     // risks unsaved work — no confirmation dialog needed.
+
+    // A recording session lives in the renderer: the transcript, the Stop button
+    // and the auto-stop delegation are all its state. Destroying the window
+    // mid-recording therefore strands the helper — nothing can stop it short of
+    // Quit, and the transcript is lost. Hide the window instead; the tray item
+    // and the Dock icon bring it back, and every stop path keeps working.
+    mainWindow.on('close', (e) => {
+        if (quitting) return;
+        if (!live.proc && !recorder.proc) return;
+        e.preventDefault();
+        mainWindow.hide();
+    });
 }
 
 function updateTitle() {
@@ -3193,12 +3208,13 @@ app.whenReady().then(() => {
     buildTray();
     if (autoDetectEnabled()) startCallMonitor();
 
-    app.on('activate', () => {
-        if (BrowserWindow.getAllWindows().length === 0) createWindow();
-    });
+    // A window hidden by the close guard still counts as a window, so re-show
+    // rather than only creating one when none exist.
+    app.on('activate', () => showMainWindow());
 });
 
 app.on('before-quit', () => {
+    quitting = true;
     stopCallMonitor();
 });
 

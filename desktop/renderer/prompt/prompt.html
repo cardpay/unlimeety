@@ -81,12 +81,15 @@
       -webkit-app-region: no-drag;
     }
     .close-btn:hover { color: #f2f2f5; }
+    /* Gutter for the ✕ — only in autostop mode, where the ✕ exists. Call mode
+       owns the longest subtitle and needs the full width. */
+    .with-close { padding-right: 24px; }
   </style>
 </head>
 <body>
   <div class="card">
-    <button class="close-btn" id="close-btn" title="Dismiss" style="display:none">✕</button>
-    <div style="padding-right: 24px">
+    <button class="close-btn" id="close-btn" title="Hide — the recording still stops when the countdown ends" style="display:none">✕</button>
+    <div id="text">
       <div class="title" id="title">Looks like a call just started</div>
       <div class="subtitle" id="subtitle">Record this meeting?</div>
     </div>
