@@ -4,6 +4,9 @@ contextBridge.exposeInMainWorld('transcriber', {
     // File operations
     openFile: () => ipcRenderer.invoke('file:open'),
     saveFile: (filePath, content) => ipcRenderer.invoke('file:save', filePath, content),
+    // Blocking twin of saveFile, for beforeunload: the async path can lose the
+    // race against process exit on ⌘Q.
+    saveFileSync: (filePath, content) => ipcRenderer.sendSync('file:saveSync', filePath, content),
     saveAsFile: (content) => ipcRenderer.invoke('file:saveAs', content),
     exportPdf:  (html, defaultName) => ipcRenderer.invoke('export:pdf', html, defaultName),
     exportDocx: (payload)           => ipcRenderer.invoke('export:docx', payload),
@@ -16,6 +19,9 @@ contextBridge.exposeInMainWorld('transcriber', {
 
     // OS file open (Finder double-click, "Open with", recent docs menu)
     onFileOpened: (cb) => ipcRenderer.on('file:opened', (_e, data) => cb(data)),
+    // The renderer can decline an open, so main only commits title/recent-docs
+    // state once the file is actually loaded.
+    fileAccepted: (filePath) => ipcRenderer.send('file:accepted', filePath),
 
     // Window title dirty flag
     setDirty: (dirty) => ipcRenderer.send('window:setDirty', dirty),
@@ -129,6 +135,10 @@ contextBridge.exposeInMainWorld('promptApi', {
     dismiss: ()   => ipcRenderer.send('prompt:dismiss'),
     // Auto-stop countdown: user chose to keep recording → cancel the stop.
     keepRecording: () => ipcRenderer.send('prompt:keepRecording'),
+    // Auto-stop countdown: stop right now instead of waiting it out.
+    stopNow: () => ipcRenderer.send('prompt:stopNow'),
+    // Auto-stop countdown: hide the overlay, but let the countdown run out.
+    hide: () => ipcRenderer.send('prompt:hide'),
 });
 
 // ─── Notes (isolated namespace) ──────────────────────────────────────────────
