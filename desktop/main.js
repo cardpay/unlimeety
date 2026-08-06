@@ -140,6 +140,28 @@ function canReadPath(p) {
     return allowedReadPaths.has(p) || allowedReadPaths.has(resolved);
 }
 
+// Symmetric confinement for IPC handlers that WRITE to a renderer-supplied
+// path. Same policy as canReadPath (managed folders + explicitly user-picked
+// paths), except the target may not exist yet — so confinement resolves the
+// parent directory and re-joins the basename.
+function canWritePath(p) {
+    if (!p || typeof p !== 'string') return false;
+    if (canReadPath(p)) return true;
+    // The target exists (possibly as a symlink) but didn't pass canReadPath —
+    // deny instead of falling through to the parent-dir check, which a symlink
+    // planted inside a managed folder could otherwise redirect elsewhere.
+    try { fs.lstatSync(p); return false; } catch { /* no entry — a new file */ }
+    let dir;
+    try { dir = fs.realpathSync(path.dirname(p)); } catch { return false; }
+    const resolved = path.join(dir, path.basename(p));
+    for (const base of [TRANSCRIPTS_FOLDER, RECORDINGS_FOLDER]) {
+        let b;
+        try { b = fs.realpathSync(base); } catch { continue; }
+        if (isPathInside(resolved, b)) return true;
+    }
+    return allowedReadPaths.has(resolved);
+}
+
 // Returns a file path from argv, handling both direct paths and protocol URLs.
 // Both branches are confined: argv can carry a protocol URL on some platforms,
 // and a bare path here is equally untrusted (e.g. injected by the protocol
@@ -421,6 +443,9 @@ ipcMain.handle('file:open', async () => {
 function writeTranscriptFile(filePath, content) {
     const target = filePath || currentFilePath;
     if (!target) return { ok: false, error: 'No file path' };
+    if (!canWritePath(target)) {
+        return { ok: false, error: 'Refusing to write to a path outside the managed folders.' };
+    }
     try {
         fs.writeFileSync(target, content, 'utf-8');
         // Stamped after the write, not before: writeFileSync blocks until the
@@ -472,6 +497,7 @@ ipcMain.handle('file:saveAs', async (_e, content) => {
     if (!filePath) return { ok: false, canceled: true };
     try {
         fs.writeFileSync(filePath, content, 'utf-8');
+        registerReadablePath(filePath); // user-picked target: allow follow-up saves
         currentFilePath = filePath;
         isDirty = false;
         updateTitle();
@@ -514,6 +540,7 @@ ipcMain.handle('export:pdf', async (_e, html, defaultName) => {
     if (result.canceled || !result.filePath) return { ok: false, canceled: true };
     try {
         fs.writeFileSync(result.filePath, await generatePdf(html));
+        registerReadablePath(result.filePath); // user-picked target: allow showInFinder
         return { ok: true, filePath: result.filePath };
     } catch (err) {
         return { ok: false, error: err.message };
@@ -599,6 +626,7 @@ ipcMain.handle('export:docx', async (_e, payload) => {
         const doc = new Document({ sections: [{ children }] });
         const buffer = await Packer.toBuffer(doc);
         fs.writeFileSync(result.filePath, buffer);
+        registerReadablePath(result.filePath); // user-picked target: allow showInFinder
         return { ok: true, filePath: result.filePath };
     } catch (err) {
         return { ok: false, error: err.message };
@@ -676,6 +704,25 @@ function summaryFilePath(transcriptPath, folderOverride) {
     if (safeOverride) return path.join(dir, safeOverride + '.summary.md');
     const { info, mtimeMs } = readTranscriptInfoSync(transcriptPath);
     return path.join(dir, defaultSummaryBase(transcriptPath, info, mtimeMs) + '.summary.md');
+}
+
+// The summary handlers accept an optional folder override from the renderer.
+// Legitimate renderer code always sends null (main falls back to the configured
+// summary folder or the transcript's own directory), so only honour overrides
+// that resolve to a directory the main process already trusts.
+function summaryDirAllowed(transcriptPath, folderOverride) {
+    if (folderOverride == null) return true;
+    if (typeof folderOverride !== 'string') return false;
+    let resolved;
+    try { resolved = fs.realpathSync(folderOverride); } catch { return false; }
+    const trusted = [readConfig().summaryFolder, path.dirname(transcriptPath), TRANSCRIPTS_FOLDER, RECORDINGS_FOLDER];
+    for (const dir of trusted) {
+        if (!dir) continue;
+        let d;
+        try { d = fs.realpathSync(dir); } catch { continue; }
+        if (resolved === d || isPathInside(resolved, d)) return true;
+    }
+    return false;
 }
 
 function findExistingSummaryPath(transcriptPath, folderOverride) {
@@ -756,9 +803,13 @@ ipcMain.handle('prompts:delete', (_e, id) => {
 });
 
 ipcMain.handle('summary:save', (_e, transcriptPath, text, folder) => {
+    if (!canReadPath(transcriptPath) || !summaryDirAllowed(transcriptPath, folder || null)) {
+        return { ok: false, error: 'Refusing to operate on a path outside the managed folders.' };
+    }
     try {
         const filePath = summaryFilePath(transcriptPath, folder || null);
         fs.writeFileSync(filePath, text, 'utf-8');
+        registerReadablePath(filePath); // summary may live outside managed folders
         return { ok: true, filePath };
     } catch (err) {
         return { ok: false, error: err.message };
@@ -769,10 +820,14 @@ ipcMain.handle('summary:save', (_e, transcriptPath, text, folder) => {
 // summary was loaded from (findExistingSummaryPath), so editing never spawns a
 // duplicate under a different (default/legacy) name.
 ipcMain.handle('summary:overwrite', (_e, transcriptPath, text, folder) => {
+    if (!canReadPath(transcriptPath) || !summaryDirAllowed(transcriptPath, folder || null)) {
+        return { ok: false, error: 'Refusing to operate on a path outside the managed folders.' };
+    }
     try {
         const filePath = findExistingSummaryPath(transcriptPath, folder || null)
             || summaryFilePath(transcriptPath, folder || null);
         fs.writeFileSync(filePath, text, 'utf-8');
+        registerReadablePath(filePath); // summary may live outside managed folders
         return { ok: true, filePath };
     } catch (err) {
         return { ok: false, error: err.message };
@@ -793,6 +848,9 @@ ipcMain.handle('summary:setName', (_e, transcriptPath, customName) => {
 });
 
 ipcMain.handle('summary:load', (_e, transcriptPath, folder) => {
+    if (!canReadPath(transcriptPath) || !summaryDirAllowed(transcriptPath, folder || null)) {
+        return { ok: false, error: 'Refusing to operate on a path outside the managed folders.' };
+    }
     try {
         const p = findExistingSummaryPath(transcriptPath, folder || null);
         if (!p) return { ok: false };
@@ -1021,7 +1079,7 @@ async function runOpenRouter(content, promptInstruction, config) {
             headers: {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${apiKey}`,
-                'HTTP-Referer': 'https://github.com/unlimeety-desktop',
+                'HTTP-Referer': 'https://github.com/cardpay/unlimeety',
                 'X-Title': 'Unlimeety',
             },
             body: JSON.stringify({
@@ -1134,12 +1192,12 @@ ipcMain.handle('summarize:run', async (_e, filePath, promptInstruction) => {
 
     // Lines like "[12:34] Note:" are the user's own typed notes (Live floating
     // window, Record-tab inline control, or the Chrome extension — all three
-    // write this exact marker), not a spoken turn. Every preset/custom prompt
-    // funnels through this one handler, so this is the only place this needs
-    // explaining to the model. Gated on the marker's presence so note-free
+    // write this exact marker), not a spoken turn. Every preset and custom
+    // prompt funnels through this one handler, so this is the only place it
+    // needs explaining to the model. Gated on the marker so note-free
     // transcripts don't pay for an irrelevant instruction.
-    if (content.includes('] Note:')) {
-        promptInstruction = `Any transcript line formatted as "[mm:ss] Note:" followed by text is a note the user typed themselves during the meeting — not something anyone said aloud. Treat these as high-priority context: if a note reads like a task/TODO, fold it into the Action Items section (don't invent an owner or deadline unless the note itself states one); otherwise incorporate it as context in the relevant part of the summary.\n\n${promptInstruction}`;
+    if (content.includes(`] ${NOTE_LABEL}:`)) {
+        promptInstruction = `Any transcript line formatted as "[mm:ss] ${NOTE_LABEL}:" followed by text is a note the user typed themselves during the meeting — not something anyone said aloud. Treat these as high-priority context: if a note reads like a task/TODO, fold it into the Action Items section (don't invent an owner or deadline unless the note itself states one); otherwise incorporate it as context in the relevant part of the summary.\n\n${promptInstruction}`;
     }
 
     const cfg = readSummarizerConfig();
@@ -1274,7 +1332,7 @@ async function runChatOpenRouter(transcriptContent, messages, config) {
             headers: {
                 'Content-Type': 'application/json',
                 'Authorization': `Bearer ${apiKey}`,
-                'HTTP-Referer': 'https://github.com/unlimeety-desktop',
+                'HTTP-Referer': 'https://github.com/cardpay/unlimeety',
                 'X-Title': 'Unlimeety',
             },
             body: JSON.stringify({ model, messages: [systemMsg, ...messages] }),
@@ -1635,7 +1693,15 @@ ipcMain.handle('transcripts:delete', async (_e, filePath) => {
 });
 
 ipcMain.handle('transcripts:openFile', async (_e, filePath) => {
+    // Unlike the main-process open paths (Finder, confined protocol, dialogs),
+    // this one is renderer-driven — honour only already-readable paths so a
+    // compromised renderer can't use it to read (and then exfiltrate via a
+    // remote LLM) arbitrary files.
+    if (!canReadPath(filePath)) {
+        return { ok: false, error: 'Refusing to open a path outside the managed folders.' };
+    }
     openFileFromPath(filePath);
+    return { ok: true };
 });
 
 // Delete only the .txt transcript. Audio and summary stay on disk.
@@ -2131,6 +2197,10 @@ ipcMain.handle('live:start', async (_e, opts) => {
         proc.on('error', (err) => {
             liveSendToRenderer({ type: 'error', message: `helper spawn error: ${err.message}` });
             live.proc = null;
+            // Node emits 'error' (not 'exit') when the helper fails to spawn at
+            // all, so without this the always-on-top notes panel would outlive
+            // the session it belongs to, with nothing left to accept its notes.
+            closeNotesWindow();
         });
 
         proc.stdin.write(JSON.stringify(payload) + '\n');
@@ -2289,18 +2359,7 @@ ipcMain.handle('live:saveTranscript', async (_e, payload) => {
                     : 'Speaker');
             return { start: seg.start, block: `[${t}] ${who}:\n${String(seg.text || '').trim()}` };
         });
-        // User-typed notes get the same [time] Label:\ntext shape as a segment,
-        // with the reserved label "Note" — parseSegments() (renderer) doesn't
-        // special-case speaker names, so this needs no parser changes, and the
-        // summarizer hint (summarize:run) keys off this exact "] Note:" string.
-        const noteBlocks = live.notes.map(n => {
-            const start = Math.max(0, (n.at - (live.notesStartedAt || n.at)) / 1000);
-            return { start, block: `[${formatHms(start)}] Note:\n${n.text}` };
-        });
-        const body = [...segBlocks, ...noteBlocks]
-            .sort((a, b) => a.start - b.start)
-            .map(x => x.block)
-            .join('\n\n');
+        const body = interleaveNotes(segBlocks, buildNoteBlocks(live.notes, live.notesStartedAt));
 
         const content = headerLines.join('\n') + '\n\n' + body + (body ? '\n' : '');
 
@@ -2312,6 +2371,10 @@ ipcMain.handle('live:saveTranscript', async (_e, payload) => {
             : uniqueFilePath(TRANSCRIPTS_FOLDER, sanitizeFilenameBase(title), '.txt');
         fs.writeFileSync(filePath, content, 'utf-8');
         app.addRecentDocument(filePath);
+        // Kept (not deleted) after a successful save: re-transcribing this same
+        // wav from the Record tab rewrites the .txt from scratch, and the notes
+        // should come back with it.
+        flushNotesSidecar(live);
         live.outputPath = null;
         live.notes = [];
         live.notesStartedAt = null;
@@ -2332,6 +2395,41 @@ function formatHms(sec) {
     const r = s % 60;
     const pad = (n) => String(n).padStart(2, '0');
     return h > 0 ? `${pad(h)}:${pad(m)}:${pad(r)}` : `${pad(m)}:${pad(r)}`;
+}
+
+// Reserved pseudo-speaker for the user's own typed notes. Spelled once here:
+// both transcript writers, summarize:run's gate and the renderer's
+// "not a real speaker" check all key off this single literal.
+const NOTE_LABEL = 'Note';
+
+// A note body is free text, but the transcript is line-oriented: parseSegments
+// treats a line starting `[<digit>…]` as the start of a new turn. Pasting
+// "[04:12] Alice: …" into the note box would therefore re-parse on reopen as a
+// bogus Alice turn, and swallow the note's own body. A leading space breaks the
+// anchor and is invisible in the note itself.
+function escapeNoteText(text) {
+    return String(text || '').replace(/^\[/gm, ' [');
+}
+
+// Turn a session's captured notes into the same {start, block} shape the
+// segment writers produce, on the shared elapsed-seconds clock.
+function buildNoteBlocks(notes, startedAt) {
+    return notes.map(n => {
+        const start = Math.max(0, (n.at - (startedAt || n.at)) / 1000);
+        return { start, block: `[${formatHms(start)}] ${NOTE_LABEL}:\n${n.text}` };
+    });
+}
+
+// Shared by live:saveTranscript and record:transcribe. The index tie-break is
+// load-bearing: notes typed before the audio clock started (during model load)
+// all clamp to 0, and this is what keeps them in the order they were typed
+// rather than at the mercy of sort stability.
+function interleaveNotes(segBlocks, noteBlocks) {
+    return [...segBlocks, ...noteBlocks]
+        .map((x, i) => ({ ...x, i }))
+        .sort((a, b) => a.start - b.start || a.i - b.i)
+        .map(x => x.block)
+        .join('\n\n');
 }
 
 // Make sure we don't leave a zombie helper if the window is closed mid-recording.
@@ -2503,7 +2601,7 @@ ipcMain.handle('record:start', async (_e, opts) => {
 
 ipcMain.handle('record:stop', async () => {
     if (!recorder.proc) return { ok: false, error: 'No recording in progress.' };
-    flushRecorderNotesSidecar();
+    flushNotesSidecar(recorder);
     try { recorder.proc.stdin.write(JSON.stringify({ cmd: 'stop' }) + '\n'); } catch { /* may already be closed */ }
 
     await new Promise((resolve) => {
@@ -2567,32 +2665,44 @@ function recordingTranscriptPath(wavPath) {
     return path.join(TRANSCRIPTS_FOLDER, `${base}.txt`);
 }
 
-function recordingNotesPath(wavPath) {
+function notesSidecarPath(wavPath) {
     const base = path.basename(wavPath, path.extname(wavPath));
     return path.join(RECORDINGS_FOLDER, `${base}.notes.json`);
 }
 
-// record:transcribe is fully decoupled from the `recorder` in-memory object —
-// it can run much later (even a different app launch) via Re-transcribe or
-// the batch-transcribe flow, identified only by the .wav path. So notes typed
-// during a Record session are flushed to a small sidecar file (elapsed
-// seconds already resolved) rather than kept in memory only, or they'd be
-// silently lost before record:transcribe ever gets a chance to see them.
-function flushRecorderNotesSidecar() {
-    if (!recorder.outputPath || !recorder.notes.length) return;
+// The sidecar is keyed purely on the wav stem, so it has to follow the wav
+// everywhere the wav goes. Left behind on a rename the notes silently vanish
+// from the next transcription; left behind on a delete it outlives the
+// recording and gets adopted by whatever later recording lands on that stem.
+function removeNotesSidecar(wavPath) {
+    try { fs.unlinkSync(notesSidecarPath(wavPath)); } catch { /* nothing to remove */ }
+}
+
+// Notes are captured in memory, but `record:transcribe` is fully decoupled
+// from the session that captured them — Re-transcribe and the batch flow know
+// only a .wav path, possibly a different app launch later. So every session
+// mirrors its notes to a sidecar next to the wav, with elapsed seconds already
+// resolved. Live tees its audio into RECORDINGS_FOLDER under the same stem, so
+// its notes survive re-transcription (and a crash) exactly like Record's.
+function flushNotesSidecar(slot) {
+    if (!slot.outputPath || !slot.notes.length) return;
     try {
-        const notes = recorder.notes.map(n => ({
-            start: Math.max(0, (n.at - (recorder.notesStartedAt || n.at)) / 1000),
+        const notes = slot.notes.map(n => ({
+            start: Math.max(0, (n.at - (slot.notesStartedAt || n.at)) / 1000),
             text: n.text,
         }));
-        fs.writeFileSync(recordingNotesPath(recorder.outputPath), JSON.stringify(notes), 'utf-8');
+        fs.writeFileSync(notesSidecarPath(slot.outputPath), JSON.stringify(notes), 'utf-8');
     } catch { /* best-effort — notes are an enhancement, never block stop/quit */ }
 }
 
-function readRecorderNotesSidecar(wavPath) {
+function readNotesSidecar(wavPath) {
     try {
-        const notes = JSON.parse(fs.readFileSync(recordingNotesPath(wavPath), 'utf-8'));
-        return Array.isArray(notes) ? notes : [];
+        const notes = JSON.parse(fs.readFileSync(notesSidecarPath(wavPath), 'utf-8'));
+        if (!Array.isArray(notes)) return [];
+        // Hand-edited or truncated files shouldn't produce NaN timecodes.
+        return notes
+            .filter(n => n && typeof n.text === 'string')
+            .map(n => ({ start: Math.max(0, Number(n.start) || 0), text: n.text }));
     } catch {
         return [];
     }
@@ -2613,6 +2723,7 @@ ipcMain.handle('record:delete', async (_e, filePath) => {
     if (choice !== 0) return { ok: false, canceled: true };
     try {
         fs.unlinkSync(filePath);
+        removeNotesSidecar(filePath);
         return { ok: true };
     } catch (err) {
         return { ok: false, error: err.message };
@@ -2644,6 +2755,7 @@ ipcMain.handle('record:deleteMany', async (_e, paths) => {
     for (const p of targets) {
         try {
             fs.unlinkSync(p);
+            removeNotesSidecar(p);
             deleted++;
         } catch (err) {
             errors.push({ path: p, error: err.message });
@@ -2740,7 +2852,16 @@ ipcMain.handle('record:rename', async (_e, wavPath, newTitle) => {
         const hasTranscript = fs.existsSync(oldTranscriptPath);
         const oldSummaryPath = hasTranscript ? findExistingSummaryPath(oldTranscriptPath) : null;
 
-        if (newWavPath !== wavPath) fs.renameSync(wavPath, newWavPath);
+        if (newWavPath !== wavPath) {
+            fs.renameSync(wavPath, newWavPath);
+            // The notes sidecar is keyed on the wav stem, so it has to move with
+            // it — otherwise the next (re-)transcription looks under the new
+            // stem, finds nothing, and drops every note without a word.
+            if (fs.existsSync(notesSidecarPath(wavPath))) {
+                try { fs.renameSync(notesSidecarPath(wavPath), notesSidecarPath(newWavPath)); }
+                catch { /* best-effort: a lost sidecar must not fail the rename */ }
+            }
+        }
 
         // A cut-short transcription leaves `<stem>.partial.txt` next to the real
         // transcript, keyed to the WAV's stem — and since that stem never
@@ -2808,7 +2929,7 @@ ipcMain.handle('record:rename', async (_e, wavPath, newTitle) => {
 });
 
 ipcMain.handle('record:showInFinder', (_e, filePath) => {
-    if (typeof filePath !== 'string') return false;
+    if (typeof filePath !== 'string' || !canReadPath(filePath)) return false;
     shell.showItemInFolder(filePath);
     return true;
 });
@@ -3032,18 +3153,14 @@ ipcMain.handle('record:transcribe', async (_e, opts) => {
             const who = humanizeSpeakerLabel(rawWho);
             return { start: seg.start, block: `[${t}] ${who}:\n${String(seg.text || '').trim()}` };
         });
-        // Notes typed during the original recording, resolved into elapsed
-        // seconds and flushed to a sidecar at record:stop (see
-        // flushRecorderNotesSidecar) since this handler only knows the .wav
-        // path, not the in-memory recorder session that captured them.
-        const noteBlocks = readRecorderNotesSidecar(filePath).map(n => ({
+        // Notes captured while this wav was being recorded — read back from the
+        // sidecar, since this handler knows only the path and may be running in
+        // a later app launch entirely. Elapsed seconds are already resolved.
+        const sidecarNotes = readNotesSidecar(filePath).map(n => ({
             start: n.start,
-            block: `[${formatHms(n.start)}] Note:\n${n.text}`,
+            block: `[${formatHms(n.start)}] ${NOTE_LABEL}:\n${n.text}`,
         }));
-        const body = [...segBlocks, ...noteBlocks]
-            .sort((a, b) => a.start - b.start)
-            .map(x => x.block)
-            .join('\n\n');
+        const body = interleaveNotes(segBlocks, sidecarNotes);
         const content = headerLines.join('\n') + '\n\n' + body + (body ? '\n' : '');
         fs.writeFileSync(transcriptPath, content, 'utf-8');
         // Keep a partial out of Recent Documents — it isn't a document anyone
@@ -3140,10 +3257,10 @@ ipcMain.handle('record:deleteModel', async (_e, modelName) => {
 // Kill any record/transcribe helper if the app quits mid-flight.
 app.on('before-quit', () => {
     if (quitFlushing) return;   // the flush above owns teardown while it's running
-    // Backstop: the graceful path (record:stop, via the flush above) already
-    // flushes notes; this covers whatever slot never got there before the
-    // timeout reaped it.
-    flushRecorderNotesSidecar();
+    // Backstop: the graceful paths (record:stop / live:saveTranscript) already
+    // mirror their notes, this covers a slot the flush timeout had to reap.
+    flushNotesSidecar(recorder);
+    flushNotesSidecar(live);
     for (const slot of [recorder, transcriber]) {
         if (slot.proc) {
             try { slot.proc.kill('SIGTERM'); } catch {}
@@ -3157,16 +3274,36 @@ app.on('before-quit', () => {
 // window or directly into the Record tab. Both go through the same
 // notesApi/notes:add channel; a note lands on whichever of live/recorder is
 // currently active (both, if both happen to be running at once).
-ipcMain.on('notes:add', (_e, text) => {
-    const note = { text: String(text || '').trim(), at: Date.now() };
-    if (!note.text) return;
-    if (live.proc) live.notes.push(note);
-    if (recorder.proc) recorder.notes.push(note);
+//
+// invoke, not send: with no session running there is nowhere to put the note,
+// and the renderers must not paint a row that main threw away.
+ipcMain.handle('notes:add', (_e, text) => {
+    const clean = escapeNoteText(String(text || '').trim());
+    if (!clean) return { ok: false, error: 'empty' };
+    const note = { text: clean, at: Date.now() };
+    let accepted = false;
+    if (live.proc) { live.notes.push(note); accepted = true; }
+    if (recorder.proc) { recorder.notes.push(note); accepted = true; }
+    if (!accepted) return { ok: false, error: 'no recording in progress' };
+    return { ok: true, text: clean };
 });
 
-// Floating notes window — Live tab only (Record tab has an inline control in
-// its own section instead). Modeled on showPromptWindow() below, but this one
-// needs real keyboard focus for its text input, so — unlike that prompt —
+// The floating window is closeable and reopenable mid-session, so it can't be
+// the source of truth for what has been captured — main is. Hand it the
+// session's notes on load so a reopened window shows the real list instead of
+// an empty one that reads as data loss.
+ipcMain.handle('notes:list', () => {
+    const slot = live.proc ? live : (recorder.proc ? recorder : null);
+    if (!slot) return [];
+    return slot.notes.map(n => ({
+        start: Math.max(0, (n.at - (slot.notesStartedAt || n.at)) / 1000),
+        text: n.text,
+    }));
+});
+
+// Floating notes window — Live tab only (the Record tab has an inline control
+// in its own section instead). Modeled on showPromptWindow() below, but this
+// one needs real keyboard focus for its text input, so — unlike that prompt —
 // `focusable` is not set to false.
 let notesWindow = null;
 
@@ -3569,9 +3706,7 @@ app.whenReady().then(() => {
     if (autoDetectEnabled()) startCallMonitor();
 
     // A window hidden by the close guard still counts as a window, so re-show
-    // rather than only creating one when none exist. showMainWindow() also
-    // covers the Dock-click-focuses-the-notes-panel-instead case: it always
-    // targets mainWindow explicitly rather than "any window".
+    // rather than only creating one when none exist.
     app.on('activate', () => showMainWindow());
 });
 

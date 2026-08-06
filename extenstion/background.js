@@ -6,6 +6,10 @@
 // Dictionary to store transcripts per tabId
 const transcripts = {};
 
+// Reserved pseudo-speaker for the user's own typed notes — same literal the
+// desktop app uses, so a transcript from either source summarizes the same way.
+const NOTE_LABEL = 'Note';
+
 // Track downloads that should trigger the Unlimeety desktop app.
 // If the app is not installed the download still completes normally.
 const pendingOpenInApp = new Set();
@@ -41,6 +45,8 @@ chrome.downloads.onChanged.addListener((delta) => {
 
 // Listen for messages from content scripts
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  // Only accept messages from our own content scripts.
+  if (sender.id !== chrome.runtime.id) return;
   const tabId = sender.tab ? sender.tab.id : null;
   if (!tabId) return;
 
@@ -59,18 +65,27 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     transcripts[tabId].lines.push(request.data);
     chrome.storage.local.set({ [tabId]: transcripts[tabId] });
   } else if (request.action === 'addNote') {
-    // Same reserved "Note" speaker label the desktop app uses for its own
-    // typed notes, so summarize:run's hint recognizes either. Pushed in
-    // arrival order alongside caption lines — both arrive live, so no
-    // re-sorting is needed the way the desktop app's async segments require.
-    transcripts[tabId].lines.push({ time: request.data.time, speaker: 'Note', text: request.data.text });
+    // Same reserved "Note" speaker label the desktop app writes, so one
+    // summarizer hint recognises either source. Appended in arrival order —
+    // captions and notes both arrive live, so nothing needs re-sorting.
+    transcripts[tabId].lines.push({
+      time: request.data.time,
+      speaker: NOTE_LABEL,
+      text: request.data.text,
+    });
     chrome.storage.local.set({ [tabId]: transcripts[tabId] });
   } else if (request.action === 'updateLastTranscript') {
-    if (transcripts[tabId].lines.length > 0) {
-      transcripts[tabId].lines[transcripts[tabId].lines.length - 1] = request.data;
+    // "Last" means the last *caption*, not the last line: a note typed while
+    // someone is mid-sentence sits on top of the caption this update is meant
+    // to revise, and a blind lines[length-1] write would silently eat it.
+    const lines = transcripts[tabId].lines;
+    let i = lines.length - 1;
+    while (i >= 0 && lines[i].speaker === NOTE_LABEL) i--;
+    if (i >= 0) {
+      lines[i] = request.data;
       chrome.storage.local.set({ [tabId]: transcripts[tabId] });
     } else {
-      transcripts[tabId].lines.push(request.data);
+      lines.push(request.data);
     }
   } else if (request.action === 'setMeetingTitle') {
     transcripts[tabId].meetingTitle = request.meetingTitle;

@@ -1,11 +1,10 @@
 // Floating notes window shown by main.js during a Live session. Talks to
 // main via the `notesApi` bridge exposed in preload.js.
 //
-// The displayed timecode is a local echo only, anchored to when this window
-// loaded — not the authoritative recording start (which lives in main.js and
-// may only be finalized once the helper's 'recording' event arrives). The
-// saved transcript always uses main's timestamp; this one just gives the
-// user immediate visual feedback and can drift a little from it.
+// Main owns the notes: this window is closeable and reopenable mid-session, so
+// it repopulates from main on load rather than trusting its own DOM, and only
+// paints a row once main has acknowledged the note. The elapsed times shown
+// here are main's own, so they match the saved transcript exactly.
 
 const listEl = document.getElementById('list');
 const emptyEl = document.getElementById('empty');
@@ -15,10 +14,10 @@ const collapseBtn = document.getElementById('collapse-btn');
 const iconCollapse = document.getElementById('icon-collapse');
 const iconExpand = document.getElementById('icon-expand');
 
-const startedAt = Date.now();
+const PLACEHOLDER = 'Note… (Enter to save)';
 
 function formatHms(sec) {
-    const s = Math.max(0, Math.floor(sec));
+    const s = Math.max(0, Math.floor(Number(sec) || 0));
     const h = Math.floor(s / 3600);
     const m = Math.floor((s % 3600) / 60);
     const r = s % 60;
@@ -26,32 +25,57 @@ function formatHms(sec) {
     return h > 0 ? `${pad(h)}:${pad(m)}:${pad(r)}` : `${pad(m)}:${pad(r)}`;
 }
 
-function addRow(text) {
-    emptyEl.style.display = 'none';
-    const row = document.createElement('div');
-    row.className = 'note-row';
+function renderNotes(notes) {
+    listEl.querySelectorAll('.note-row').forEach(row => row.remove());
+    emptyEl.style.display = notes.length ? 'none' : '';
+    for (const n of notes) {
+        const row = document.createElement('div');
+        row.className = 'note-row';
 
-    const time = document.createElement('div');
-    time.className = 'note-time';
-    time.textContent = formatHms((Date.now() - startedAt) / 1000);
+        const time = document.createElement('div');
+        time.className = 'note-time';
+        time.textContent = formatHms(n.start);
 
-    const body = document.createElement('div');
-    body.className = 'note-text';
-    body.textContent = text;
+        const body = document.createElement('div');
+        body.className = 'note-text';
+        body.textContent = n.text;
 
-    row.appendChild(time);
-    row.appendChild(body);
-    listEl.appendChild(row);
+        row.appendChild(time);
+        row.appendChild(body);
+        listEl.appendChild(row);
+    }
     listEl.scrollTop = listEl.scrollHeight;
 }
 
-inputEl.addEventListener('keydown', (e) => {
+async function refresh() {
+    try {
+        renderNotes((await window.notesApi.list()) || []);
+    } catch { /* no session — the empty placeholder is the honest state */ }
+}
+
+function flashPlaceholder(message) {
+    inputEl.placeholder = message;
+    setTimeout(() => { inputEl.placeholder = PLACEHOLDER; }, 2500);
+}
+
+// Reopened mid-session: show what main already holds, not an empty list that
+// would read as "your earlier notes are gone".
+refresh();
+
+inputEl.addEventListener('keydown', async (e) => {
     if (e.key !== 'Enter') return;
     const text = inputEl.value.trim();
     if (!text) return;
-    addRow(text);
-    window.notesApi.add(text);
     inputEl.value = '';
+    const res = await window.notesApi.add(text);
+    if (!res?.ok) {
+        // Nothing is recording, so the note has nowhere to land. Hand the text
+        // back rather than painting a row for something that wasn't saved.
+        inputEl.value = text;
+        flashPlaceholder('Not recording — note not saved');
+        return;
+    }
+    refresh();
 });
 
 closeBtn.addEventListener('click', () => window.notesApi.close());
