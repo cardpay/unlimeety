@@ -343,6 +343,31 @@ body.mode-record #btn-ask-ai {
 #editor-toolbar.hidden { display: none; }
 .toolbar-sep { flex: 1; }
 
+/* Save indicator — the one place the UI reports whether edits reached disk */
+.save-chip {
+    display: inline-block; /* transform needs a box */
+    font-size: 11px;
+    color: var(--saved);
+    margin: 0 6px;
+    white-space: nowrap;
+}
+.save-chip.chip-pending {
+    color: var(--text-secondary);
+}
+/* --danger, not --dirty: a failed write is an error, and the warning tone drops
+   to ~3:1 on the light canvas at this size. */
+.save-chip.chip-error {
+    color: var(--danger);
+}
+/* Scale only — a brightness flash washes out --saved on the light theme. */
+.save-chip.flash {
+    animation: saved-pulse 0.7s ease-out;
+}
+@keyframes saved-pulse {
+    0%   { transform: scale(1.3); }
+    100% { transform: scale(1); }
+}
+
 /* ─── Empty State ─────────────────────────────────────────────────────────────── */
 #empty-state {
     position: absolute;
@@ -464,14 +489,6 @@ body.mode-record #btn-ask-ai {
 .status-divider {
     color: var(--text-muted);
     opacity: 0.4;
-}
-
-.status-dirty {
-    color: var(--dirty);
-}
-
-.status-saved {
-    color: var(--saved);
 }
 
 #status-path {
@@ -797,6 +814,17 @@ body.mode-record #btn-ask-ai {
     color: var(--text-primary);
     border-radius: 2px;
     padding: 0 1px;
+}
+
+/* Find in note (⌘F) — all matches dimmed, the current one on the accent. */
+::highlight(find-all) {
+    background: var(--accent-dim);
+    color: var(--text-primary);
+}
+
+::highlight(find-cur) {
+    background: var(--accent);
+    color: var(--bg-base);
 }
 
 .meeting-more {

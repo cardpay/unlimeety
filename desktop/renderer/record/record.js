@@ -495,15 +495,8 @@
 
     function updateStatusBar(phase) {
         const path = document.getElementById('status-path');
-        const saved = document.getElementById('status-saved');
-        const dirty = document.getElementById('status-dirty');
         if (phase === 'recording' && state.outputPath) {
             if (path) path.textContent = `Recording → ${state.outputPath}`;
-            if (saved) saved.classList.add('hidden');
-            if (dirty) dirty.classList.remove('hidden');
-        } else if (phase === 'idle') {
-            if (saved) saved.classList.remove('hidden');
-            if (dirty) dirty.classList.add('hidden');
         }
     }
 
@@ -511,7 +504,10 @@
     // Shared by the Stop button and the auto-stop trigger (main fires an
     // `autoStop` event when the meeting ended and the countdown elapsed).
     async function stopAndSave() {
-        if (state.phase !== 'recording') return;
+        // Guard on the session, not the visible section: recording keeps going
+        // while the user is in transcribeSettings/transcribing (see the
+        // recording-indicator note above), and a stop must still work there.
+        if (!state.recordingActive) return;
         stopBtn.disabled = true;
         stopBtn.querySelector('span:last-child').textContent = 'Saving…';
         setStatus('loading', 'Finalizing WAV…');
@@ -709,8 +705,10 @@
                 updateStatusBar('idle');
                 // Return to the idle screen — the new recording shows up in
                 // the sidebar (pre-checked, courtesy of refreshHistory) and
-                // the user transcribes via the lime CTA.
-                showSection('idle');
+                // the user transcribes via the lime CTA. Only from the
+                // recording section: a stop that lands while a parallel
+                // transcription is on screen must not yank the user off it.
+                if (state.phase === 'recording') showSection('idle');
                 refreshHistory();
                 break;
             }
