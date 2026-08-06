@@ -1033,10 +1033,15 @@ async function openFile() {
 }
 
 function loadContent(filePath, content) {
+  // Drop a pending autosave for the note being replaced — its text is already
+  // flushed by the callers below, and the timer would fire against the new file.
+  clearTimeout(autosaveTimer);
   state.filePath = filePath;
   state.savedContent = content;
   state.baselineContent = content;
-  state.isDirty = false;
+  // Through setDirty, not the flag directly: the chip has to be reset too, or a
+  // "⚠ Save failed" from the previous note lingers over one that saves fine.
+  setDirty(false);
 
   setActiveMeetingId(filePath);
   renderSummaryRail(filePath);
@@ -1073,20 +1078,34 @@ function setActiveMeetingId(id) {
 }
 
 // ─── Save ─────────────────────────────────────────────────────────────────────
+// Resolves to whether the text reached disk, so a caller about to replace the
+// buffer (opening another note) can refuse to throw unsaved edits away.
 async function saveFile() {
   if (!state.filePath) return saveAsFile();
-  const result = await api.saveFile(state.filePath, editor.value);
-  if (result.ok) {
-    state.savedContent = editor.value;
+  // Snapshot before the await: api.saveFile is an IPC round-trip and the
+  // textarea keeps taking keystrokes during it. Marking editor.value saved
+  // would strand whatever was typed in that window — the next autosave would
+  // see value === savedContent and skip the write.
+  const content = editor.value;
+  const result = await api.saveFile(state.filePath, content);
+  if (!result.ok) {
+    console.error("Save failed:", result.error);
+    setSaveChip("error");
+    return false;
+  }
+  state.savedContent = content;
+  if (editor.value === content) {
     setDirty(false);
     // Pulse the chip so an autosave the user did not trigger is still visible.
     saveChip.classList.remove("flash");
     void saveChip.offsetWidth; // restart CSS animation
     saveChip.classList.add("flash");
   } else {
-    console.error("Save failed:", result.error);
-    setSaveChip("error");
+    // Typed during the write — stay dirty and commit the remainder.
+    setDirty(true);
+    scheduleAutosave();
   }
+  return true;
 }
 
 // Autosave: persist silently whenever there is something new on disk to write.
@@ -1096,8 +1115,8 @@ let autosaveTimer = null;
 
 async function autosave() {
   clearTimeout(autosaveTimer);
-  if (!state.filePath || editor.value === state.savedContent) return;
-  await saveFile();
+  if (!state.filePath || editor.value === state.savedContent) return true;
+  return saveFile();
 }
 
 // Typing keeps rescheduling the write, so a pause of AUTOSAVE_DELAY_MS is what
@@ -1109,18 +1128,31 @@ function scheduleAutosave() {
   autosaveTimer = setTimeout(autosave, AUTOSAVE_DELAY_MS);
 }
 
+// Loading another note overwrites both editor.value and state.savedContent, so
+// a write that failed (read-only file, full disk) would take the edits with it
+// silently. Ask instead of discarding.
+async function flushBeforeReplace() {
+  if (await autosave()) return true;
+  return confirm(
+    "This transcript could not be saved — the file on disk is still the " +
+    "older version.\n\nOpen the other note anyway and lose the unsaved edits?"
+  );
+}
+
 async function saveAsFile() {
-  const result = await api.saveAsFile(editor.value);
+  const content = editor.value;
+  const result = await api.saveAsFile(content);
   if (result?.ok) {
     state.filePath = result.filePath;
-    state.savedContent = editor.value;
+    state.savedContent = content;
     // Save As establishes a fresh baseline — there is nothing earlier to revert to.
-    state.baselineContent = editor.value;
+    state.baselineContent = content;
     setActiveMeetingId(result.filePath);
-    setDirty(false);
+    setDirty(editor.value !== content);
     updateUI();
     updateCancelBtn();
   }
+  return !!result?.ok;
 }
 
 // Revert the transcript to its state when the file was opened this session and
@@ -1595,7 +1627,7 @@ function openRenamePopup(currentTitle, anchorRect) {
 }
 
 async function handleMeetingClick(m) {
-  if (m.id !== activeMeetingId) await autosave();
+  if (m.id !== activeMeetingId && !(await flushBeforeReplace())) return;
   setActiveMeetingId(m.id);
   await api.openFromLibrary(m.id);
 }
@@ -2583,8 +2615,24 @@ editor.addEventListener("input", () => {
 
 // Save-by-default: flush free-text edits to disk when focus leaves the editor,
 // and as a safety net when the whole window loses focus (e.g. on quit).
-editor.addEventListener("blur", autosave);
+// The watcher no longer reports our own writes, so refresh the sidebar here —
+// once per editing session, when the user is done, instead of on every pause.
+editor.addEventListener("blur", async () => {
+  const hadEdits = !!state.filePath && editor.value !== state.savedContent;
+  await autosave();
+  if (hadEdits) loadLibrary();
+});
 window.addEventListener("blur", autosave);
+
+// Teardown is the one place the async path cannot win: on ⌘Q the process can
+// exit before an IPC round-trip resolves, so a pending debounce would be lost.
+// Write synchronously here instead.
+window.addEventListener("beforeunload", () => {
+  clearTimeout(autosaveTimer);
+  if (!state.filePath || editor.value === state.savedContent) return;
+  const result = api.saveFileSync(state.filePath, editor.value);
+  if (!result?.ok) console.error("Save on quit failed:", result?.error);
+});
 
 editor.addEventListener("keydown", (e) => {
   if (e.key === "Tab") {
@@ -2594,6 +2642,12 @@ editor.addEventListener("keydown", (e) => {
     editor.value =
       editor.value.slice(0, start) + "    " + editor.value.slice(end);
     editor.selectionStart = editor.selectionEnd = start + 4;
+    // Assigning editor.value fires no "input" event, so the indent has to
+    // register as an edit by hand — otherwise it never reaches disk and the
+    // chip keeps claiming "Saved".
+    setDirty(true);
+    scheduleAutosave();
+    updateStats();
   }
 });
 
@@ -2716,7 +2770,7 @@ document.addEventListener("keydown", (e) => {
 
 // ─── OS file open (Finder / protocol / recent docs) ──────────────────────────
 api.onFileOpened(async (data) => {
-  await autosave();
+  if (!(await flushBeforeReplace())) return;
   // loadContent will sync activeMeetingId/activeLibraryPath + sidebar state.
   loadContent(data.filePath, data.content);
 });

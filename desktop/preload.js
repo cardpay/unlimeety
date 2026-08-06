@@ -4,6 +4,9 @@ contextBridge.exposeInMainWorld('transcriber', {
     // File operations
     openFile: () => ipcRenderer.invoke('file:open'),
     saveFile: (filePath, content) => ipcRenderer.invoke('file:save', filePath, content),
+    // Blocking twin of saveFile, for beforeunload: the async path can lose the
+    // race against process exit on ⌘Q.
+    saveFileSync: (filePath, content) => ipcRenderer.sendSync('file:saveSync', filePath, content),
     saveAsFile: (content) => ipcRenderer.invoke('file:saveAs', content),
     exportPdf:  (html, defaultName) => ipcRenderer.invoke('export:pdf', html, defaultName),
     exportDocx: (payload)           => ipcRenderer.invoke('export:docx', payload),
