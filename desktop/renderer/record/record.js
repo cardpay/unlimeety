@@ -453,15 +453,8 @@
 
     function updateStatusBar(phase) {
         const path = document.getElementById('status-path');
-        const saved = document.getElementById('status-saved');
-        const dirty = document.getElementById('status-dirty');
         if (phase === 'recording' && state.outputPath) {
             if (path) path.textContent = `Recording → ${state.outputPath}`;
-            if (saved) saved.classList.add('hidden');
-            if (dirty) dirty.classList.remove('hidden');
-        } else if (phase === 'idle') {
-            if (saved) saved.classList.remove('hidden');
-            if (dirty) dirty.classList.add('hidden');
         }
     }
 

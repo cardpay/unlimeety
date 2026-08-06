@@ -657,8 +657,7 @@ const btnLibrary = document.getElementById("btn-library");
 const statusPath = document.getElementById("status-path");
 const statusWords = document.getElementById("status-words");
 const statusLines = document.getElementById("status-lines");
-const statusDirty = document.getElementById("status-dirty");
-const statusSaved = document.getElementById("status-saved");
+const saveChip = document.getElementById("save-chip");
 
 // Library DOM refs
 const libraryPanel = document.getElementById("library-panel");
@@ -1009,7 +1008,10 @@ if (PLAYER_OK) {
         showTranscriptView();
         lastActiveSeg = null;
         setDirty(true);
-        autosave();
+        // Refresh the sidebar here, not on editor blur: renaming happens from
+        // the transcript view, the textarea never has focus, and the rename
+        // lands in the Participants: header the meeting cards render.
+        autosave().then(() => loadLibrary());
       },
     });
   });
@@ -1034,10 +1036,15 @@ async function openFile() {
 }
 
 function loadContent(filePath, content) {
+  // Drop a pending autosave for the note being replaced — its text is already
+  // flushed by the callers below, and the timer would fire against the new file.
+  clearTimeout(autosaveTimer);
   state.filePath = filePath;
   state.savedContent = content;
   state.baselineContent = content;
-  state.isDirty = false;
+  // Through setDirty, not the flag directly: the chip has to be reset too, or a
+  // "⚠ Save failed" from the previous note lingers over one that saves fine.
+  setDirty(false);
 
   setActiveMeetingId(filePath);
   renderSummaryRail(filePath);
@@ -1074,37 +1081,101 @@ function setActiveMeetingId(id) {
 }
 
 // ─── Save ─────────────────────────────────────────────────────────────────────
+// Resolves to whether the write itself succeeded. Callers about to replace the
+// buffer must also check editor.value === state.savedContent: a keystroke that
+// lands mid-write leaves a remainder this call did not cover.
 async function saveFile() {
   if (!state.filePath) return saveAsFile();
-  const result = await api.saveFile(state.filePath, editor.value);
-  if (result.ok) {
-    state.savedContent = editor.value;
-    setDirty(false);
-  } else {
-    console.error("Save failed:", result.error);
+  // Snapshot before the await: api.saveFile is an IPC round-trip and the
+  // textarea keeps taking keystrokes during it. Marking editor.value saved
+  // would strand whatever was typed in that window — the next autosave would
+  // see value === savedContent and skip the write.
+  const content = editor.value;
+  // A rejected invoke (no handler, window torn down mid-flight) has to land on
+  // the same path as a refused write, or the chip stays on "Saving…" and the
+  // rejection escapes into whatever awaited us.
+  let result;
+  try {
+    result = await api.saveFile(state.filePath, content);
+  } catch (err) {
+    result = { ok: false, error: err?.message || String(err) };
   }
+  if (!result?.ok) {
+    console.error("Save failed:", result?.error);
+    setSaveChip("error");
+    return false;
+  }
+  state.savedContent = content;
+  if (editor.value === content) {
+    setDirty(false);
+    // Pulse the chip so an autosave the user did not trigger is still visible.
+    saveChip.classList.remove("flash");
+    void saveChip.offsetWidth; // restart CSS animation
+    saveChip.classList.add("flash");
+  } else {
+    // Typed during the write — stay dirty and commit the remainder.
+    setDirty(true);
+    scheduleAutosave();
+  }
+  return true;
 }
 
 // Autosave: persist silently whenever there is something new on disk to write.
-// Editing is save-by-default now — speaker renames save immediately, free text
-// saves when the editor (or window) loses focus.
+// Editing is save-by-default — speaker renames save immediately, free text
+// saves a beat after the last keystroke and when focus leaves the editor.
+let autosaveTimer = null;
+
 async function autosave() {
-  if (!state.filePath || editor.value === state.savedContent) return;
-  await saveFile();
+  clearTimeout(autosaveTimer);
+  if (!state.filePath || editor.value === state.savedContent) return true;
+  return saveFile();
+}
+
+// Typing keeps rescheduling the write, so a pause of AUTOSAVE_DELAY_MS is what
+// commits it. Without this, edits only reached disk on blur — the chip claimed
+// "Saved" while the buffer was still unwritten, and a crash lost the text.
+const AUTOSAVE_DELAY_MS = 1000;
+function scheduleAutosave() {
+  clearTimeout(autosaveTimer);
+  autosaveTimer = setTimeout(autosave, AUTOSAVE_DELAY_MS);
+}
+
+// Loading another note overwrites both editor.value and state.savedContent, so
+// a write that failed (read-only file, full disk) would take the edits with it
+// silently. Ask instead of discarding.
+async function flushBeforeReplace() {
+  let ok = await autosave();
+  // A keystroke that landed during that write left a remainder, and the caller
+  // is about to overwrite the buffer (and loadContent cancels the timer that
+  // would have committed it) — so commit it here.
+  if (ok && editor.value !== state.savedContent) ok = await autosave();
+  if (ok && editor.value === state.savedContent) return true;
+  return confirm(
+    "This transcript could not be saved — the file on disk is still the " +
+    "older version.\n\nOpen the other note anyway and lose the unsaved edits?"
+  );
 }
 
 async function saveAsFile() {
-  const result = await api.saveAsFile(editor.value);
+  const content = editor.value;
+  const result = await api.saveAsFile(content);
   if (result?.ok) {
     state.filePath = result.filePath;
-    state.savedContent = editor.value;
+    state.savedContent = content;
     // Save As establishes a fresh baseline — there is nothing earlier to revert to.
-    state.baselineContent = editor.value;
+    state.baselineContent = content;
     setActiveMeetingId(result.filePath);
-    setDirty(false);
+    if (editor.value === content) {
+      setDirty(false);
+    } else {
+      // Typed while the dialog was up — same remainder case as in saveFile.
+      setDirty(true);
+      scheduleAutosave();
+    }
     updateUI();
     updateCancelBtn();
   }
+  return !!result?.ok;
 }
 
 // Revert the transcript to its state when the file was opened this session and
@@ -1127,9 +1198,20 @@ function setDirty(dirty) {
   state.isDirty = dirty;
   api.setDirty(dirty);
 
-  statusDirty.classList.toggle("hidden", !dirty);
-  statusSaved.classList.toggle("hidden", dirty);
+  setSaveChip(dirty ? "pending" : "saved");
   updateCancelBtn();
+}
+
+// The only save indicator in the UI. "Saving…" covers the window between a
+// keystroke and the autosave that follows it, so the chip never claims the text
+// is on disk before it is.
+function setSaveChip(status) {
+  saveChip.textContent =
+    status === "pending" ? "Saving…" :
+    status === "error" ? "⚠ Save failed" :
+    "✓ Saved";
+  saveChip.classList.toggle("chip-error", status === "error");
+  saveChip.classList.toggle("chip-pending", status === "pending");
 }
 
 // The former Save button is now "Cancel changes": enabled only while the text
@@ -1568,8 +1650,11 @@ function openRenamePopup(currentTitle, anchorRect) {
 }
 
 async function handleMeetingClick(m) {
-  if (m.id !== activeMeetingId) await autosave();
-  setActiveMeetingId(m.id);
+  if (m.id === activeMeetingId) return;
+  // Flushing and moving the selection both belong to the file:opened path
+  // (flushBeforeReplace, then loadContent → setActiveMeetingId): doing either
+  // here as well prompted twice for one click, and left the sidebar pointing at
+  // a note that was never opened when the user cancelled.
   await api.openFromLibrary(m.id);
 }
 
@@ -2549,14 +2634,31 @@ editor.addEventListener("input", () => {
   if (!state.isDirty && editor.value !== state.savedContent) setDirty(true);
   else if (state.isDirty && editor.value === state.savedContent)
     setDirty(false);
+  scheduleAutosave();
   updateStats();
   updateCancelBtn();
 });
 
 // Save-by-default: flush free-text edits to disk when focus leaves the editor,
 // and as a safety net when the whole window loses focus (e.g. on quit).
-editor.addEventListener("blur", autosave);
+// The watcher no longer reports our own writes, so refresh the sidebar here —
+// once per editing session, when the user is done, instead of on every pause.
+editor.addEventListener("blur", async () => {
+  const hadEdits = !!state.filePath && editor.value !== state.savedContent;
+  await autosave();
+  if (hadEdits) loadLibrary();
+});
 window.addEventListener("blur", autosave);
+
+// Teardown is the one place the async path cannot win: on ⌘Q the process can
+// exit before an IPC round-trip resolves, so a pending debounce would be lost.
+// Write synchronously here instead.
+window.addEventListener("beforeunload", () => {
+  clearTimeout(autosaveTimer);
+  if (!state.filePath || editor.value === state.savedContent) return;
+  const result = api.saveFileSync(state.filePath, editor.value);
+  if (!result?.ok) console.error("Save on quit failed:", result?.error);
+});
 
 editor.addEventListener("keydown", (e) => {
   if (e.key === "Tab") {
@@ -2566,6 +2668,12 @@ editor.addEventListener("keydown", (e) => {
     editor.value =
       editor.value.slice(0, start) + "    " + editor.value.slice(end);
     editor.selectionStart = editor.selectionEnd = start + 4;
+    // Assigning editor.value fires no "input" event, so the indent has to
+    // register as an edit by hand — otherwise it never reaches disk and the
+    // chip keeps claiming "Saved".
+    setDirty(true);
+    scheduleAutosave();
+    updateStats();
   }
 });
 
@@ -2688,9 +2796,11 @@ document.addEventListener("keydown", (e) => {
 
 // ─── OS file open (Finder / protocol / recent docs) ──────────────────────────
 api.onFileOpened(async (data) => {
-  await autosave();
+  if (!(await flushBeforeReplace())) return;
   // loadContent will sync activeMeetingId/activeLibraryPath + sidebar state.
   loadContent(data.filePath, data.content);
+  // Only now does main own this path: window title, dirty marker, recent docs.
+  api.fileAccepted(data.filePath);
 });
 
 // ─── Record tab finished a transcription (single file, or last of a batch) ───
@@ -3783,7 +3893,6 @@ promptsReady = loadCustomPrompts();
 libraryPanel.classList.add("open");
 btnLibrary.classList.add("active");
 
-statusSaved.classList.add("hidden");
 btnSave.disabled = true;
 btnSaveAs.disabled = true;
 btnExport.disabled = true;
