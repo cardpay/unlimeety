@@ -146,7 +146,13 @@ contextBridge.exposeInMainWorld('promptApi', {
 // across the floating notes window (Live) and the inline Record-tab control —
 // both call the same two methods.
 contextBridge.exposeInMainWorld('notesApi', {
-    add:          (text)      => ipcRenderer.send('notes:add', text),
+    // invoke, not send: main is the one that knows whether a session is running
+    // to attach the note to, and the UI must not claim a note was saved when it
+    // wasn't. Resolves { ok, text } — `text` is the stored (escaped) form.
+    add:          (text)      => ipcRenderer.invoke('notes:add', text),
+    // Notes captured so far in the active session, so a reopened floating
+    // window shows the real list instead of a misleading empty one.
+    list:         ()          => ipcRenderer.invoke('notes:list'),
     close:        ()          => ipcRenderer.send('notes:close'),
     reopen:       ()          => ipcRenderer.send('notes:reopen'),
     setCollapsed: (collapsed) => ipcRenderer.send('notes:setCollapsed', collapsed),

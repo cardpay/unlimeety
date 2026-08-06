@@ -883,6 +883,11 @@ function headerParticipants(content) {
 // becomes "[mm:ss] <new>:", and the Participants header token is swapped (then
 // deduped case-insensitively). Matches speakers by string equality, not regex,
 // so names with special characters are safe.
+// Reserved pseudo-speaker written by the recording UIs for the user's own
+// typed notes (see main.js's NOTE_LABEL). Not a real participant: it must not
+// be renameable, and no real speaker may be renamed onto it.
+const NOTE_LABEL = "Note";
+
 function renameSpeakerInText(content, oldName, newName) {
   const tcRe = /^(\[\d[^\]]*\]\s*)(.*)$/;
   const lines = content.split("\n");
@@ -925,7 +930,15 @@ function renderTranscriptView(content) {
     const header = content.slice(0, firstTcMatch.index).trim();
     if (header) html += `<div class="tv-header">${escHtml(header)}</div>`;
     for (const seg of parseSegments(content)) {
-      const speaker = seg.speaker ? `<span class="tv-speaker">${escHtml(seg.speaker)}:</span> ` : "";
+      // "Note" is the reserved label the recording UIs write for the user's own
+      // typed notes — it's not a speaker, so it gets a plain label instead of a
+      // rename chip. Renaming it would rewrite every "] Note:" line and
+      // permanently break summarize:run's gate on that marker.
+      const speaker = seg.speaker
+        ? (seg.speaker === NOTE_LABEL
+            ? `<span class="tv-note">${escHtml(seg.speaker)}:</span> `
+            : `<span class="tv-speaker">${escHtml(seg.speaker)}:</span> `)
+        : "";
       // Audio segments carry a seekable offset; text-export segments only have
       // a wall-clock label (no audio to seek), so render them without data-t.
       const seekAttr = seg.t != null ? ` data-t="${seg.t}"` : "";
@@ -1003,6 +1016,10 @@ if (PLAYER_OK) {
       suggestions,
       onCommit: (name) => {
         if (!name || name === current) return;
+        // Renaming a speaker onto the reserved notes label would turn their
+        // spoken turns into "[mm:ss] Note:" lines — indistinguishable from the
+        // user's own notes, and fed to the summarizer as such.
+        if (name.trim() === NOTE_LABEL) return;
         editor.value = renameSpeakerInText(editor.value, current, name);
         renderTranscriptView(editor.value);
         showTranscriptView();
