@@ -2591,10 +2591,6 @@ ipcMain.handle('record:delete', async (_e, filePath) => {
     if (choice !== 0) return { ok: false, canceled: true };
     try {
         fs.unlinkSync(filePath);
-        // A partial's only link back to the audio is its own Source: header
-        // (its stem never matches a WAV's) — once the WAV is gone, keeping it
-        // just orphans it, the same way a stale rename target did.
-        try { fs.unlinkSync(recordingTranscriptPath(filePath).replace(/\.txt$/, '.partial.txt')); } catch { /* none */ }
         return { ok: true };
     } catch (err) {
         return { ok: false, error: err.message };
@@ -2626,7 +2622,6 @@ ipcMain.handle('record:deleteMany', async (_e, paths) => {
     for (const p of targets) {
         try {
             fs.unlinkSync(p);
-            try { fs.unlinkSync(recordingTranscriptPath(p).replace(/\.txt$/, '.partial.txt')); } catch { /* none */ }
             deleted++;
         } catch (err) {
             errors.push({ path: p, error: err.message });
@@ -2735,8 +2730,8 @@ ipcMain.handle('record:rename', async (_e, wavPath, newTitle) => {
             const titleLine = trimmed || oldStem;
             const partialContent = fs.readFileSync(oldPartialPath, 'utf-8');
             const updatedPartial = partialContent
-                .replace(/^Meeting: .*$/m, `Meeting: ${titleLine}`)
-                .replace(/^Source: .*$/m, `Source: ${newWavPath}`);
+                .replace(/^Meeting: .*$/m, () => `Meeting: ${titleLine}`)
+                .replace(/^Source: .*$/m, () => `Source: ${newWavPath}`);
             fs.writeFileSync(oldPartialPath, updatedPartial, 'utf-8');
 
             if (newWavPath !== wavPath) {
@@ -2757,7 +2752,7 @@ ipcMain.handle('record:rename', async (_e, wavPath, newTitle) => {
 
             const content = fs.readFileSync(oldTranscriptPath, 'utf-8');
             const titleLine = trimmed || oldStem;
-            const updated = content.replace(/^Meeting: .*$/m, `Meeting: ${titleLine}`);
+            const updated = content.replace(/^Meeting: .*$/m, () => `Meeting: ${titleLine}`);
             fs.writeFileSync(oldTranscriptPath, updated, 'utf-8');
 
             if (newTranscriptPath !== oldTranscriptPath && !fs.existsSync(newTranscriptPath)) {
@@ -3020,10 +3015,19 @@ ipcMain.handle('record:transcribe', async (_e, opts) => {
         // asked for, it's a salvage file.
         if (!interrupted) {
             app.addRecentDocument(transcriptPath);
-            // A completed run supersedes any salvage from an earlier attempt.
-            // Left behind it would double up in the Transcripts list and let a
-            // search hit land on the truncated copy.
-            try { fs.unlinkSync(transcriptPath.replace(/\.txt$/, '.partial.txt')); } catch { /* none */ }
+            // A completed run supersedes any salvage from an earlier attempt —
+            // including one a rename bumped to `<stem> (N).partial.txt` after a
+            // same-named partial already at the plain name blocked it. Glob
+            // rather than unlink the exact name, or a bumped one survives
+            // and doubles up in the Transcripts list beside its own replacement.
+            try {
+                const stem = path.basename(transcriptPath, '.txt');
+                const escapedStem = stem.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                const partialPattern = new RegExp(`^${escapedStem}( \\(\\d+\\))?\\.partial\\.txt$`);
+                for (const name of fs.readdirSync(TRANSCRIPTS_FOLDER)) {
+                    if (partialPattern.test(name)) fs.unlinkSync(path.join(TRANSCRIPTS_FOLDER, name));
+                }
+            } catch { /* none */ }
         }
         noteSessionFlushed('transcriber');
         if (interrupted) return { ok: false, error: 'Transcription interrupted.', transcriptPath };
