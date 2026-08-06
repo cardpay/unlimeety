@@ -331,13 +331,16 @@ ipcMain.handle('file:open', async () => {
     return { filePath, content };
 });
 
-ipcMain.handle('file:save', async (_e, filePath, content) => {
+function writeTranscriptFile(filePath, content) {
     const target = filePath || currentFilePath;
     if (!target) return { ok: false, error: 'No file path' };
     if (!canWritePath(target)) {
         return { ok: false, error: 'Refusing to write to a path outside the managed folders.' };
     }
     try {
+        // Let the library watcher know this change is ours, so editing does not
+        // trigger a full folder re-read (see transcripts:watch).
+        lastSelfWrite = { name: path.basename(target), at: Date.now() };
         fs.writeFileSync(target, content, 'utf-8');
         currentFilePath = target;
         isDirty = false;
@@ -347,6 +350,15 @@ ipcMain.handle('file:save', async (_e, filePath, content) => {
     } catch (err) {
         return { ok: false, error: err.message };
     }
+}
+
+ipcMain.handle('file:save', (_e, filePath, content) => writeTranscriptFile(filePath, content));
+
+// Synchronous twin for the renderer's beforeunload flush (see saveFileSync in
+// preload.js): sendSync blocks the renderer, which is what makes the write land
+// before the window is gone.
+ipcMain.on('file:saveSync', (e, filePath, content) => {
+    e.returnValue = writeTranscriptFile(filePath, content);
 });
 
 async function handleSaveAs(content) {
@@ -1434,6 +1446,12 @@ ipcMain.handle('transcripts:search', (_e, query) => {
 
 let libraryWatcher = null;
 let libraryChangeTimer = null;
+// The file the app itself last wrote, and when. Autosave writes the open
+// transcript on every typing pause; without this the watcher would answer each
+// one with a transcripts:changed, and the renderer would re-read every
+// transcript in the folder and rebuild the sidebar mid-edit.
+let lastSelfWrite = { name: null, at: 0 };
+const SELF_WRITE_WINDOW_MS = 500; // covers the watcher's own 200ms coalescing
 
 ipcMain.handle('transcripts:watch', () => {
     if (libraryWatcher) return;
@@ -1443,7 +1461,12 @@ ipcMain.handle('transcripts:watch', () => {
         }
         // fs.watch on macOS fires multiple events per single write —
         // coalesce them so the renderer only reloads the library once.
-        libraryWatcher = fs.watch(TRANSCRIPTS_FOLDER, () => {
+        libraryWatcher = fs.watch(TRANSCRIPTS_FOLDER, (_event, filename) => {
+            // Our own autosave: the renderer already knows, and refreshes the
+            // library itself when the user leaves the editor.
+            const mine = Date.now() - lastSelfWrite.at < SELF_WRITE_WINDOW_MS
+                && (!filename || filename === lastSelfWrite.name);
+            if (mine) return;
             clearTimeout(libraryChangeTimer);
             libraryChangeTimer = setTimeout(() => {
                 mainWindow?.webContents.send('transcripts:changed');
