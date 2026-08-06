@@ -1443,6 +1443,15 @@ function parseTranscriptHeaderMain(content) {
     return info;
 }
 
+// Rewrites a single `Key: value` header line in transcript/partial content.
+// A function replacement, not a string — a string replacement lets
+// String.replace reinterpret $&/$$/$`/$'/$<digit> sequences inside `value`
+// (a user-typed title, or a path), corrupting the header instead of writing
+// it literally.
+function setHeaderLine(content, key, value) {
+    return content.replace(new RegExp(`^${key}: .*$`, 'm'), () => `${key}: ${value}`);
+}
+
 // Convert the diarizer's raw "S0"/"S1" speaker tags into the Greek phonetic
 // alphabet: S0 → Alpha, S1 → Beta, …, S23 → Omega. After Omega the letters
 // recycle with a numeric suffix: S24 → Alpha 2, S25 → Beta 2, etc.
@@ -1827,7 +1836,7 @@ ipcMain.handle('transcripts:rename', async (_e, filePath, newTitle) => {
         const oldSummaryPath = findExistingSummaryPath(filePath);
 
         const content = fs.readFileSync(filePath, 'utf-8');
-        const updated = content.replace(/^Meeting: .*$/m, () => `Meeting: ${trimmed}`);
+        const updated = setHeaderLine(content, 'Meeting', trimmed);
         fs.writeFileSync(filePath, updated, 'utf-8');
 
         const newBase = sanitizeFilenameBase(trimmed);
@@ -2729,9 +2738,10 @@ ipcMain.handle('record:rename', async (_e, wavPath, newTitle) => {
         if (fs.existsSync(oldPartialPath)) {
             const titleLine = trimmed || oldStem;
             const partialContent = fs.readFileSync(oldPartialPath, 'utf-8');
-            const updatedPartial = partialContent
-                .replace(/^Meeting: .*$/m, () => `Meeting: ${titleLine}`)
-                .replace(/^Source: .*$/m, () => `Source: ${newWavPath}`);
+            const updatedPartial = setHeaderLine(
+                setHeaderLine(partialContent, 'Meeting', titleLine),
+                'Source', newWavPath,
+            );
             fs.writeFileSync(oldPartialPath, updatedPartial, 'utf-8');
 
             if (newWavPath !== wavPath) {
@@ -2752,7 +2762,7 @@ ipcMain.handle('record:rename', async (_e, wavPath, newTitle) => {
 
             const content = fs.readFileSync(oldTranscriptPath, 'utf-8');
             const titleLine = trimmed || oldStem;
-            const updated = content.replace(/^Meeting: .*$/m, () => `Meeting: ${titleLine}`);
+            const updated = setHeaderLine(content, 'Meeting', titleLine);
             fs.writeFileSync(oldTranscriptPath, updated, 'utf-8');
 
             if (newTranscriptPath !== oldTranscriptPath && !fs.existsSync(newTranscriptPath)) {
