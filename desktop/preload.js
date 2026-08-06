@@ -19,6 +19,9 @@ contextBridge.exposeInMainWorld('transcriber', {
 
     // OS file open (Finder double-click, "Open with", recent docs menu)
     onFileOpened: (cb) => ipcRenderer.on('file:opened', (_e, data) => cb(data)),
+    // The renderer can decline an open, so main only commits title/recent-docs
+    // state once the file is actually loaded.
+    fileAccepted: (filePath) => ipcRenderer.send('file:accepted', filePath),
 
     // Window title dirty flag
     setDirty: (dirty) => ipcRenderer.send('window:setDirty', dirty),

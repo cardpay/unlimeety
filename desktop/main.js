@@ -236,20 +236,27 @@ function updateTitle() {
 
 // ─── Open file from path ──────────────────────────────────────────────────────
 
+// The renderer may decline an open (it prompts when the current note has edits
+// a failed write left unsaved), so main-side state waits for the file:accepted
+// ack rather than assuming the open happened.
 function openFileFromPath(filePath) {
     if (!filePath || !mainWindow) return;
     try {
         const content = fs.readFileSync(filePath, 'utf-8');
         registerReadablePath(filePath);
-        currentFilePath = filePath;
-        isDirty = false;
-        updateTitle();
-        app.addRecentDocument(filePath);
         mainWindow.webContents.send('file:opened', { filePath, content });
     } catch (err) {
         dialog.showErrorBox('Cannot open file', err.message);
     }
 }
+
+ipcMain.on('file:accepted', (_e, filePath) => {
+    if (typeof filePath !== 'string' || !filePath) return;
+    currentFilePath = filePath;
+    isDirty = false;
+    updateTitle();
+    app.addRecentDocument(filePath);
+});
 
 // ─── Menu ─────────────────────────────────────────────────────────────────────
 
@@ -338,10 +345,12 @@ function writeTranscriptFile(filePath, content) {
         return { ok: false, error: 'Refusing to write to a path outside the managed folders.' };
     }
     try {
-        // Let the library watcher know this change is ours, so editing does not
-        // trigger a full folder re-read (see transcripts:watch).
-        lastSelfWrite = { name: path.basename(target), at: Date.now() };
         fs.writeFileSync(target, content, 'utf-8');
+        // Stamped after the write, not before: writeFileSync blocks until the
+        // data is out, and the watcher event can only arrive afterwards. Timing
+        // it from before would spend the suppression window on the write itself
+        // — worst on exactly the large notes where the re-read hurts most.
+        lastSelfWrite = { name: path.basename(target), at: Date.now() };
         currentFilePath = target;
         isDirty = false;
         updateTitle();
@@ -357,8 +366,15 @@ ipcMain.handle('file:save', (_e, filePath, content) => writeTranscriptFile(fileP
 // Synchronous twin for the renderer's beforeunload flush (see saveFileSync in
 // preload.js): sendSync blocks the renderer, which is what makes the write land
 // before the window is gone.
+// returnValue must be set on every path: sendSync blocks the renderer until it
+// is, and this runs while the window is closing — a throw here would hang the
+// quit and cost the user the very edits this flush protects.
 ipcMain.on('file:saveSync', (e, filePath, content) => {
-    e.returnValue = writeTranscriptFile(filePath, content);
+    try {
+        e.returnValue = writeTranscriptFile(filePath, content);
+    } catch (err) {
+        e.returnValue = { ok: false, error: err.message };
+    }
 });
 
 async function handleSaveAs(content) {

@@ -1008,7 +1008,10 @@ if (PLAYER_OK) {
         showTranscriptView();
         lastActiveSeg = null;
         setDirty(true);
-        autosave();
+        // Refresh the sidebar here, not on editor blur: renaming happens from
+        // the transcript view, the textarea never has focus, and the rename
+        // lands in the Participants: header the meeting cards render.
+        autosave().then(() => loadLibrary());
       },
     });
   });
@@ -1078,8 +1081,9 @@ function setActiveMeetingId(id) {
 }
 
 // ─── Save ─────────────────────────────────────────────────────────────────────
-// Resolves to whether the text reached disk, so a caller about to replace the
-// buffer (opening another note) can refuse to throw unsaved edits away.
+// Resolves to whether the write itself succeeded. Callers about to replace the
+// buffer must also check editor.value === state.savedContent: a keystroke that
+// lands mid-write leaves a remainder this call did not cover.
 async function saveFile() {
   if (!state.filePath) return saveAsFile();
   // Snapshot before the await: api.saveFile is an IPC round-trip and the
@@ -1087,9 +1091,17 @@ async function saveFile() {
   // would strand whatever was typed in that window — the next autosave would
   // see value === savedContent and skip the write.
   const content = editor.value;
-  const result = await api.saveFile(state.filePath, content);
-  if (!result.ok) {
-    console.error("Save failed:", result.error);
+  // A rejected invoke (no handler, window torn down mid-flight) has to land on
+  // the same path as a refused write, or the chip stays on "Saving…" and the
+  // rejection escapes into whatever awaited us.
+  let result;
+  try {
+    result = await api.saveFile(state.filePath, content);
+  } catch (err) {
+    result = { ok: false, error: err?.message || String(err) };
+  }
+  if (!result?.ok) {
+    console.error("Save failed:", result?.error);
     setSaveChip("error");
     return false;
   }
@@ -1132,7 +1144,12 @@ function scheduleAutosave() {
 // a write that failed (read-only file, full disk) would take the edits with it
 // silently. Ask instead of discarding.
 async function flushBeforeReplace() {
-  if (await autosave()) return true;
+  let ok = await autosave();
+  // A keystroke that landed during that write left a remainder, and the caller
+  // is about to overwrite the buffer (and loadContent cancels the timer that
+  // would have committed it) — so commit it here.
+  if (ok && editor.value !== state.savedContent) ok = await autosave();
+  if (ok && editor.value === state.savedContent) return true;
   return confirm(
     "This transcript could not be saved — the file on disk is still the " +
     "older version.\n\nOpen the other note anyway and lose the unsaved edits?"
@@ -1148,7 +1165,13 @@ async function saveAsFile() {
     // Save As establishes a fresh baseline — there is nothing earlier to revert to.
     state.baselineContent = content;
     setActiveMeetingId(result.filePath);
-    setDirty(editor.value !== content);
+    if (editor.value === content) {
+      setDirty(false);
+    } else {
+      // Typed while the dialog was up — same remainder case as in saveFile.
+      setDirty(true);
+      scheduleAutosave();
+    }
     updateUI();
     updateCancelBtn();
   }
@@ -1627,8 +1650,11 @@ function openRenamePopup(currentTitle, anchorRect) {
 }
 
 async function handleMeetingClick(m) {
-  if (m.id !== activeMeetingId && !(await flushBeforeReplace())) return;
-  setActiveMeetingId(m.id);
+  if (m.id === activeMeetingId) return;
+  // Flushing and moving the selection both belong to the file:opened path
+  // (flushBeforeReplace, then loadContent → setActiveMeetingId): doing either
+  // here as well prompted twice for one click, and left the sidebar pointing at
+  // a note that was never opened when the user cancelled.
   await api.openFromLibrary(m.id);
 }
 
@@ -2773,6 +2799,8 @@ api.onFileOpened(async (data) => {
   if (!(await flushBeforeReplace())) return;
   // loadContent will sync activeMeetingId/activeLibraryPath + sidebar state.
   loadContent(data.filePath, data.content);
+  // Only now does main own this path: window title, dirty marker, recent docs.
+  api.fileAccepted(data.filePath);
 });
 
 // ─── Record tab finished a transcription (single file, or last of a batch) ───
