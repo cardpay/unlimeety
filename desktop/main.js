@@ -189,18 +189,20 @@ let quitting = false;
 // and the two that kill the helpers live later in this file.
 let quitFlushing = false;
 let quitFlushDone = null;                 // resolve fn while a flush is in flight
-let quitFlushRemaining = 0;               // acks still expected, one per busy slot
+let quitFlushPending = null;              // Set of busy slot names still owed an ack
 const QUIT_FLUSH_TIMEOUT_MS = 10000;      // live:stop alone can take 5 s
 
 // Called by the handlers that complete a slot's work — `live:saveTranscript`
 // once the transcript is on disk, `record:stop` once the WAV is finalized,
 // `record:transcribe` once it has written (or given up on) its output. All
-// three can be in flight at once, so this counts down rather than resolving on
-// the first one. Outside a quit flush it does nothing.
-function noteSessionFlushed() {
+// three can be in flight at once, so this tracks each by name rather than
+// resolving on the first ack — two acks from a re-entered slot must not
+// satisfy a quota a different, still-busy slot owes. Outside a quit flush it
+// does nothing.
+function noteSessionFlushed(slot) {
     if (!quitFlushDone) return;
-    quitFlushRemaining -= 1;
-    if (quitFlushRemaining > 0) return;
+    quitFlushPending.delete(slot);
+    if (quitFlushPending.size > 0) return;
     const resolve = quitFlushDone;
     quitFlushDone = null;
     resolve();
@@ -211,16 +213,16 @@ app.on('before-quit', (e) => {
     // A recording can only be saved by the renderer that owns it; a
     // transcription is assembled here in main and needs no renderer at all.
     const rendererAlive = Boolean(mainWindow && !mainWindow.isDestroyed());
-    const busy = [
-        rendererAlive && live.proc,
-        rendererAlive && recorder.proc,
-        transcriber.proc,
-    ].filter(Boolean).length;
-    if (!busy) return;                                       // nothing to lose
+    const pending = new Set([
+        rendererAlive && live.proc && 'live',
+        rendererAlive && recorder.proc && 'record',
+        transcriber.proc && 'transcriber',
+    ].filter(Boolean));
+    if (!pending.size) return;                               // nothing to lose
     e.preventDefault();
     if (quitFlushing) return;                                // flush already running
     quitFlushing = true;
-    quitFlushRemaining = busy;
+    quitFlushPending = pending;
 
     cancelAutoStop();     // whatever the countdown was going to do, we're doing now
     const saved = new Promise((resolve) => { quitFlushDone = resolve; });
@@ -240,6 +242,10 @@ app.on('before-quit', (e) => {
 
     const timedOut = new Promise((resolve) => setTimeout(resolve, QUIT_FLUSH_TIMEOUT_MS));
     Promise.race([saved, timedOut]).then(() => {
+        // Stand down no longer: if this was a timeout rather than a clean
+        // flush, the kill handlers below are the backstop that reaps whatever
+        // slot never acked.
+        quitFlushing = false;
         quitting = true;
         app.quit();
     });
@@ -2322,12 +2328,12 @@ ipcMain.handle('live:saveTranscript', async (_e, payload) => {
         fs.writeFileSync(filePath, content, 'utf-8');
         app.addRecentDocument(filePath);
         live.outputPath = null;
-        noteSessionFlushed();
+        noteSessionFlushed('live');
         return { ok: true, filePath, audioPath: wavPath };
     } catch (err) {
         // A failed save is still the end of the session — don't make a pending
         // Quit sit out its whole timeout waiting for a save that won't come.
-        noteSessionFlushed();
+        noteSessionFlushed('live');
         return { ok: false, error: err.message };
     }
 });
@@ -2343,6 +2349,7 @@ function formatHms(sec) {
 
 // Make sure we don't leave a zombie helper if the window is closed mid-recording.
 app.on('before-quit', () => {
+    if (quitFlushing) return;   // the flush above owns teardown while it's running
     if (live.proc) {
         try { live.proc.kill('SIGTERM'); } catch {}
         live.proc = null;
@@ -2515,7 +2522,7 @@ ipcMain.handle('record:stop', async () => {
     // guard. Synchronously nulling here closes that race.
     recorder.proc = null;
     recorder.outputPath = null;
-    noteSessionFlushed();
+    noteSessionFlushed('record');
     return { ok: true };
 });
 
@@ -2705,7 +2712,18 @@ ipcMain.handle('record:rename', async (_e, wavPath, newTitle) => {
         const hasTranscript = fs.existsSync(oldTranscriptPath);
         const oldSummaryPath = hasTranscript ? findExistingSummaryPath(oldTranscriptPath) : null;
 
-        if (newWavPath !== wavPath) fs.renameSync(wavPath, newWavPath);
+        if (newWavPath !== wavPath) {
+            fs.renameSync(wavPath, newWavPath);
+            // A cut-short transcription leaves `<stem>.partial.txt` next to the
+            // real transcript, keyed to the WAV's old stem — rename it alongside
+            // so it isn't orphaned under a WAV that no longer exists there.
+            // Independent of `hasTranscript`: a partial doesn't count as one.
+            const oldPartialPath = oldTranscriptPath.replace(/\.txt$/, '.partial.txt');
+            if (fs.existsSync(oldPartialPath)) {
+                const newPartialPath = path.join(TRANSCRIPTS_FOLDER, `${path.basename(newWavPath, '.wav')}.partial.txt`);
+                if (!fs.existsSync(newPartialPath)) fs.renameSync(oldPartialPath, newPartialPath);
+            }
+        }
 
         if (hasTranscript) {
             const newTranscriptStem = path.basename(newWavPath, '.wav');
@@ -2896,7 +2914,7 @@ ipcMain.handle('record:transcribe', async (_e, opts) => {
     }
 
     if (!segments.length) {
-        noteSessionFlushed();
+        noteSessionFlushed('transcriber');
         return { ok: false, error: 'Transcription produced no text.' };
     }
 
@@ -2981,11 +2999,11 @@ ipcMain.handle('record:transcribe', async (_e, opts) => {
             // search hit land on the truncated copy.
             try { fs.unlinkSync(transcriptPath.replace(/\.txt$/, '.partial.txt')); } catch { /* none */ }
         }
-        noteSessionFlushed();
+        noteSessionFlushed('transcriber');
         if (interrupted) return { ok: false, error: 'Transcription interrupted.', transcriptPath };
         return { ok: true, transcriptPath };
     } catch (err) {
-        noteSessionFlushed();
+        noteSessionFlushed('transcriber');
         return { ok: false, error: err.message };
     }
 });
@@ -3047,6 +3065,7 @@ ipcMain.handle('record:deleteModel', async (_e, modelName) => {
 
 // Kill any record/transcribe helper if the app quits mid-flight.
 app.on('before-quit', () => {
+    if (quitFlushing) return;   // the flush above owns teardown while it's running
     for (const slot of [recorder, transcriber]) {
         if (slot.proc) {
             try { slot.proc.kill('SIGTERM'); } catch {}
@@ -3390,7 +3409,9 @@ app.whenReady().then(() => {
 });
 
 app.on('before-quit', () => {
-    quitting = true;
+    // `quitting` is set by the flush's own completion, right before the real
+    // app.quit() — not here, or it would go true on the very first (prevented)
+    // before-quit and wedge the close guard shut for the rest of the session.
     stopCallMonitor();
 });
 
