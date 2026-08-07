@@ -110,7 +110,11 @@
       color: #f2f2f5;
       outline: none;
     }
-    input:focus { border-color: #5a5aef; }
+    /* The panel is shown with showInactive(), so it is not the key window until
+       the user clicks it. `:focus` alone would paint an active-looking ring
+       while keystrokes still went to the main window — `:focus-visible` after a
+       real click is the honest signal. */
+    input:focus-visible { border-color: #5a5aef; }
     input::placeholder { color: #6c6c78; }
   </style>
 </head>
@@ -130,9 +134,10 @@
       <div class="empty" id="empty">No notes yet — type below and press Enter.</div>
     </div>
     <div class="input-row">
-      <input id="input" type="text" placeholder="Note… (Enter to save)" autofocus />
+      <input id="input" type="text" placeholder="Click here to type a note, Enter to save" />
     </div>
   </div>
+  <script src="../notes-list.js"></script>
   <script src="notes.js"></script>
 </body>
 </html>

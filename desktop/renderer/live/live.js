@@ -14,6 +14,10 @@
         return;
     }
 
+    // Reserved pseudo-speaker for the user's own typed notes (main.js's
+    // NOTE_LABEL). A real speaker must never be renamed onto it.
+    const NOTE_LABEL = 'Note';
+
     // ─── DOM refs ────────────────────────────────────────────────────────
     const $ = (id) => document.getElementById(id);
     const tabButtons = Array.from(document.querySelectorAll('#tab-switch .tab-btn'));
@@ -685,7 +689,17 @@
             anchor: chip,
             current: state.speakerNames[key] || chip.textContent,
             suggestions: state.calendarParticipants,
+            // Returning a string refuses the rename and keeps the popover open
+            // with that message (see speaker-rename.js).
             onCommit: (name) => {
+                // live:saveTranscript filters this out of the names map too —
+                // that's the real guard, since it covers every rename path —
+                // but refusing here means the chip never shows a name the
+                // transcript won't honour. "Note" is the reserved marker for
+                // the user's own typed notes.
+                if (name.trim() === NOTE_LABEL) {
+                    return `"${NOTE_LABEL}" is reserved for your own typed notes`;
+                }
                 if (name) state.speakerNames[key] = name;
                 else delete state.speakerNames[key];
                 refreshSpeakerChips();

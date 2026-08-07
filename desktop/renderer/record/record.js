@@ -114,7 +114,13 @@
     document.getElementById('recording-indicator')
         ?.addEventListener('click', () => {
             document.querySelector('[data-tab="record"]')?.click();
-            if (state.recordingActive) showSection('recording');
+            if (state.recordingActive) {
+                showSection('recording');
+                // Coming back to a running session: repaint from main, or the
+                // list sits empty while recorder.notes holds everything — the
+                // same "your notes are gone" state the floating window avoids.
+                refreshNotes();
+            }
         });
 
     const meters = {
@@ -392,8 +398,8 @@
 
     // ─── Inline notes (freeform, timestamped) ───────────────────────────────
     // Sent through the same window.notesApi channel as the Live tab's floating
-    // notes window — main.js routes a note to whichever of live/recorder is
-    // currently active, so no Record-specific IPC is needed.
+    // notes window, and rendered by the same shared helper
+    // (renderer/notes-list.js) so the two lists can't drift apart.
     //
     // Main is the source of truth for both the text and the elapsed time: this
     // section is on screen from the moment Start is clicked, well before the
@@ -402,54 +408,18 @@
     const NOTES_PLACEHOLDER = 'Note… (Enter to save)';
 
     function resetNotesList() {
-        notesListEl.querySelectorAll('.record-note-row').forEach(row => row.remove());
+        notesListEl.querySelectorAll('.note-row').forEach(row => row.remove());
         notesEmptyEl.style.display = '';
     }
 
-    function renderNotes(notes) {
-        resetNotesList();
-        notesEmptyEl.style.display = notes.length ? 'none' : '';
-        for (const n of notes) {
-            const row = document.createElement('div');
-            row.className = 'record-note-row';
+    const refreshNotes = () => window.notesList.refresh(notesListEl, notesEmptyEl);
 
-            const time = document.createElement('div');
-            time.className = 'record-note-time';
-            time.textContent = formatHms(n.start);
-
-            const body = document.createElement('div');
-            body.className = 'record-note-text';
-            body.textContent = n.text;
-
-            row.appendChild(time);
-            row.appendChild(body);
-            notesListEl.appendChild(row);
-        }
-        notesListEl.scrollTop = notesListEl.scrollHeight;
-    }
-
-    async function refreshNotes() {
-        try {
-            renderNotes((await window.notesApi?.list()) || []);
-        } catch { /* no session — the empty placeholder is the honest state */ }
-    }
-
-    notesInputEl.addEventListener('keydown', async (e) => {
-        if (e.key !== 'Enter') return;
-        const text = notesInputEl.value.trim();
-        if (!text) return;
-        notesInputEl.value = '';
-        const res = await window.notesApi?.add(text);
-        if (!res?.ok) {
-            // The section is visible before `record:start` resolves, so this is
-            // reachable by typing fast. Give the text back instead of showing a
-            // row for a note main never accepted.
-            notesInputEl.value = text;
-            notesInputEl.placeholder = 'Not recording — note not saved';
-            setTimeout(() => { notesInputEl.placeholder = NOTES_PLACEHOLDER; }, 2500);
-            return;
-        }
-        refreshNotes();
+    window.notesList.attachInput({
+        input: notesInputEl,
+        container: notesListEl,
+        emptyEl: notesEmptyEl,
+        placeholder: NOTES_PLACEHOLDER,
+        rejectedMessage: 'Not recording — note not saved',
     });
 
     let waveRaf = null;
