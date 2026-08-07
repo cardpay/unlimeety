@@ -750,20 +750,23 @@ body[data-record-phase="recording"] .record-sidebar { display: none; }
     font-size: 12px;
     color: var(--text-muted);
 }
-.record-note-row {
+/* Row classes are the ones renderer/notes-list.js emits — shared with the Live
+   tab's floating window, which styles them for its own standalone palette.
+   Scoped to .record-notes so the two themings can't collide. */
+.record-notes .note-row {
     display: flex;
     gap: 10px;
     padding: 6px 0;
     border-bottom: 1px solid var(--border);
     font-size: 12px;
 }
-.record-note-row:last-child { border-bottom: none; }
-.record-note-time {
+.record-notes .note-row:last-child { border-bottom: none; }
+.record-notes .note-time {
     flex: none;
     font-family: var(--font-mono);
     color: var(--text-secondary);
 }
-.record-note-text {
+.record-notes .note-text {
     color: var(--text-primary);
     word-break: break-word;
     white-space: pre-wrap;

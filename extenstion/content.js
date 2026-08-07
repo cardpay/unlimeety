@@ -9,6 +9,17 @@ let currentTheme = 'auto';  // 'auto' (follow OS) | 'light' | 'dark'
 // Collect unique speaker names from the live transcript
 const knownSpeakers = new Set();
 
+// Mirrors escapeNoteText in the desktop app's main.js. The saved .txt is
+// line-oriented — a line starting `[<digit>…]` reads as the start of a new
+// speaker turn — and these files are handed to the desktop app through
+// `unlimeety://open`, so they meet exactly that parser. Without this, pasting
+// a transcript excerpt into the note box produces a bogus speaker turn there
+// and swallows the note's own body. A leading space breaks the anchor and is
+// invisible in the note.
+function escapeNoteText(text) {
+    return String(text || '').replace(/^\[/gm, ' [');
+}
+
 // Wait for the DOM to load before injecting our UI
 window.addEventListener('load', () => {
     injectUI();
@@ -191,13 +202,17 @@ function injectUI() {
     // app's Live/Record notes ("[time] Note:") so a shared summarizer prompt
     // can recognize either. See background.js's 'addNote' handler.
     document.getElementById('gmt-notes-input').addEventListener('keydown', (e) => {
+        // With a CJK IME the Enter that commits a composition candidate also
+        // arrives here; without this it would ship the half-composed buffer and
+        // wipe the field mid-word.
+        if (e.isComposing || e.keyCode === 229) return;
         if (e.key !== 'Enter') return;
         const input = e.target;
         const text = input.value.trim();
         if (!text) return;
         chrome.runtime.sendMessage({
             action: 'addNote',
-            data: { time: new Date().toLocaleTimeString(), text }
+            data: { time: new Date().toLocaleTimeString(), text: escapeNoteText(text) }
         });
         input.value = '';
     });

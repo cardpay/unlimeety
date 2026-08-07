@@ -2188,6 +2188,10 @@ ipcMain.handle('live:start', async (_e, opts) => {
         });
 
         proc.on('exit', (code) => {
+            // Mirrors the recorder's exit: a helper that dies on its own never
+            // reaches live:saveTranscript, so mirror the notes to disk while
+            // outputPath still points at the (salvageable) WAV.
+            flushNotesSidecar(live);
             liveSendToRenderer({ type: 'exited', code });
             live.proc = null;
             cancelAutoStop('live');
@@ -2311,8 +2315,17 @@ ipcMain.handle('live:saveTranscript', async (_e, payload) => {
         // Manual speaker → real-name overrides from the Live UI, keyed by
         // 'Me' (mic) / raw diarization label ('S1'…). Bake them into the
         // transcript so the names show up in both the body and Participants.
-        const names = (payload && payload.speakerNames && typeof payload.speakerNames === 'object')
+        //
+        // NOTE_LABEL is filtered out here rather than in the renderer that
+        // offers the rename: it's the reserved marker for the user's own typed
+        // notes, and a speaker renamed onto it would have every turn written as
+        // `[mm:ss] Note:` and fed to the summarizer as user-authored context.
+        // Guarding at the writer covers every rename popover, present or future.
+        const rawNames = (payload && payload.speakerNames && typeof payload.speakerNames === 'object')
             ? payload.speakerNames : {};
+        const names = Object.fromEntries(
+            Object.entries(rawNames).filter(([, v]) => String(v).trim() !== NOTE_LABEL)
+        );
 
         // Build participant list from speakers actually seen.
         const speakerParticipants = Array.from(new Set(segments.map(s => {
@@ -2411,19 +2424,29 @@ function escapeNoteText(text) {
     return String(text || '').replace(/^\[/gm, ' [');
 }
 
+// Offset of a note from the session's audio clock, in seconds. Deliberately
+// *not* clamped: notes typed while the model was still loading predate the
+// first audio sample, so their true offset is negative. Keeping it negative
+// all the way to disk means their spread and order survive (a 20 s cold load
+// otherwise flattens a whole run of notes into one indistinguishable heap),
+// and only the rendered timecode — which can't express "before the recording"
+// — is pinned to 00:00.
+function noteElapsed(note, startedAt) {
+    return (note.at - (startedAt || note.at)) / 1000;
+}
+
 // Turn a session's captured notes into the same {start, block} shape the
 // segment writers produce, on the shared elapsed-seconds clock.
 function buildNoteBlocks(notes, startedAt) {
     return notes.map(n => {
-        const start = Math.max(0, (n.at - (startedAt || n.at)) / 1000);
+        const start = noteElapsed(n, startedAt);
         return { start, block: `[${formatHms(start)}] ${NOTE_LABEL}:\n${n.text}` };
     });
 }
 
-// Shared by live:saveTranscript and record:transcribe. The index tie-break is
-// load-bearing: notes typed before the audio clock started (during model load)
-// all clamp to 0, and this is what keeps them in the order they were typed
-// rather than at the mercy of sort stability.
+// Shared by live:saveTranscript and record:transcribe. Sorting on the true
+// offset puts pre-roll notes ahead of the first turn in the order they were
+// typed; the index tie-break keeps genuinely simultaneous entries stable.
 function interleaveNotes(segBlocks, noteBlocks) {
     return [...segBlocks, ...noteBlocks]
         .map((x, i) => ({ ...x, i }))
@@ -2577,6 +2600,13 @@ ipcMain.handle('record:start', async (_e, opts) => {
     recorder.notesStartedAt = Date.now();
 
     recorder.proc.on('exit', (code) => {
+        // Before the key is dropped: an unexpected exit (crash, SIGKILL, disk
+        // error) never reaches record:stop — its own `!recorder.proc` guard
+        // fires first, and the renderer's stopAndSave bails on recordingActive.
+        // Nulling outputPath below would also disarm the before-quit backstop,
+        // stranding the notes with no path to key them to while the salvaged
+        // .wav stays perfectly transcribable.
+        flushNotesSidecar(recorder);
         recordSendToRenderer({ type: 'recorderExited', code });
         recorder.proc = null;
         recorder.outputPath = null;
@@ -2688,7 +2718,7 @@ function flushNotesSidecar(slot) {
     if (!slot.outputPath || !slot.notes.length) return;
     try {
         const notes = slot.notes.map(n => ({
-            start: Math.max(0, (n.at - (slot.notesStartedAt || n.at)) / 1000),
+            start: noteElapsed(n, slot.notesStartedAt),
             text: n.text,
         }));
         fs.writeFileSync(notesSidecarPath(slot.outputPath), JSON.stringify(notes), 'utf-8');
@@ -2700,9 +2730,11 @@ function readNotesSidecar(wavPath) {
         const notes = JSON.parse(fs.readFileSync(notesSidecarPath(wavPath), 'utf-8'));
         if (!Array.isArray(notes)) return [];
         // Hand-edited or truncated files shouldn't produce NaN timecodes.
+        // Negative starts are legitimate (notes taken before audio began) and
+        // are preserved for ordering; formatHms pins them to 00:00 on render.
         return notes
             .filter(n => n && typeof n.text === 'string')
-            .map(n => ({ start: Math.max(0, Number(n.start) || 0), text: n.text }));
+            .map(n => ({ start: Number(n.start) || 0, text: n.text }));
     } catch {
         return [];
     }
@@ -3096,13 +3128,27 @@ ipcMain.handle('record:transcribe', async (_e, opts) => {
         }
     }
 
+    // Notes taken while this wav was recorded. Read before the merge below,
+    // because a merged block keeps only its *first* segment's start — so a
+    // note taken deep inside a long same-speaker run would otherwise sort
+    // after the entire block and read as a remark about whatever came next.
+    const recordedNotes = readNotesSidecar(filePath);
+
     // Collapse consecutive same-speaker turns into a single bubble.
     let finalSegments = segments;
     if (mergeAdjacent && segments.length) {
         finalSegments = [];
         for (const seg of segments) {
             const prev = finalSegments[finalSegments.length - 1];
-            if (prev && prev.speaker === seg.speaker && prev.source === seg.source) {
+            // A note taken after the current block began but no later than
+            // this turn starts has to render between them, so it ends the
+            // block: the note can only land between blocks, and a merged block
+            // sorts on its *first* segment's start. Keyed on prev.start, not
+            // prev.end — turns are contiguous, so a gap-based test would never
+            // fire and every note would drift past the whole run.
+            const noteBetween = prev
+                && recordedNotes.some(n => n.start > prev.start && n.start <= seg.start);
+            if (prev && !noteBetween && prev.speaker === seg.speaker && prev.source === seg.source) {
                 prev.end = seg.end;
                 prev.text = `${String(prev.text || '').trim()} ${String(seg.text || '').trim()}`.trim();
             } else {
@@ -3153,14 +3199,13 @@ ipcMain.handle('record:transcribe', async (_e, opts) => {
             const who = humanizeSpeakerLabel(rawWho);
             return { start: seg.start, block: `[${t}] ${who}:\n${String(seg.text || '').trim()}` };
         });
-        // Notes captured while this wav was being recorded — read back from the
-        // sidecar, since this handler knows only the path and may be running in
-        // a later app launch entirely. Elapsed seconds are already resolved.
-        const sidecarNotes = readNotesSidecar(filePath).map(n => ({
+        // Read from the sidecar above, since this handler knows only the wav
+        // path and may be running in a later app launch entirely.
+        const noteBlocks = recordedNotes.map(n => ({
             start: n.start,
             block: `[${formatHms(n.start)}] ${NOTE_LABEL}:\n${n.text}`,
         }));
-        const body = interleaveNotes(segBlocks, sidecarNotes);
+        const body = interleaveNotes(segBlocks, noteBlocks);
         const content = headerLines.join('\n') + '\n\n' + body + (body ? '\n' : '');
         fs.writeFileSync(transcriptPath, content, 'utf-8');
         // Keep a partial out of Recent Documents — it isn't a document anyone
@@ -3292,11 +3337,20 @@ ipcMain.handle('notes:add', (_e, text) => {
 // the source of truth for what has been captured — main is. Hand it the
 // session's notes on load so a reopened window shows the real list instead of
 // an empty one that reads as data loss.
-ipcMain.handle('notes:list', () => {
-    const slot = live.proc ? live : (recorder.proc ? recorder : null);
-    if (!slot) return [];
+//
+// Addressed by caller, not by preference: notes:add fans a note out to every
+// running slot, so with Live and Record both going, "whichever is live" would
+// hand the Record tab Live's notes on Live's clock — a list that matches
+// neither what the user typed there nor the .txt that session will produce.
+// The floating window belongs to Live; anything else is the main window, i.e.
+// the Record tab.
+ipcMain.handle('notes:list', (e) => {
+    const fromNotesWindow = Boolean(notesWindow && !notesWindow.isDestroyed()
+        && e.sender === notesWindow.webContents);
+    const slot = fromNotesWindow ? live : recorder;
+    if (!slot.proc) return [];
     return slot.notes.map(n => ({
-        start: Math.max(0, (n.at - (slot.notesStartedAt || n.at)) / 1000),
+        start: noteElapsed(n, slot.notesStartedAt),
         text: n.text,
     }));
 });
