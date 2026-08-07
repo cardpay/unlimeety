@@ -879,6 +879,14 @@ function headerParticipants(content) {
   return [];
 }
 
+// Reserved pseudo-speaker written by the recording UIs for the user's own
+// typed notes. Not a real participant: it must not be renameable, and no real
+// speaker may be renamed onto it. Sourced from the shared notes module so this
+// file and live.js can't drift — but not *depended* on: the Editor tab works
+// with no notes UI at all, and a hard reference here would take the whole
+// renderer down (this is module top level) if the script order ever changed.
+const NOTE_LABEL = window.notesList?.NOTE_LABEL ?? "Note";
+
 // Rename a speaker across the whole transcript: every "[mm:ss] <old>:" line
 // becomes "[mm:ss] <new>:", and the Participants header token is swapped (then
 // deduped case-insensitively). Matches speakers by string equality, not regex,
@@ -925,7 +933,15 @@ function renderTranscriptView(content) {
     const header = content.slice(0, firstTcMatch.index).trim();
     if (header) html += `<div class="tv-header">${escHtml(header)}</div>`;
     for (const seg of parseSegments(content)) {
-      const speaker = seg.speaker ? `<span class="tv-speaker">${escHtml(seg.speaker)}:</span> ` : "";
+      // "Note" is the reserved label the recording UIs write for the user's own
+      // typed notes — it's not a speaker, so it gets a plain label instead of a
+      // rename chip. Renaming it would rewrite every "] Note:" line and
+      // permanently break summarize:run's gate on that marker.
+      const speaker = seg.speaker
+        ? (seg.speaker === NOTE_LABEL
+            ? `<span class="tv-note">${escHtml(seg.speaker)}:</span> `
+            : `<span class="tv-speaker">${escHtml(seg.speaker)}:</span> `)
+        : "";
       // Audio segments carry a seekable offset; text-export segments only have
       // a wall-clock label (no audio to seek), so render them without data-t.
       const seekAttr = seg.t != null ? ` data-t="${seg.t}"` : "";
@@ -1001,6 +1017,14 @@ if (PLAYER_OK) {
       anchor: chip,
       current,
       suggestions,
+      // Side-effect free: runs before anything is committed (see
+      // speaker-rename.js). Renaming a speaker onto the reserved notes label
+      // would turn their spoken turns into "[mm:ss] Note:" lines —
+      // indistinguishable from the user's own notes, and fed to the summarizer
+      // as such.
+      validate: (name) => (name.trim() === NOTE_LABEL
+        ? `"${NOTE_LABEL}" is reserved for your own typed notes`
+        : null),
       onCommit: (name) => {
         if (!name || name === current) return;
         editor.value = renameSpeakerInText(editor.value, current, name);

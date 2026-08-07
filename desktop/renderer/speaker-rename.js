@@ -26,6 +26,7 @@
       .spk-rename .spk-hint {
         margin-top: 4px; font-size: 11px; color: var(--text-muted); line-height: 1.3;
       }
+      .spk-rename .spk-hint-error { color: var(--danger); }
     `;
     const el = document.createElement('style');
     el.textContent = css;
@@ -50,7 +51,7 @@
     pop.style.left = `${window.scrollX + r.left}px`;
   }
 
-  function open({ anchor, current, suggestions, onCommit }) {
+  function open({ anchor, current, suggestions, onCommit, validate }) {
     close();
     committed = false;
 
@@ -76,25 +77,46 @@
       input.setAttribute('list', dl.id);
     }
 
-    const commit = () => {
-      if (committed) return;
-      committed = true;
-      const name = input.value.trim();
-      close();
-      onCommit(name); // empty string => clear the override
-    };
-
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') { e.preventDefault(); commit(); }
-      else if (e.key === 'Escape') { e.preventDefault(); committed = true; close(); }
-    });
-    input.addEventListener('blur', commit);
-
     pop.appendChild(input);
     const hint = document.createElement('div');
     hint.className = 'spk-hint';
-    hint.textContent = 'Enter to apply · empty to reset';
+    const HINT_DEFAULT = 'Enter to apply · empty to reset';
+    hint.textContent = HINT_DEFAULT;
     pop.appendChild(hint);
+
+    // `validate` (optional) refuses a name by returning a reason string — it
+    // must be side-effect free, because it runs before anything is committed
+    // and may run repeatedly. `onCommit` is the effect and still runs exactly
+    // once, after `committed` is set and the popover is closed: both callers
+    // rebuild the DOM this popover is anchored to, so any blur they induce
+    // would otherwise re-enter here.
+    // Refusing keeps the popover open with the reason — a silent no-op is
+    // indistinguishable from a misclick, so the user just tries again and gets
+    // the same silence. A refusal on blur closes instead: they clicked away.
+    const commit = (viaBlur) => {
+      if (committed) return;
+      const name = input.value.trim();
+      const rejection = validate ? validate(name) : null;
+      if (rejection && !viaBlur) {
+        hint.textContent = rejection;
+        hint.classList.add('spk-hint-error');
+        input.select();
+        return;
+      }
+      committed = true;
+      close();
+      if (!rejection) onCommit(name); // empty string => clear the override
+    };
+
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); commit(false); }
+      else if (e.key === 'Escape') { e.preventDefault(); committed = true; close(); }
+      else if (hint.classList.contains('spk-hint-error')) {
+        hint.textContent = HINT_DEFAULT;
+        hint.classList.remove('spk-hint-error');
+      }
+    });
+    input.addEventListener('blur', () => commit(true));
 
     document.body.appendChild(pop);
     positionUnder(anchor);

@@ -2759,6 +2759,14 @@ body.mode-record #btn-ask-ai {
     text-decoration: underline;
 }
 
+/* The user's own typed notes. Deliberately not a .tv-speaker: it isn't a
+   participant and must not open the rename popover. */
+.tv-note {
+    font-weight: 600;
+    color: var(--accent);
+    margin-right: 4px;
+}
+
 /* Themed text selection for the view-mode read areas (transcript, summary
    rail, Ask AI chat) — matches #editor::selection instead of the default blue. */
 #transcript-view ::selection,

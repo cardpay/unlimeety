@@ -44,6 +44,10 @@
     const outputPathEl = $('record-output-path');
     const stopBtn     = $('record-btn-stop');
 
+    const notesListEl  = $('record-notes-list');
+    const notesEmptyEl = $('record-notes-empty');
+    const notesInputEl = $('record-notes-input');
+
     // Transcribe-settings screen (Variant C) refs.
     const tsCrumbCount   = $('ts-crumb-count');
     const tsBatchCount   = $('ts-batch-count');
@@ -110,7 +114,13 @@
     document.getElementById('recording-indicator')
         ?.addEventListener('click', () => {
             document.querySelector('[data-tab="record"]')?.click();
-            if (state.recordingActive) showSection('recording');
+            if (state.recordingActive) {
+                showSection('recording');
+                // Coming back to a running session: repaint from main, or the
+                // list sits empty while recorder.notes holds everything — the
+                // same "your notes are gone" state the floating window avoids.
+                refreshNotes();
+            }
         });
 
     const meters = {
@@ -364,6 +374,7 @@
         setStatus('loading', 'Preparing…');
         timerEl.textContent = '00:00';
         outputPathEl.textContent = '';
+        resetNotesList();
 
         const res = await api.start({
             sources,
@@ -383,6 +394,37 @@
         buildWaveform();
         fillRecordFileCard();
         updateStatusBar('recording');
+    });
+
+    // ─── Inline notes (freeform, timestamped) ───────────────────────────────
+    // Sent through the same window.notesApi channel as the Live tab's floating
+    // notes window, and rendered by the same shared helper
+    // (renderer/notes-list.js) so the two lists can't drift apart.
+    //
+    // Main is the source of truth for both the text and the elapsed time: this
+    // section is on screen from the moment Start is clicked, well before the
+    // helper's `recording` event sets the clock, so anything computed here from
+    // a local anchor would be wrong exactly when the user types first.
+    const NOTES_PLACEHOLDER = 'Note… (Enter to save)';
+
+    // Clearing is just "render nothing" — the shared renderer owns how a row is
+    // built and how the placeholder is toggled, so a second copy of that rule
+    // here would silently miss any change to it.
+    const resetNotesList = () => window.notesList.render(notesListEl, notesEmptyEl, []);
+    const refreshNotes = () => window.notesList.refresh(notesListEl, notesEmptyEl);
+
+    // Repaint on main's broadcast: a note added from the Live tab's floating
+    // window lands in this session too when both are running, and a new
+    // session clears the list. The disposer is unused on purpose — this list
+    // is part of the main window and lives as long as the renderer does.
+    window.notesList.watch(notesListEl, notesEmptyEl);
+
+    window.notesList.attachInput({
+        input: notesInputEl,
+        container: notesListEl,
+        emptyEl: notesEmptyEl,
+        placeholder: NOTES_PLACEHOLDER,
+        rejectedMessage: 'Not recording — note not saved',
     });
 
     let waveRaf = null;

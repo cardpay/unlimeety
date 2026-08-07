@@ -1190,6 +1190,16 @@ ipcMain.handle('summarize:run', async (_e, filePath, promptInstruction) => {
         return { ok: false, error: 'Could not read transcript file.' };
     }
 
+    // Lines like "[12:34] Note:" are the user's own typed notes (Live floating
+    // window, Record-tab inline control, or the Chrome extension — all three
+    // write this exact marker), not a spoken turn. Every preset and custom
+    // prompt funnels through this one handler, so this is the only place it
+    // needs explaining to the model. Gated on the marker so note-free
+    // transcripts don't pay for an irrelevant instruction.
+    if (content.includes(`] ${NOTE_LABEL}:`)) {
+        promptInstruction = `Any transcript line formatted as "[mm:ss] ${NOTE_LABEL}:" followed by text is a note the user typed themselves during the meeting — not something anyone said aloud. Treat these as high-priority context: if a note reads like a task/TODO, fold it into the Action Items section (don't invent an owner or deadline unless the note itself states one); otherwise incorporate it as context in the relevant part of the summary.\n\n${promptInstruction}`;
+    }
+
     const cfg = readSummarizerConfig();
     switch (cfg.provider) {
         case 'openrouter':        return runOpenRouter(content, promptInstruction, cfg.openrouter);
@@ -1672,10 +1682,19 @@ ipcMain.handle('transcripts:delete', async (_e, filePath) => {
 
     const errors = [];
     const tryUnlink = (p) => {
-        try { fs.unlinkSync(p); } catch (err) { errors.push(`${path.basename(p)}: ${err.message}`); }
+        try { fs.unlinkSync(p); return true; }
+        catch (err) { errors.push(`${path.basename(p)}: ${err.message}`); return false; }
     };
     if (sumPath) tryUnlink(sumPath);
-    for (const a of audioPaths) tryUnlink(a);
+    for (const a of audioPaths) {
+        // Only once the wav is actually gone: on EPERM (locked file, read-only
+        // volume) the recording survives and the user is told the delete
+        // failed — dropping its notes anyway would silently strip them from
+        // the next re-transcription. Nothing ever overwrites an orphaned
+        // sidecar (flushNotesSidecar early-returns on an empty note list), so
+        // a successful delete does have to take it.
+        if (tryUnlink(a)) removeNotesSidecar(a);
+    }
     tryUnlink(filePath);
 
     if (errors.length) return { ok: false, error: errors.join('; ') };
@@ -1856,7 +1875,13 @@ ipcMain.handle('transcripts:rename', async (_e, filePath, newTitle) => {
         const directAudio = path.join(RECORDINGS_FOLDER, `${oldStem}.wav`);
         if (fs.existsSync(directAudio)) {
             const newAudioPath = path.join(RECORDINGS_FOLDER, `${newStem}.wav`);
-            if (!fs.existsSync(newAudioPath)) fs.renameSync(directAudio, newAudioPath);
+            if (!fs.existsSync(newAudioPath)) {
+                fs.renameSync(directAudio, newAudioPath);
+                // Same reason as record:rename — the sidecar is keyed on the
+                // wav stem, so renaming the meeting here would otherwise strand
+                // the notes and the next re-transcription would drop them.
+                moveNotesSidecar(directAudio, newAudioPath);
+            }
         }
 
         if (oldSummaryPath && fs.existsSync(oldSummaryPath)) {
@@ -1891,6 +1916,8 @@ const live = {
     // matching stem — that way transcripts:list and record:list pair them up
     // automatically via findRelatedAudioPaths / recordingTranscriptPath.
     outputPath: null,
+    notes: [],            // freeform notes typed during this session: {text, at}
+    notesStartedAt: null, // wall-clock anchor notes' elapsed offsets are measured from
 };
 
 function liveHelperPath() {
@@ -1919,6 +1946,11 @@ function liveHandleEvent(event) {
     // Auto-stop signals are handled in main; not forwarded to the renderer.
     if (event.type === 'meetingEnded') { onMeetingEnded('live'); return; }
     if (event.type === 'meetingResumed') { cancelAutoStop('live'); return; }
+
+    // Re-anchor notes' elapsed-time origin to when audio capture actually
+    // starts, not when live:start was called — model load can take tens of
+    // seconds and would otherwise throw off every note timestamp.
+    if (event.type === 'recording') live.notesStartedAt = Date.now();
 
     if (event.type === 'segment' && event.final === true) {
         live.segments.push(event);
@@ -2141,6 +2173,16 @@ ipcMain.handle('live:start', async (_e, opts) => {
         live.stdoutBuf = '';
         live.stderrBuf = '';
         live.outputPath = outputPath;
+        live.notes = [];
+        // Provisional fallback — overwritten precisely once the helper's
+        // 'recording' event fires (liveHandleEvent above). Stop is reachable
+        // before that event arrives, so this must never be left null.
+        live.notesStartedAt = Date.now();
+        // A panel left open from a previous (crashed) session is still showing
+        // that session's notes: showNotesWindow() below early-returns when one
+        // exists, so nothing else would repaint it until the user happened to
+        // type — and until then the old notes read as if they belonged here.
+        broadcastNotesChanged();
 
         const proc = spawn(helper, [], { stdio: ['pipe', 'pipe', 'pipe'] });
         live.proc = proc;
@@ -2166,17 +2208,27 @@ ipcMain.handle('live:start', async (_e, opts) => {
         });
 
         proc.on('exit', (code) => {
+            // Mirrors the recorder's exit: a helper that dies on its own never
+            // reaches live:saveTranscript, so mirror the notes to disk while
+            // outputPath still points at the (salvageable) WAV.
+            flushNotesSidecar(live);
             liveSendToRenderer({ type: 'exited', code });
             live.proc = null;
             cancelAutoStop('live');
+            closeNotesWindow();
         });
 
         proc.on('error', (err) => {
             liveSendToRenderer({ type: 'error', message: `helper spawn error: ${err.message}` });
             live.proc = null;
+            // Node emits 'error' (not 'exit') when the helper fails to spawn at
+            // all, so without this the always-on-top notes panel would outlive
+            // the session it belongs to, with nothing left to accept its notes.
+            closeNotesWindow();
         });
 
         proc.stdin.write(JSON.stringify(payload) + '\n');
+        showNotesWindow();
         return { ok: true, config: payload };
     } catch (err) {
         live.proc = null;
@@ -2283,8 +2335,17 @@ ipcMain.handle('live:saveTranscript', async (_e, payload) => {
         // Manual speaker → real-name overrides from the Live UI, keyed by
         // 'Me' (mic) / raw diarization label ('S1'…). Bake them into the
         // transcript so the names show up in both the body and Participants.
-        const names = (payload && payload.speakerNames && typeof payload.speakerNames === 'object')
+        //
+        // NOTE_LABEL is filtered out here rather than in the renderer that
+        // offers the rename: it's the reserved marker for the user's own typed
+        // notes, and a speaker renamed onto it would have every turn written as
+        // `[mm:ss] Note:` and fed to the summarizer as user-authored context.
+        // Guarding at the writer covers every rename popover, present or future.
+        const rawNames = (payload && payload.speakerNames && typeof payload.speakerNames === 'object')
             ? payload.speakerNames : {};
+        const names = Object.fromEntries(
+            Object.entries(rawNames).filter(([, v]) => String(v).trim() !== NOTE_LABEL)
+        );
 
         // Build participant list from speakers actually seen.
         const speakerParticipants = Array.from(new Set(segments.map(s => {
@@ -2322,15 +2383,17 @@ ipcMain.handle('live:saveTranscript', async (_e, payload) => {
         if (participants.length) headerLines.push(`Participants: ${participants.join(', ')}`);
         if (language) headerLines.push(`Language: ${language}`);
 
-        const body = segments.map(seg => {
+        const segBlocks = segments.map(seg => {
             const t = formatHms(seg.start);
             const who = seg.source === 'mic'
                 ? (names['Me'] || 'Me')
                 : (seg.speaker && seg.speaker !== '?' && seg.speaker !== '…'
                     ? (names[seg.speaker] || humanizeSpeakerLabel(seg.speaker))
                     : 'Speaker');
-            return `[${t}] ${who}:\n${String(seg.text || '').trim()}`;
-        }).join('\n\n');
+            return { start: seg.start, block: `[${t}] ${who}:\n${String(seg.text || '').trim()}` };
+        });
+        const body = interleaveNotes(
+            segBlocks, buildNoteBlocks(resolveNotes(live.notes, live.notesStartedAt)));
 
         const content = headerLines.join('\n') + '\n\n' + body + (body ? '\n' : '');
 
@@ -2342,7 +2405,13 @@ ipcMain.handle('live:saveTranscript', async (_e, payload) => {
             : uniqueFilePath(TRANSCRIPTS_FOLDER, sanitizeFilenameBase(title), '.txt');
         fs.writeFileSync(filePath, content, 'utf-8');
         app.addRecentDocument(filePath);
+        // Kept (not deleted) after a successful save: re-transcribing this same
+        // wav from the Record tab rewrites the .txt from scratch, and the notes
+        // should come back with it.
+        flushNotesSidecar(live);
         live.outputPath = null;
+        live.notes = [];
+        live.notesStartedAt = null;
         noteSessionFlushed('live');
         return { ok: true, filePath, audioPath: wavPath };
     } catch (err) {
@@ -2360,6 +2429,60 @@ function formatHms(sec) {
     const r = s % 60;
     const pad = (n) => String(n).padStart(2, '0');
     return h > 0 ? `${pad(h)}:${pad(m)}:${pad(r)}` : `${pad(m)}:${pad(r)}`;
+}
+
+// Reserved pseudo-speaker for the user's own typed notes. Spelled once here:
+// both transcript writers, summarize:run's gate and the renderer's
+// "not a real speaker" check all key off this single literal.
+const NOTE_LABEL = 'Note';
+
+// A note body is free text, but the transcript is line-oriented: parseSegments
+// treats a line starting `[<digit>…]` as the start of a new turn. Pasting
+// "[04:12] Alice: …" into the note box would therefore re-parse on reopen as a
+// bogus Alice turn, and swallow the note's own body. A leading space breaks the
+// anchor and is invisible in the note itself.
+function escapeNoteText(text) {
+    return String(text || '').replace(/^\[/gm, ' [');
+}
+
+// Offset of a note from the session's audio clock, in seconds. Deliberately
+// *not* clamped: notes typed while the model was still loading predate the
+// first audio sample, so their true offset is negative. Keeping it negative
+// all the way to disk means their spread and order survive (a 20 s cold load
+// otherwise flattens a whole run of notes into one indistinguishable heap),
+// and only the rendered timecode — which can't express "before the recording"
+// — is pinned to 00:00.
+function noteElapsed(note, startedAt) {
+    return (note.at - (startedAt || note.at)) / 1000;
+}
+
+// In-memory notes ({text, at}) resolved onto the session's audio clock, giving
+// the same {start, text} shape the sidecar stores — so both transcript writers
+// feed buildNoteBlocks from one representation instead of each spelling the
+// marker out for its own.
+function resolveNotes(notes, startedAt) {
+    return notes.map(n => ({ start: noteElapsed(n, startedAt), text: n.text }));
+}
+
+// Turn resolved notes into the same {start, block} shape the segment writers
+// produce. The one place the on-disk marker format is spelled out; changing it
+// here and missing a caller is what would quietly break summarize:run's gate.
+function buildNoteBlocks(notes) {
+    return notes.map(n => ({
+        start: n.start,
+        block: `[${formatHms(n.start)}] ${NOTE_LABEL}:\n${n.text}`,
+    }));
+}
+
+// Shared by live:saveTranscript and record:transcribe. Sorting on the true
+// offset puts pre-roll notes ahead of the first turn in the order they were
+// typed; the index tie-break keeps genuinely simultaneous entries stable.
+function interleaveNotes(segBlocks, noteBlocks) {
+    return [...segBlocks, ...noteBlocks]
+        .map((x, i) => ({ ...x, i }))
+        .sort((a, b) => a.start - b.start || a.i - b.i)
+        .map(x => x.block)
+        .join('\n\n');
 }
 
 // Make sure we don't leave a zombie helper if the window is closed mid-recording.
@@ -2380,6 +2503,8 @@ const recorder = {
     proc: null,
     outputPath: null,
     stdoutBuf: '',
+    notes: [],            // freeform notes typed during this session: {text, at}
+    notesStartedAt: null, // wall-clock anchor notes' elapsed offsets are measured from
 };
 const transcriber = {
     proc: null,
@@ -2399,6 +2524,9 @@ function recordSendToRenderer(event) {
 function recordHandleEvent(event) {
     if (event && event.type === 'meetingEnded') { onMeetingEnded('record'); return; }
     if (event && event.type === 'meetingResumed') { cancelAutoStop('record'); return; }
+    // Re-anchor notes' elapsed-time origin to when audio capture actually
+    // starts, not when record:start was called (mirrors liveHandleEvent).
+    if (event && event.type === 'recording') recorder.notesStartedAt = Date.now();
     recordSendToRenderer(event);
 }
 
@@ -2496,8 +2624,22 @@ ipcMain.handle('record:start', async (_e, opts) => {
 
     recorder.proc = spawnRes.proc;
     recorder.outputPath = outputPath;
+    recorder.notes = [];
+    // Provisional fallback — overwritten precisely once the helper's
+    // 'recording' event fires (recordHandleEvent above).
+    recorder.notesStartedAt = Date.now();
+    // Same reason as live:start — repaint any list still showing the previous
+    // session's notes rather than waiting for the next add to correct it.
+    broadcastNotesChanged();
 
     recorder.proc.on('exit', (code) => {
+        // Before the key is dropped: an unexpected exit (crash, SIGKILL, disk
+        // error) never reaches record:stop — its own `!recorder.proc` guard
+        // fires first, and the renderer's stopAndSave bails on recordingActive.
+        // Nulling outputPath below would also disarm the before-quit backstop,
+        // stranding the notes with no path to key them to while the salvaged
+        // .wav stays perfectly transcribable.
+        flushNotesSidecar(recorder);
         recordSendToRenderer({ type: 'recorderExited', code });
         recorder.proc = null;
         recorder.outputPath = null;
@@ -2522,6 +2664,7 @@ ipcMain.handle('record:start', async (_e, opts) => {
 
 ipcMain.handle('record:stop', async () => {
     if (!recorder.proc) return { ok: false, error: 'No recording in progress.' };
+    flushNotesSidecar(recorder);
     try { recorder.proc.stdin.write(JSON.stringify({ cmd: 'stop' }) + '\n'); } catch { /* may already be closed */ }
 
     await new Promise((resolve) => {
@@ -2585,6 +2728,62 @@ function recordingTranscriptPath(wavPath) {
     return path.join(TRANSCRIPTS_FOLDER, `${base}.txt`);
 }
 
+function notesSidecarPath(wavPath) {
+    const base = path.basename(wavPath, path.extname(wavPath));
+    return path.join(RECORDINGS_FOLDER, `${base}.notes.json`);
+}
+
+// The sidecar is keyed purely on the wav stem, so it has to follow the wav
+// everywhere the wav goes — and there are two renames that move a wav
+// (`record:rename` from the Record tab, `transcripts:rename` from the Editor)
+// plus two deletes. Left behind on a rename the notes silently vanish from the
+// next transcription; left behind on a delete it outlives the recording and
+// gets adopted by whatever later recording lands on that stem.
+function moveNotesSidecar(oldWavPath, newWavPath) {
+    const from = notesSidecarPath(oldWavPath);
+    if (!fs.existsSync(from)) return;
+    try { fs.renameSync(from, notesSidecarPath(newWavPath)); }
+    catch { /* best-effort: a lost sidecar must not fail the rename */ }
+}
+
+function removeNotesSidecar(wavPath) {
+    try { fs.unlinkSync(notesSidecarPath(wavPath)); } catch { /* nothing to remove */ }
+}
+
+// Notes are captured in memory, but `record:transcribe` is fully decoupled
+// from the session that captured them — Re-transcribe and the batch flow know
+// only a .wav path, possibly a different app launch later. So every session
+// mirrors its notes to a sidecar next to the wav, with elapsed seconds already
+// resolved. Live tees its audio into RECORDINGS_FOLDER under the same stem, so
+// its notes survive re-transcription (and a crash) exactly like Record's.
+function flushNotesSidecar(slot) {
+    if (!slot.outputPath || !slot.notes.length) return;
+    try {
+        const notes = resolveNotes(slot.notes, slot.notesStartedAt);
+        fs.writeFileSync(notesSidecarPath(slot.outputPath), JSON.stringify(notes), 'utf-8');
+    } catch { /* best-effort — notes are an enhancement, never block stop/quit */ }
+}
+
+function readNotesSidecar(wavPath) {
+    try {
+        const notes = JSON.parse(fs.readFileSync(notesSidecarPath(wavPath), 'utf-8'));
+        if (!Array.isArray(notes)) return [];
+        // Everything here is re-validated rather than trusted: this file can be
+        // hand-edited, synced from another machine, or written by an older
+        // build. NaN starts are coerced, and the text is re-escaped — the
+        // capture-time escape in notes:add doesn't cover a payload that never
+        // went through it, and an unescaped "[04:12] Alice: …" in a note body
+        // re-parses as a speaker turn and swallows the note.
+        // Negative starts are legitimate (notes taken before audio began) and
+        // are preserved for ordering; formatHms pins them to 00:00 on render.
+        return notes
+            .filter(n => n && typeof n.text === 'string')
+            .map(n => ({ start: Number(n.start) || 0, text: escapeNoteText(n.text) }));
+    } catch {
+        return [];
+    }
+}
+
 ipcMain.handle('record:delete', async (_e, filePath) => {
     if (typeof filePath !== 'string' || !filePath.startsWith(RECORDINGS_FOLDER)) {
         return { ok: false, error: 'Refusing to delete file outside recordings folder.' };
@@ -2600,6 +2799,7 @@ ipcMain.handle('record:delete', async (_e, filePath) => {
     if (choice !== 0) return { ok: false, canceled: true };
     try {
         fs.unlinkSync(filePath);
+        removeNotesSidecar(filePath);
         return { ok: true };
     } catch (err) {
         return { ok: false, error: err.message };
@@ -2631,6 +2831,7 @@ ipcMain.handle('record:deleteMany', async (_e, paths) => {
     for (const p of targets) {
         try {
             fs.unlinkSync(p);
+            removeNotesSidecar(p);
             deleted++;
         } catch (err) {
             errors.push({ path: p, error: err.message });
@@ -2727,7 +2928,10 @@ ipcMain.handle('record:rename', async (_e, wavPath, newTitle) => {
         const hasTranscript = fs.existsSync(oldTranscriptPath);
         const oldSummaryPath = hasTranscript ? findExistingSummaryPath(oldTranscriptPath) : null;
 
-        if (newWavPath !== wavPath) fs.renameSync(wavPath, newWavPath);
+        if (newWavPath !== wavPath) {
+            fs.renameSync(wavPath, newWavPath);
+            moveNotesSidecar(wavPath, newWavPath);
+        }
 
         // A cut-short transcription leaves `<stem>.partial.txt` next to the real
         // transcript, keyed to the WAV's stem — and since that stem never
@@ -2962,13 +3166,46 @@ ipcMain.handle('record:transcribe', async (_e, opts) => {
         }
     }
 
+    // Notes taken while this wav was recorded. Read before the merge below,
+    // because a merged block keeps only its *first* segment's start — so a
+    // note taken deep inside a long same-speaker run would otherwise sort
+    // after the entire block and read as a remark about whatever came next.
+    const recordedNotes = readNotesSidecar(filePath);
+
     // Collapse consecutive same-speaker turns into a single bubble.
     let finalSegments = segments;
     if (mergeAdjacent && segments.length) {
         finalSegments = [];
-        for (const seg of segments) {
+        // The note cursor below only ever advances, so it needs `start` to be
+        // non-decreasing across the pass. The helper emits final segments in
+        // order today, but nothing enforces it — and an out-of-order arrival
+        // (or a future diarization pass that reorders) would rewind past notes
+        // the cursor had already stepped over, silently merging across them.
+        // Sorting here makes the invariant the optimisation relies on true
+        // rather than assumed; the transcript body is sorted by start anyway.
+        const ordered = [...segments].sort((a, b) => a.start - b.start);
+        // Both arrays now run ascending by `start`, so one advancing cursor
+        // answers "is there a note in (prev.start, seg.start]" for the whole
+        // pass — rescanning every note per segment would be O(segments × notes),
+        // and a two-hour recording brings thousands of segments to this loop.
+        const noteStarts = recordedNotes.map(n => n.start).sort((a, b) => a - b);
+        let noteCursor = 0;
+        for (const seg of ordered) {
             const prev = finalSegments[finalSegments.length - 1];
-            if (prev && prev.speaker === seg.speaker && prev.source === seg.source) {
+            // A note taken after the current block began but no later than
+            // this turn starts has to render between them, so it ends the
+            // block: the note can only land between blocks, and a merged block
+            // sorts on its *first* segment's start. Keyed on prev.start, not
+            // prev.end — turns are contiguous, so a gap-based test would never
+            // fire and every note would drift past the whole run.
+            let noteBetween = false;
+            if (prev) {
+                while (noteCursor < noteStarts.length && noteStarts[noteCursor] <= prev.start) {
+                    noteCursor++;
+                }
+                noteBetween = noteCursor < noteStarts.length && noteStarts[noteCursor] <= seg.start;
+            }
+            if (prev && !noteBetween && prev.speaker === seg.speaker && prev.source === seg.source) {
                 prev.end = seg.end;
                 prev.text = `${String(prev.text || '').trim()} ${String(seg.text || '').trim()}`.trim();
             } else {
@@ -3013,12 +3250,16 @@ ipcMain.handle('record:transcribe', async (_e, opts) => {
         if (participants.length) headerLines.push(`Participants: ${participants.join(', ')}`);
         if (language) headerLines.push(`Language: ${language}`);
         headerLines.push(`Source: ${filePath}`);
-        const body = finalSegments.map(seg => {
+        const segBlocks = finalSegments.map(seg => {
             const t = formatHms(seg.start);
             const rawWho = seg.speaker && seg.speaker !== '?' && seg.speaker !== '…' ? seg.speaker : 'Speaker';
             const who = humanizeSpeakerLabel(rawWho);
-            return `[${t}] ${who}:\n${String(seg.text || '').trim()}`;
-        }).join('\n\n');
+            return { start: seg.start, block: `[${t}] ${who}:\n${String(seg.text || '').trim()}` };
+        });
+        // Read from the sidecar above, since this handler knows only the wav
+        // path and may be running in a later app launch entirely. Already in
+        // {start, text} form, so it shares the Live writer's block builder.
+        const body = interleaveNotes(segBlocks, buildNoteBlocks(recordedNotes));
         const content = headerLines.join('\n') + '\n\n' + body + (body ? '\n' : '');
         fs.writeFileSync(transcriptPath, content, 'utf-8');
         // Keep a partial out of Recent Documents — it isn't a document anyone
@@ -3115,12 +3356,157 @@ ipcMain.handle('record:deleteModel', async (_e, modelName) => {
 // Kill any record/transcribe helper if the app quits mid-flight.
 app.on('before-quit', () => {
     if (quitFlushing) return;   // the flush above owns teardown while it's running
+    // Backstop: the graceful paths (record:stop / live:saveTranscript) already
+    // mirror their notes, this covers a slot the flush timeout had to reap.
+    flushNotesSidecar(recorder);
+    flushNotesSidecar(live);
     for (const slot of [recorder, transcriber]) {
         if (slot.proc) {
             try { slot.proc.kill('SIGTERM'); } catch {}
             slot.proc = null;
         }
     }
+});
+
+// ─── Notes (shared: Live floating window + Record inline control) ──────────
+// Freeform timestamped notes, typed either into the Live tab's floating
+// window or directly into the Record tab. Both go through the same
+// notesApi/notes:add channel; a note lands on whichever of live/recorder is
+// currently active (both, if both happen to be running at once).
+//
+// invoke, not send: with no session running there is nowhere to put the note,
+// and the renderers must not paint a row that main threw away.
+ipcMain.handle('notes:add', (_e, text) => {
+    const clean = escapeNoteText(String(text || '').trim());
+    if (!clean) return { ok: false, error: 'empty' };
+    const note = { text: clean, at: Date.now() };
+    let accepted = false;
+    if (live.proc) { live.notes.push(note); accepted = true; }
+    if (recorder.proc) { recorder.notes.push(note); accepted = true; }
+    if (!accepted) return { ok: false, error: 'no recording in progress' };
+    broadcastNotesChanged();
+    return { ok: true, text: clean };
+});
+
+// Which session a window's note list is about. The floating panel is Live's;
+// the main window hosts the Record tab.
+function notesSlotFor(sender) {
+    const fromNotesWindow = Boolean(notesWindow && !notesWindow.isDestroyed()
+        && sender === notesWindow.webContents);
+    return fromNotesWindow ? live : recorder;
+}
+
+// A note goes into every running slot, so one typed in the floating window
+// belongs in the Record tab's list too (and vice versa) whenever both sessions
+// are up. Neither window can know that on its own — each only repaints after
+// its *own* successful add — so main tells both, and each re-reads its own
+// slot. Without this the two lists each show half the notes while both
+// transcripts get all of them, which reads as data loss.
+function broadcastNotesChanged() {
+    for (const win of [notesWindow, mainWindow]) {
+        if (win && !win.isDestroyed()) win.webContents.send('notes:changed');
+    }
+}
+
+// The floating window is closeable and reopenable mid-session, so it can't be
+// the source of truth for what has been captured — main is. Hand it the
+// session's notes on load so a reopened window shows the real list instead of
+// an empty one that reads as data loss.
+//
+// Addressed by caller, not by preference: notes:add fans a note out to every
+// running slot, so with Live and Record both going, "whichever is live" would
+// hand the Record tab Live's notes on Live's clock — a list that matches
+// neither what the user typed there nor the .txt that session will produce.
+// The floating window belongs to Live; anything else is the main window, i.e.
+// the Record tab.
+ipcMain.handle('notes:list', (e) => {
+    // Not gated on a running proc: after a helper crash the session is over but
+    // the notes are still here, and being able to re-read them is the whole
+    // point of reopening the panel then. An ended-and-saved session has already
+    // cleared them, so this returns empty on its own.
+    const slot = notesSlotFor(e.sender);
+    return resolveNotes(slot.notes, slot.notesStartedAt);
+});
+
+// Floating notes window — Live tab only (the Record tab has an inline control
+// in its own section instead). Modeled on showPromptWindow() below, but this
+// one needs real keyboard focus for its text input, so — unlike that prompt —
+// `focusable` is not set to false.
+let notesWindow = null;
+
+const NOTES_W = 300, NOTES_H = 380;
+// Just tall enough for the header bar alone — used when the user collapses
+// the window (mirrors the Chrome extension widget's collapse toggle).
+const NOTES_COLLAPSED_H = 54;
+
+function showNotesWindow() {
+    if (notesWindow && !notesWindow.isDestroyed()) return;
+    const wa = screen.getPrimaryDisplay().workArea;
+    const W = NOTES_W, H = NOTES_H;
+    notesWindow = new BrowserWindow({
+        width: W,
+        height: H,
+        x: Math.round(wa.x + wa.width - W - 24),
+        y: wa.y + 24,
+        frame: false,
+        transparent: true,
+        backgroundColor: '#00000000',
+        resizable: false,
+        movable: true,
+        // Unlike the transient call-detect prompt, this window sticks around
+        // for a whole meeting, so it needs normal minimize/restore.
+        minimizable: true,
+        maximizable: false,
+        fullscreenable: false,
+        show: false,
+        type: 'panel',
+        acceptFirstMouse: true,
+        webPreferences: {
+            preload: path.join(__dirname, 'preload.js'),
+            contextIsolation: true,
+            nodeIntegration: false,
+            sandbox: true,
+        },
+    });
+    notesWindow.setAlwaysOnTop(true, 'screen-saver');
+    notesWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+    notesWindow.loadFile(path.join(__dirname, 'renderer', 'notes', 'notes.html'));
+    notesWindow.once('ready-to-show', () => {
+        notesWindow.showInactive();
+        if (process.platform === 'darwin') app.setActivationPolicy('regular');
+    });
+    notesWindow.on('closed', () => { notesWindow = null; });
+}
+
+function closeNotesWindow() {
+    if (notesWindow && !notesWindow.isDestroyed()) {
+        try { notesWindow.close(); } catch {}
+    }
+    notesWindow = null;
+    if (process.platform === 'darwin') app.setActivationPolicy('regular');
+}
+
+ipcMain.on('notes:close', () => closeNotesWindow());
+
+// Collapse toggle — shrinks the window down to just its header bar rather
+// than hiding content inside a window that stays full-size, since this is a
+// real OS window (not a DOM element the extension's widget can just resize
+// via CSS). resizable:false only blocks user drag-resize, not this.
+ipcMain.on('notes:setCollapsed', (_e, collapsed) => {
+    if (!notesWindow || notesWindow.isDestroyed()) return;
+    notesWindow.setSize(NOTES_W, collapsed ? NOTES_COLLAPSED_H : NOTES_H);
+});
+
+// Lets the Live tab bring the notes window back after the user closed it
+// manually mid-session — showNotesWindow() is a no-op if it's already open.
+// Also allowed once the session is over while notes are still held: that's the
+// case after a helper crash, when re-reading what was jotted matters most.
+// Returns whether anything opened so the caller can say so instead of looking
+// broken.
+ipcMain.handle('notes:reopen', () => {
+    if (!live.proc && !live.notes.length) return { ok: false, error: 'no notes to show' };
+    showNotesWindow();
+    return { ok: true };
 });
 
 // ─── Call auto-detect (mic monitor + prompt) ────────────────────────────────
