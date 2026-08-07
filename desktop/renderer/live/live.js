@@ -14,9 +14,10 @@
         return;
     }
 
-    // Reserved pseudo-speaker for the user's own typed notes (main.js's
-    // NOTE_LABEL). A real speaker must never be renamed onto it.
-    const NOTE_LABEL = 'Note';
+    // Reserved pseudo-speaker for the user's own typed notes. A real speaker
+    // must never be renamed onto it. Shared with app.js via the notes module
+    // so the two rename guards can't disagree about the label.
+    const NOTE_LABEL = window.notesList.NOTE_LABEL;
 
     // ─── DOM refs ────────────────────────────────────────────────────────
     const $ = (id) => document.getElementById(id);
@@ -434,8 +435,16 @@
     });
 
     // Re-shows the floating notes window if the user closed it manually
-    // mid-session — a no-op (main.js) if it's already open.
-    notesBtn?.addEventListener('click', () => window.notesApi?.reopen());
+    // mid-session, or after the helper died while notes are still held.
+    // Main refuses when there is genuinely nothing to show — say so rather
+    // than leaving the click looking broken.
+    notesBtn?.addEventListener('click', async () => {
+        const res = await window.notesApi?.reopen();
+        if (res?.ok) return;
+        const original = notesBtn.title;
+        notesBtn.title = 'No notes in this session yet';
+        setTimeout(() => { notesBtn.title = original; }, 2500);
+    });
 
     // ─── Helper events ───────────────────────────────────────────────────
     live.onEvent((event) => {
@@ -689,17 +698,15 @@
             anchor: chip,
             current: state.speakerNames[key] || chip.textContent,
             suggestions: state.calendarParticipants,
-            // Returning a string refuses the rename and keeps the popover open
-            // with that message (see speaker-rename.js).
+            // Side-effect free (see speaker-rename.js). live:saveTranscript
+            // filters this out of the names map too — that's the real guard,
+            // since it covers every rename path — but refusing here means the
+            // chip never shows a name the transcript won't honour. "Note" is
+            // the reserved marker for the user's own typed notes.
+            validate: (name) => (name.trim() === NOTE_LABEL
+                ? `"${NOTE_LABEL}" is reserved for your own typed notes`
+                : null),
             onCommit: (name) => {
-                // live:saveTranscript filters this out of the names map too —
-                // that's the real guard, since it covers every rename path —
-                // but refusing here means the chip never shows a name the
-                // transcript won't honour. "Note" is the reserved marker for
-                // the user's own typed notes.
-                if (name.trim() === NOTE_LABEL) {
-                    return `"${NOTE_LABEL}" is reserved for your own typed notes`;
-                }
                 if (name) state.speakerNames[key] = name;
                 else delete state.speakerNames[key];
                 refreshSpeakerChips();

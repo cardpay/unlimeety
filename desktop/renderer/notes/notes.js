@@ -29,6 +29,9 @@ window.notesList.attachInput({
 // Reopened mid-session: show what main already holds, not an empty list that
 // would read as "your earlier notes are gone".
 window.notesList.refresh(listEl, emptyEl);
+// …and repaint when a note is added from the Record tab's control while both
+// sessions are running — it lands in this session too.
+window.notesList.watch(listEl, emptyEl);
 
 closeBtn.addEventListener('click', () => window.notesApi.close());
 

@@ -407,12 +407,15 @@
     // a local anchor would be wrong exactly when the user types first.
     const NOTES_PLACEHOLDER = 'Note… (Enter to save)';
 
-    function resetNotesList() {
-        notesListEl.querySelectorAll('.note-row').forEach(row => row.remove());
-        notesEmptyEl.style.display = '';
-    }
-
+    // Clearing is just "render nothing" — the shared renderer owns how a row is
+    // built and how the placeholder is toggled, so a second copy of that rule
+    // here would silently miss any change to it.
+    const resetNotesList = () => window.notesList.render(notesListEl, notesEmptyEl, []);
     const refreshNotes = () => window.notesList.refresh(notesListEl, notesEmptyEl);
+
+    // Repaint when a note is added from the Live tab's floating window while
+    // both sessions are running — it lands in this session too.
+    window.notesList.watch(notesListEl, notesEmptyEl);
 
     window.notesList.attachInput({
         input: notesInputEl,
