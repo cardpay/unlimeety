@@ -880,9 +880,10 @@ function headerParticipants(content) {
 }
 
 // Reserved pseudo-speaker written by the recording UIs for the user's own
-// typed notes (see main.js's NOTE_LABEL). Not a real participant: it must not
-// be renameable, and no real speaker may be renamed onto it.
-const NOTE_LABEL = "Note";
+// typed notes. Not a real participant: it must not be renameable, and no real
+// speaker may be renamed onto it. Sourced from the shared notes module so this
+// file and live.js can't drift on what the reserved label actually is.
+const NOTE_LABEL = window.notesList.NOTE_LABEL;
 
 // Rename a speaker across the whole transcript: every "[mm:ss] <old>:" line
 // becomes "[mm:ss] <new>:", and the Participants header token is swapped (then
@@ -1014,16 +1015,16 @@ if (PLAYER_OK) {
       anchor: chip,
       current,
       suggestions,
-      // Returning a string refuses the rename and keeps the popover open with
-      // that message (see speaker-rename.js).
+      // Side-effect free: runs before anything is committed (see
+      // speaker-rename.js). Renaming a speaker onto the reserved notes label
+      // would turn their spoken turns into "[mm:ss] Note:" lines —
+      // indistinguishable from the user's own notes, and fed to the summarizer
+      // as such.
+      validate: (name) => (name.trim() === NOTE_LABEL
+        ? `"${NOTE_LABEL}" is reserved for your own typed notes`
+        : null),
       onCommit: (name) => {
         if (!name || name === current) return;
-        // Renaming a speaker onto the reserved notes label would turn their
-        // spoken turns into "[mm:ss] Note:" lines — indistinguishable from the
-        // user's own notes, and fed to the summarizer as such.
-        if (name.trim() === NOTE_LABEL) {
-          return `"${NOTE_LABEL}" is reserved for your own typed notes`;
-        }
         editor.value = renameSpeakerInText(editor.value, current, name);
         renderTranscriptView(editor.value);
         showTranscriptView();

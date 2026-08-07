@@ -153,7 +153,10 @@ contextBridge.exposeInMainWorld('notesApi', {
     // Notes captured so far in the active session, so a reopened floating
     // window shows the real list instead of a misleading empty one.
     list:         ()          => ipcRenderer.invoke('notes:list'),
+    // Main fires this when any window adds a note: with a Live and a Record
+    // session both running the note lands in both, so both lists must repaint.
+    onChanged:    (cb)        => ipcRenderer.on('notes:changed', () => cb()),
     close:        ()          => ipcRenderer.send('notes:close'),
-    reopen:       ()          => ipcRenderer.send('notes:reopen'),
+    reopen:       ()          => ipcRenderer.invoke('notes:reopen'),
     setCollapsed: (collapsed) => ipcRenderer.send('notes:setCollapsed', collapsed),
 });

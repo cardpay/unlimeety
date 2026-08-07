@@ -10,6 +10,14 @@
  * ─────────────────────────────────────────────────────────────────────── */
 
 (() => {
+    // Reserved pseudo-speaker for the user's own typed notes — the same
+    // literal main.js writes into the transcript. Exposed here so the renderer
+    // scripts that need it (the rename guards in app.js and live.js) share one
+    // copy: if they drifted, a speaker could be renamed onto the marker from
+    // one popover but not the other, and the `.tv-note` styling would stop
+    // matching what the writer produces.
+    const NOTE_LABEL = 'Note';
+
     // Same coercion as main.js's formatHms: a hand-edited sidecar must not
     // render "NaN:NaN". Notes taken before the audio clock started carry a
     // negative offset (kept for ordering) and pin to 00:00 here — the
@@ -83,5 +91,12 @@
         });
     }
 
-    window.notesList = { formatHms, render, refresh, attachInput };
+    // Repaint on main's broadcast as well as after this window's own add: a
+    // note typed in the other window lands in this session too, and only main
+    // knows that. Registered once per document, for whichever list is wired up.
+    function watch(container, emptyEl) {
+        window.notesApi?.onChanged?.(() => refresh(container, emptyEl));
+    }
+
+    window.notesList = { NOTE_LABEL, formatHms, render, refresh, watch, attachInput };
 })();

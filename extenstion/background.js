@@ -81,12 +81,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     const lines = transcripts[tabId].lines;
     let i = lines.length - 1;
     while (i >= 0 && lines[i].speaker === NOTE_LABEL) i--;
-    if (i >= 0) {
-      lines[i] = request.data;
-      chrome.storage.local.set({ [tabId]: transcripts[tabId] });
-    } else {
-      lines.push(request.data);
-    }
+    if (i >= 0) lines[i] = request.data;
+    else lines.push(request.data);
+    // Mirrored on both branches: the else-branch used to fire only on a
+    // genuinely empty array, but a note typed before the first caption now
+    // makes it reachable with real content — and skipping the write there
+    // would leave the persisted copy behind the in-memory one until some
+    // later message happened to resync it.
+    chrome.storage.local.set({ [tabId]: transcripts[tabId] });
   } else if (request.action === 'setMeetingTitle') {
     transcripts[tabId].meetingTitle = request.meetingTitle;
     if (request.startedAt && !transcripts[tabId].startedAt) {

@@ -51,7 +51,7 @@
     pop.style.left = `${window.scrollX + r.left}px`;
   }
 
-  function open({ anchor, current, suggestions, onCommit }) {
+  function open({ anchor, current, suggestions, onCommit, validate }) {
     close();
     committed = false;
 
@@ -84,15 +84,19 @@
     hint.textContent = HINT_DEFAULT;
     pop.appendChild(hint);
 
-    // `onCommit` may refuse a name by returning a reason string (e.g. the
-    // reserved notes label). Show it and stay open instead of closing on a
-    // rename that didn't happen — a silent no-op is indistinguishable from a
-    // misclick, so the user just tries again and gets the same silence.
-    // A refusal on blur still closes: the user has already clicked away.
+    // `validate` (optional) refuses a name by returning a reason string — it
+    // must be side-effect free, because it runs before anything is committed
+    // and may run repeatedly. `onCommit` is the effect and still runs exactly
+    // once, after `committed` is set and the popover is closed: both callers
+    // rebuild the DOM this popover is anchored to, so any blur they induce
+    // would otherwise re-enter here.
+    // Refusing keeps the popover open with the reason — a silent no-op is
+    // indistinguishable from a misclick, so the user just tries again and gets
+    // the same silence. A refusal on blur closes instead: they clicked away.
     const commit = (viaBlur) => {
       if (committed) return;
       const name = input.value.trim();
-      const rejection = onCommit(name); // empty string => clear the override
+      const rejection = validate ? validate(name) : null;
       if (rejection && !viaBlur) {
         hint.textContent = rejection;
         hint.classList.add('spk-hint-error');
@@ -101,6 +105,7 @@
       }
       committed = true;
       close();
+      if (!rejection) onCommit(name); // empty string => clear the override
     };
 
     input.addEventListener('keydown', (e) => {
