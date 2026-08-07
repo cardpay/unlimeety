@@ -16,8 +16,10 @@
 
     // Reserved pseudo-speaker for the user's own typed notes. A real speaker
     // must never be renamed onto it. Shared with app.js via the notes module
-    // so the two rename guards can't disagree about the label.
-    const NOTE_LABEL = window.notesList.NOTE_LABEL;
+    // so the two rename guards can't disagree about the label; defaulted for
+    // the same reason app.js defaults it — this tab must not hard-depend on a
+    // helper script's load order.
+    const NOTE_LABEL = window.notesList?.NOTE_LABEL ?? 'Note';
 
     // ─── DOM refs ────────────────────────────────────────────────────────
     const $ = (id) => document.getElementById(id);
@@ -45,7 +47,8 @@
     const timerEl     = $('live-timer');
     const stopBtn     = $('live-btn-stop');
     const discardBtn  = $('live-btn-discard');
-    const notesBtn    = $('live-btn-notes');
+    const notesBtn      = $('live-btn-notes');
+    const notesBtnLabel = $('live-btn-notes-label');
     const liveRecordingIndicator = document.getElementById('live-recording-indicator');
 
     const downloadBox = $('live-download');
@@ -438,12 +441,22 @@
     // mid-session, or after the helper died while notes are still held.
     // Main refuses when there is genuinely nothing to show — say so rather
     // than leaving the click looking broken.
+    // The label, not the tooltip: a native tooltip needs a hover dwell to
+    // appear and the pointer is already down on the button, so a title swap
+    // is feedback the user never sees. The original text is captured once, at
+    // load — reading it back inside the handler meant a second click within
+    // the timeout captured the *message* and restored that forever.
+    const NOTES_BTN_LABEL = notesBtnLabel?.textContent || 'Notes';
+    let notesBtnResetTimer = null;
     notesBtn?.addEventListener('click', async () => {
         const res = await window.notesApi?.reopen();
         if (res?.ok) return;
-        const original = notesBtn.title;
-        notesBtn.title = 'No notes in this session yet';
-        setTimeout(() => { notesBtn.title = original; }, 2500);
+        if (!notesBtnLabel) return;
+        notesBtnLabel.textContent = 'No notes yet';
+        clearTimeout(notesBtnResetTimer);
+        notesBtnResetTimer = setTimeout(() => {
+            notesBtnLabel.textContent = NOTES_BTN_LABEL;
+        }, 2500);
     });
 
     // ─── Helper events ───────────────────────────────────────────────────

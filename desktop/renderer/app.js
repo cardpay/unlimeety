@@ -882,8 +882,10 @@ function headerParticipants(content) {
 // Reserved pseudo-speaker written by the recording UIs for the user's own
 // typed notes. Not a real participant: it must not be renameable, and no real
 // speaker may be renamed onto it. Sourced from the shared notes module so this
-// file and live.js can't drift on what the reserved label actually is.
-const NOTE_LABEL = window.notesList.NOTE_LABEL;
+// file and live.js can't drift — but not *depended* on: the Editor tab works
+// with no notes UI at all, and a hard reference here would take the whole
+// renderer down (this is module top level) if the script order ever changed.
+const NOTE_LABEL = window.notesList?.NOTE_LABEL ?? "Note";
 
 // Rename a speaker across the whole transcript: every "[mm:ss] <old>:" line
 // becomes "[mm:ss] <new>:", and the Participants header token is swapped (then
