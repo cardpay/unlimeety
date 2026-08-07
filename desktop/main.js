@@ -1682,15 +1682,18 @@ ipcMain.handle('transcripts:delete', async (_e, filePath) => {
 
     const errors = [];
     const tryUnlink = (p) => {
-        try { fs.unlinkSync(p); } catch (err) { errors.push(`${path.basename(p)}: ${err.message}`); }
+        try { fs.unlinkSync(p); return true; }
+        catch (err) { errors.push(`${path.basename(p)}: ${err.message}`); return false; }
     };
     if (sumPath) tryUnlink(sumPath);
     for (const a of audioPaths) {
-        tryUnlink(a);
-        // Nothing ever overwrites an orphaned sidecar (flushNotesSidecar
-        // early-returns on an empty note list), so it would outlive the meeting
-        // and be adopted by the next recording that lands on the same stem.
-        removeNotesSidecar(a);
+        // Only once the wav is actually gone: on EPERM (locked file, read-only
+        // volume) the recording survives and the user is told the delete
+        // failed — dropping its notes anyway would silently strip them from
+        // the next re-transcription. Nothing ever overwrites an orphaned
+        // sidecar (flushNotesSidecar early-returns on an empty note list), so
+        // a successful delete does have to take it.
+        if (tryUnlink(a)) removeNotesSidecar(a);
     }
     tryUnlink(filePath);
 
@@ -2175,6 +2178,11 @@ ipcMain.handle('live:start', async (_e, opts) => {
         // 'recording' event fires (liveHandleEvent above). Stop is reachable
         // before that event arrives, so this must never be left null.
         live.notesStartedAt = Date.now();
+        // A panel left open from a previous (crashed) session is still showing
+        // that session's notes: showNotesWindow() below early-returns when one
+        // exists, so nothing else would repaint it until the user happened to
+        // type — and until then the old notes read as if they belonged here.
+        broadcastNotesChanged();
 
         const proc = spawn(helper, [], { stdio: ['pipe', 'pipe', 'pipe'] });
         live.proc = proc;
@@ -2620,6 +2628,9 @@ ipcMain.handle('record:start', async (_e, opts) => {
     // Provisional fallback — overwritten precisely once the helper's
     // 'recording' event fires (recordHandleEvent above).
     recorder.notesStartedAt = Date.now();
+    // Same reason as live:start — repaint any list still showing the previous
+    // session's notes rather than waiting for the next add to correct it.
+    broadcastNotesChanged();
 
     recorder.proc.on('exit', (code) => {
         // Before the key is dropped: an unexpected exit (crash, SIGKILL, disk
@@ -3165,13 +3176,21 @@ ipcMain.handle('record:transcribe', async (_e, opts) => {
     let finalSegments = segments;
     if (mergeAdjacent && segments.length) {
         finalSegments = [];
-        // Both arrays run ascending by `start`, so one advancing cursor answers
-        // "is there a note in (prev.start, seg.start]" for the whole pass —
-        // rescanning every note per segment would be O(segments × notes), and a
-        // two-hour recording brings thousands of segments to this loop.
+        // The note cursor below only ever advances, so it needs `start` to be
+        // non-decreasing across the pass. The helper emits final segments in
+        // order today, but nothing enforces it — and an out-of-order arrival
+        // (or a future diarization pass that reorders) would rewind past notes
+        // the cursor had already stepped over, silently merging across them.
+        // Sorting here makes the invariant the optimisation relies on true
+        // rather than assumed; the transcript body is sorted by start anyway.
+        const ordered = [...segments].sort((a, b) => a.start - b.start);
+        // Both arrays now run ascending by `start`, so one advancing cursor
+        // answers "is there a note in (prev.start, seg.start]" for the whole
+        // pass — rescanning every note per segment would be O(segments × notes),
+        // and a two-hour recording brings thousands of segments to this loop.
         const noteStarts = recordedNotes.map(n => n.start).sort((a, b) => a - b);
         let noteCursor = 0;
-        for (const seg of segments) {
+        for (const seg of ordered) {
             const prev = finalSegments[finalSegments.length - 1];
             // A note taken after the current block began but no later than
             // this turn starts has to render between them, so it ends the

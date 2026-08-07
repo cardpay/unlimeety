@@ -70,9 +70,11 @@
     // Enter-to-submit, shared by both inputs.
     //   • ignores the Enter that commits an IME composition (CJK), which would
     //     otherwise ship a half-composed buffer and wipe the field mid-word
-    //   • only paints a row once main has acknowledged the note
     //   • on rejection hands the text back — but only if the user hasn't
     //     started typing something else while the round-trip was in flight
+    //   • does NOT repaint on success: main broadcasts to every window
+    //     including this one (see watch), so a local refresh here would be a
+    //     second round-trip and a second DOM rebuild racing the first.
     function attachInput({ input, container, emptyEl, placeholder, rejectedMessage }) {
         input.addEventListener('keydown', async (e) => {
             if (e.isComposing || e.keyCode === 229) return;
@@ -85,17 +87,21 @@
                 if (input.value === '') input.value = text;
                 input.placeholder = rejectedMessage;
                 setTimeout(() => { input.placeholder = placeholder; }, 2500);
-                return;
             }
-            refresh(container, emptyEl);
         });
     }
 
-    // Repaint on main's broadcast as well as after this window's own add: a
-    // note typed in the other window lands in this session too, and only main
-    // knows that. Registered once per document, for whichever list is wired up.
+    // Repaint whenever main says the session's notes changed — an add from
+    // either window, or a new session clearing them. Main is the only party
+    // that knows either happened.
+    //
+    // Returns a disposer: `ipcRenderer.on` has no implicit teardown, so a list
+    // whose container is torn down (or a second list wired up in the same
+    // document) would otherwise leave a listener firing a notes:list
+    // round-trip per note forever.
     function watch(container, emptyEl) {
-        window.notesApi?.onChanged?.(() => refresh(container, emptyEl));
+        return window.notesApi?.onChanged?.(() => refresh(container, emptyEl))
+            || (() => {});
     }
 
     window.notesList = { NOTE_LABEL, formatHms, render, refresh, watch, attachInput };

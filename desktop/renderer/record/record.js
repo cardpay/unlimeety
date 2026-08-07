@@ -413,8 +413,10 @@
     const resetNotesList = () => window.notesList.render(notesListEl, notesEmptyEl, []);
     const refreshNotes = () => window.notesList.refresh(notesListEl, notesEmptyEl);
 
-    // Repaint when a note is added from the Live tab's floating window while
-    // both sessions are running — it lands in this session too.
+    // Repaint on main's broadcast: a note added from the Live tab's floating
+    // window lands in this session too when both are running, and a new
+    // session clears the list. The disposer is unused on purpose — this list
+    // is part of the main window and lives as long as the renderer does.
     window.notesList.watch(notesListEl, notesEmptyEl);
 
     window.notesList.attachInput({

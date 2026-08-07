@@ -153,9 +153,15 @@ contextBridge.exposeInMainWorld('notesApi', {
     // Notes captured so far in the active session, so a reopened floating
     // window shows the real list instead of a misleading empty one.
     list:         ()          => ipcRenderer.invoke('notes:list'),
-    // Main fires this when any window adds a note: with a Live and a Record
-    // session both running the note lands in both, so both lists must repaint.
-    onChanged:    (cb)        => ipcRenderer.on('notes:changed', () => cb()),
+    // Main fires this when the session's notes changed: an add from either
+    // window (a note lands in every running slot), or a new session clearing
+    // them. Returns a disposer — ipcRenderer.on has no implicit teardown, and
+    // a listener bound to a torn-down list would keep round-tripping forever.
+    onChanged:    (cb)        => {
+        const handler = () => cb();
+        ipcRenderer.on('notes:changed', handler);
+        return () => ipcRenderer.removeListener('notes:changed', handler);
+    },
     close:        ()          => ipcRenderer.send('notes:close'),
     reopen:       ()          => ipcRenderer.invoke('notes:reopen'),
     setCollapsed: (collapsed) => ipcRenderer.send('notes:setCollapsed', collapsed),
