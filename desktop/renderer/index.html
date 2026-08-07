@@ -58,7 +58,7 @@
     </div>
 
     <div id="toolbar-right">
-      <button id="cal-smart-btn" title="Suggest a recording mode from your calendar">📅 From calendar</button>
+      <button id="cal-smart-btn" title="Suggest a recording mode from your calendar"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg> From calendar</button>
 
       <button class="btn btn-ghost btn-icon" id="btn-settings" title="Settings">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -413,7 +413,7 @@
           <div class="live-row">
             <label class="live-label" for="live-title">Title</label>
             <input type="text" id="live-title" class="modal-input" placeholder="optional — defaults to date/time" />
-            <button type="button" id="live-cal-btn" class="cal-pick-btn" title="Fill from calendar">📅 From calendar</button>
+            <button type="button" id="live-cal-btn" class="cal-pick-btn" title="Fill from calendar"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg> From calendar</button>
           </div>
 
           <div id="live-setup-error" class="modal-error-text hidden"></div>
@@ -452,6 +452,8 @@
             </div>
           </div>
           <div class="live-topbar-right">
+            <button class="btn btn-ghost" id="live-btn-notes" title="Show the notes window">
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg> <span id="live-btn-notes-label">Notes</span></button>
             <button class="btn btn-ghost hidden" id="live-btn-discard">New recording</button>
             <button class="btn btn-stop" id="live-btn-stop">
               <span class="btn-stop-icon" aria-hidden="true"></span>
@@ -598,7 +600,7 @@
           <div class="record-section">
             <div class="record-section-label">TITLE — OPTIONAL</div>
             <input id="record-title" class="modal-input record-title-input" type="text" placeholder="defaults to date/time, e.g. Recording — 2026-05-13 10:42" />
-            <button type="button" id="record-cal-btn" class="cal-pick-btn" title="Fill from calendar">📅 From calendar</button>
+            <button type="button" id="record-cal-btn" class="cal-pick-btn" title="Fill from calendar"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg> From calendar</button>
           </div>
 
           <div class="record-section">
@@ -666,6 +668,15 @@
             <div class="record-file-row"><div class="record-file-key">PATH</div><div class="record-file-val" id="record-output-path">—</div></div>
             <div class="record-file-row"><div class="record-file-key">SIZE</div><div class="record-file-val" id="record-file-size">—</div></div>
             <div class="record-file-row"><div class="record-file-key">SPEAKERS</div><div class="record-file-val" id="record-file-speakers">—</div></div>
+          </div>
+          <div class="record-notes">
+            <div class="record-notes-label">NOTES</div>
+            <div class="record-notes-list" id="record-notes-list">
+              <div class="record-notes-empty" id="record-notes-empty">No notes yet — type below and press Enter.</div>
+            </div>
+            <div class="record-notes-input-row">
+              <input id="record-notes-input" class="modal-input record-notes-input" type="text" placeholder="Note… (Enter to save)" />
+            </div>
           </div>
         </div>
         <div class="record-rec-footer">ⓘ Audio streams directly to disk — no live transcription. After Stop &amp; save, you can transcribe locally with Whisper.</div>
@@ -956,7 +967,7 @@
         <div class="modal-row">
           <label class="modal-label" for="new-title-input">Title</label>
           <input type="text" id="new-title-input" class="modal-input" placeholder="e.g. Product review — 2026-04-20" />
-          <button type="button" id="new-cal-btn" class="cal-pick-btn" title="Fill from calendar">📅 From calendar</button>
+          <button type="button" id="new-cal-btn" class="cal-pick-btn" title="Fill from calendar"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg> From calendar</button>
         </div>
         <div class="modal-row">
           <label class="modal-label" for="new-participants-input">Participants</label>
@@ -1313,6 +1324,7 @@
     </div>
   </div>
 
+  <script src="notes-list.js"></script>
   <script src="calendar-picker.js"></script>
   <script src="speaker-rename.js"></script>
   <script src="find-in-note.js"></script>
