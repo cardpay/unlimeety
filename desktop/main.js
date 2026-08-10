@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { execFile, spawn } = require('child_process');
+const { normalizeSummary, hasValidFrontmatter } = require('./summary-frontmatter');
 
 const TRANSCRIPTS_FOLDER = path.join(os.homedir(), 'Downloads', 'Meet_Transcripts');
 const RECORDINGS_FOLDER = path.join(os.homedir(), 'Downloads', 'Meet_Recordings');
@@ -659,18 +660,25 @@ function sanitizeFilenameChars(name) {
         .trim();
 }
 
-function formatDateDdMmYy(transcriptPath, mtimeMs) {
+function meetingDateParts(transcriptPath, mtimeMs) {
     const m = path.basename(transcriptPath).match(/(\d{4})-(\d{2})-(\d{2})/);
-    let y, mo, d;
-    if (m) {
-        y = m[1]; mo = m[2]; d = m[3];
-    } else {
-        const dt = new Date(mtimeMs);
-        y = String(dt.getFullYear());
-        mo = String(dt.getMonth() + 1).padStart(2, '0');
-        d = String(dt.getDate()).padStart(2, '0');
-    }
+    if (m) return { y: m[1], mo: m[2], d: m[3] };
+    const dt = new Date(mtimeMs);
+    return {
+        y: String(dt.getFullYear()),
+        mo: String(dt.getMonth() + 1).padStart(2, '0'),
+        d: String(dt.getDate()).padStart(2, '0'),
+    };
+}
+
+function formatDateDdMmYy(transcriptPath, mtimeMs) {
+    const { y, mo, d } = meetingDateParts(transcriptPath, mtimeMs);
     return `${d}.${mo}.${y.slice(-2)}`;
+}
+
+function formatDateIso(transcriptPath, mtimeMs) {
+    const { y, mo, d } = meetingDateParts(transcriptPath, mtimeMs);
+    return `${y}-${mo}-${d}`;
 }
 
 function legacySummaryBase(transcriptPath) {
@@ -802,6 +810,15 @@ ipcMain.handle('prompts:delete', (_e, id) => {
     return { ok: true };
 });
 
+// Generated summaries are normalized in `summarize:run`, but a hand-edited one
+// can still lose its frontmatter in the inline editor. We never rewrite what the
+// user typed — we just refuse to let the note go to the vault silently broken.
+function frontmatterWarning(text) {
+    return hasValidFrontmatter(text)
+        ? undefined
+        : 'Frontmatter is missing or unterminated — Obsidian Bases/Dataview will skip this note.';
+}
+
 ipcMain.handle('summary:save', (_e, transcriptPath, text, folder) => {
     if (!canReadPath(transcriptPath) || !summaryDirAllowed(transcriptPath, folder || null)) {
         return { ok: false, error: 'Refusing to operate on a path outside the managed folders.' };
@@ -810,7 +827,7 @@ ipcMain.handle('summary:save', (_e, transcriptPath, text, folder) => {
         const filePath = summaryFilePath(transcriptPath, folder || null);
         fs.writeFileSync(filePath, text, 'utf-8');
         registerReadablePath(filePath); // summary may live outside managed folders
-        return { ok: true, filePath };
+        return { ok: true, filePath, warning: frontmatterWarning(text) };
     } catch (err) {
         return { ok: false, error: err.message };
     }
@@ -828,7 +845,7 @@ ipcMain.handle('summary:overwrite', (_e, transcriptPath, text, folder) => {
             || summaryFilePath(transcriptPath, folder || null);
         fs.writeFileSync(filePath, text, 'utf-8');
         registerReadablePath(filePath); // summary may live outside managed folders
-        return { ok: true, filePath };
+        return { ok: true, filePath, warning: frontmatterWarning(text) };
     } catch (err) {
         return { ok: false, error: err.message };
     }
@@ -998,6 +1015,21 @@ function findClaude() {
     });
 }
 
+// Summarization is a pure text task — the model needs no tools. We run with ALL
+// tools disabled (`--tools ""`) and WITHOUT `--dangerously-skip-permissions`, so
+// a prompt-injection payload hidden in an untrusted transcript can't make Claude
+// Code run shell commands or touch the filesystem. (Removing the bypass flag also
+// means any tool the model still tries is auto-denied in this non-TTY child.)
+const CLAUDE_BASE_ARGS = ['-p', '--output-format', 'text', '--tools', ''];
+
+// The child inherits HOME, so without these it also inherits the user's whole
+// Claude Code setup: ~/CLAUDE.md, plugin SessionStart hooks, output styles, a
+// `defaultMode: "plan"` in settings.json. Those turn a summary into whatever
+// house style the user codes in — leaked reasoning above the frontmatter,
+// compressed prose in the body. `--safe-mode` drops every customization while
+// leaving OAuth auth working (unlike `--bare`, which demands an API key).
+const CLAUDE_ISOLATION_ARGS = ['--safe-mode', '--permission-mode', 'manual'];
+
 async function runClaudeCode(content, promptInstruction) {
     const claudePath = await findClaude();
     if (!claudePath) return { ok: false, notInstalled: true };
@@ -1011,23 +1043,26 @@ async function runClaudeCode(content, promptInstruction) {
         : ['/usr/local/bin', '/opt/homebrew/bin', path.join(os.homedir(), '.local', 'bin')];
     const extendedPath = [process.env.PATH, ...extraPaths].filter(Boolean).join(path.delimiter);
 
+    const res = await spawnClaude(claudePath, [...CLAUDE_BASE_ARGS, ...CLAUDE_ISOLATION_ARGS], content, promptInstruction, extendedPath);
+    // A CLI too old for the isolation flags rejects them outright — summarizing
+    // unisolated beats not summarizing at all.
+    if (!res.ok && /unknown option/i.test(res.error || '')) {
+        return spawnClaude(claudePath, CLAUDE_BASE_ARGS, content, promptInstruction, extendedPath);
+    }
+    return res;
+}
+
+function spawnClaude(claudePath, args, content, promptInstruction, extendedPath) {
     return new Promise((resolve) => {
         let stdout = '';
         let stderr = '';
 
-        // Summarization is a pure text task — the model needs no tools. We run
-        // with ALL tools disabled (`--tools ""`) and WITHOUT
-        // `--dangerously-skip-permissions`, so a prompt-injection payload hidden
-        // in an untrusted transcript can't make Claude Code run shell commands or
-        // touch the filesystem. (Removing the bypass flag also means any tool the
-        // model still tries is auto-denied in this non-TTY child process.)
-        //
         // Both the instruction and the transcript are fed via stdin and NOT as
         // argv — on Windows we spawn through a shell (claude is a .cmd), and any
         // untrusted string passed as an argument would be an argument/command-
         // injection vector. With only constant flags in argv there's nothing for
         // the shell to abuse.
-        const proc = spawn(claudePath, ['-p', '--output-format', 'text', '--tools', ''], {
+        const proc = spawn(claudePath, args, {
             env: { ...process.env, PATH: extendedPath, HOME: os.homedir() },
             stdio: ['pipe', 'pipe', 'pipe'],
             shell: process.platform === 'win32',
@@ -1201,13 +1236,23 @@ ipcMain.handle('summarize:run', async (_e, filePath, promptInstruction) => {
     }
 
     const cfg = readSummarizerConfig();
+    let result;
     switch (cfg.provider) {
-        case 'openrouter':        return runOpenRouter(content, promptInstruction, cfg.openrouter);
-        case 'ollama':            return runOllama(content, promptInstruction, cfg.ollama);
-        case 'openai-compatible': return runOpenAICompat(content, promptInstruction, cfg.openaiCompatible);
+        case 'openrouter':        result = await runOpenRouter(content, promptInstruction, cfg.openrouter); break;
+        case 'ollama':            result = await runOllama(content, promptInstruction, cfg.ollama); break;
+        case 'openai-compatible': result = await runOpenAICompat(content, promptInstruction, cfg.openaiCompatible); break;
         case 'claude-code':
-        default:                  return runClaudeCode(content, promptInstruction);
+        default:                  result = await runClaudeCode(content, promptInstruction); break;
     }
+    if (!result?.ok) return result;
+
+    // The frontmatter block is model output, delimiters and all — every provider
+    // drops the closing `---` or leaks a line of reasoning above it sooner or
+    // later. This is the one place all four funnel through, so it's the only
+    // place the block has to be made sound.
+    const { mtimeMs } = readTranscriptInfoSync(filePath);
+    const { text, repairs } = normalizeSummary(result.summary, { date: formatDateIso(filePath, mtimeMs) });
+    return { ...result, summary: text, repairs };
 });
 
 // ─── IPC: Follow-up draft ─────────────────────────────────────────────────────

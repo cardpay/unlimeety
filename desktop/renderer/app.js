@@ -2278,6 +2278,12 @@ if (btnRailEdit) {
         if (res?.ok) {
           summaryStore.set(fp, newText);
           renderSummaryRail(fp);
+          // Saved, but the edit left the YAML block unusable — say so instead of
+          // letting an unindexable note sit in the vault unnoticed.
+          if (res.warning) {
+            showBgToolbar("error", "Summary saved with broken frontmatter", res.warning);
+            bgViewBtn.classList.add("hidden");
+          }
         } else if (btn) {
           btn.disabled = false;
           btn.textContent = "Save";
@@ -3405,13 +3411,19 @@ async function runSummarize() {
     return;
   }
 
-  const summaryText = result.summary.replace(/^```[a-z]*\n([\s\S]*?)```\s*$/s, '$1').trim();
+  // Fences and frontmatter are already normalized in main (summarize:run).
+  const summaryText = result.summary;
 
   summaryStore.set(filePath, summaryText);
   try { localStorage.setItem("summary.prompt." + filePath, activePresetName(instruction)); } catch (_) {}
 
   if (customName) await api.setSummaryName(filePath, customName);
-  api.saveSummary(filePath, summaryText, folder);
+  const saved = await api.saveSummary(filePath, summaryText, folder);
+  if (!saved?.ok) {
+    showBgToolbar("error", "Could not save summary", saved?.error || meetingTitle);
+    bgViewBtn.classList.add("hidden");
+    return;
+  }
 
   // Reflect the new summary on the matching sidebar card.
   const meeting = getMeetingById(filePath);
@@ -3424,7 +3436,8 @@ async function runSummarize() {
   // Re-render the rail if the summarized file is the one currently open.
   if (state.filePath === filePath) renderSummaryRail(filePath);
 
-  showBgToolbar("done", "Summary ready", meetingTitle);
+  const label = result.repairs?.length ? "Summary ready (frontmatter repaired)" : "Summary ready";
+  showBgToolbar("done", label, saved.warning || meetingTitle);
   bgViewBtn.classList.remove("hidden");
   bgViewBtn.textContent = "View";
   bgViewBtn.onclick = () => {
