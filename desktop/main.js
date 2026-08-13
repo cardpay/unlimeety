@@ -1045,8 +1045,11 @@ async function runClaudeCode(content, promptInstruction) {
 
     const res = await spawnClaude(claudePath, [...CLAUDE_BASE_ARGS, ...CLAUDE_ISOLATION_ARGS], content, promptInstruction, extendedPath);
     // A CLI too old for the isolation flags rejects them outright — summarizing
-    // unisolated beats not summarizing at all.
-    if (!res.ok && /unknown option/i.test(res.error || '')) {
+    // unisolated beats not summarizing at all. Two rejection shapes, both from
+    // the same cause: `unknown option '--safe-mode'` when the flag is missing
+    // entirely, and `option '--permission-mode <mode>' argument 'manual' is
+    // invalid` when the flag exists but predates that choice.
+    if (!res.ok && /unknown option|argument '[^']*' is invalid/i.test(res.error || '')) {
         return spawnClaude(claudePath, CLAUDE_BASE_ARGS, content, promptInstruction, extendedPath);
     }
     return res;
@@ -1250,8 +1253,13 @@ ipcMain.handle('summarize:run', async (_e, filePath, promptInstruction) => {
     // drops the closing `---` or leaks a line of reasoning above it sooner or
     // later. This is the one place all four funnel through, so it's the only
     // place the block has to be made sound.
-    const { mtimeMs } = readTranscriptInfoSync(filePath);
-    const { text, repairs } = normalizeSummary(result.summary, { date: formatDateIso(filePath, mtimeMs) });
+    // `content` is already in memory, so parse the header off it rather than
+    // re-reading the whole transcript. Recorded-At is the meeting's own ISO
+    // timestamp — the transcript's mtime is the copy/edit time for an imported
+    // file, and only stands in when the header has no Recorded-At line.
+    const { recordedAt } = parseTranscriptHeaderMain(content.slice(0, 512));
+    const stamp = Date.parse(recordedAt || '') || fs.statSync(filePath).mtimeMs;
+    const { text, repairs } = normalizeSummary(result.summary, { date: formatDateIso(filePath, stamp) });
     return { ...result, summary: text, repairs };
 });
 

@@ -86,6 +86,44 @@ const run = (t) => normalizeSummary(t, { date: DATE });
     assert.strictEqual(r.text, HEALTHY);
 }
 
+// …and the same break on the *closing* delimiter, which the validator must
+// report as broken rather than accept.
+{
+    const dirtyClose = HEALTHY.replace('\n---\n', '\n--- \n');
+    assert.ok(!hasValidFrontmatter(dirtyClose));
+    const r = run(dirtyClose);
+    assert.deepStrictEqual(r.repairs, ['trailing_space']);
+    assert.strictEqual(r.text, HEALTHY);
+}
+
+// CRLF output: sound frontmatter must stay sound, not gain a second block.
+{
+    const r = run(HEALTHY.split('\n').join('\r\n'));
+    assert.deepStrictEqual(r.repairs, []);
+    assert.strictEqual(r.text, HEALTHY);
+}
+
+// A custom prompt writes its own fields — no `date`/`categories` in sight. The
+// unterminated block still gets closed instead of buried under a stub.
+{
+    const custom = '---\ntitle: Weekly sync\ntags:\n  - work\n\n## Notes\n\nBody.';
+    const r = run(custom);
+    assert.deepStrictEqual(r.repairs, ['missing_close']);
+    assert.ok(hasValidFrontmatter(r.text));
+    assert.ok(r.text.startsWith('---\ntitle: Weekly sync'), r.text);
+    assert.ok(r.text.includes('  - work\n---\n\n## Notes'), r.text);
+}
+
+// Leaked reasoning is not always one line — a multi-paragraph preamble must be
+// cut too, not left in the note under a synthesized block.
+{
+    const long = 'Line one of reasoning.\n\nLine two of reasoning.\n\nHere is the summary:\n\n' + MISSING_CLOSE;
+    const r = run(long);
+    assert.deepStrictEqual(r.repairs, ['preamble', 'missing_close']);
+    assert.ok(!r.text.includes('Line one of reasoning'));
+    assert.ok(hasValidFrontmatter(r.text));
+}
+
 // Whole-response code fence.
 {
     const r = run('```markdown\n' + HEALTHY + '\n```');
