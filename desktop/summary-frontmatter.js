@@ -12,13 +12,18 @@
 // No Electron, no dependencies — plain CommonJS so `node test/summary-frontmatter.test.js`
 // can exercise it directly.
 
+// Repair-side: tolerant, so a delimiter with trailing whitespace is recognised
+// and cleaned. Read-side (`hasValidFrontmatter`) uses DELIM_STRICT instead —
+// Obsidian does not accept `--- `, so a validator that does would pass exactly
+// the break this module repairs.
 const DELIM = /^---[ \t]*$/;
+const DELIM_STRICT = /^---$/;
 const DELIM_DIRTY = /^---[ \t]+$/;
 // A line that belongs inside a YAML block: top-level key, nested key, list item,
 // or blank.
 const YAML_LINE = /^(?:[A-Za-z_][\w-]*:|\s+[A-Za-z_][\w-]*:|\s+-\s|\s*$)/;
 const TOP_LEVEL_KEY = /^([A-Za-z_][\w-]*):/;
-const PREAMBLE_LOOKAHEAD = 5;
+const PREAMBLE_LOOKAHEAD = 10;
 
 // Whole-response code fence: ```markdown … ``` wrapped around everything.
 function stripCodeFence(text) {
@@ -36,10 +41,10 @@ function topLevelKeys(blockLines) {
 }
 
 // Index of the closing delimiter for a block opened at lines[0], or -1.
-function closingDelimiter(lines) {
-    if (!lines.length || !DELIM.test(lines[0])) return -1;
+function closingDelimiter(lines, delim = DELIM) {
+    if (!lines.length || !delim.test(lines[0])) return -1;
     for (let i = 1; i < lines.length; i += 1) {
-        if (DELIM.test(lines[i])) return i;
+        if (delim.test(lines[i])) return i;
     }
     return -1;
 }
@@ -55,17 +60,18 @@ function findBlockEnd(lines) {
     return end > 1 ? end : null;
 }
 
-// Strict on purpose: closing `---` too early loses fields, too late breaks the
-// YAML. Only insert a delimiter where the block is unmistakably frontmatter.
+// A `---` opener plus two top-level keys. Deliberately not keyed on specific
+// field names: a custom prompt writes whatever frontmatter it likes, and
+// requiring `date`/`categories` would leave every non-preset summary unrepaired.
 function looksLikeFrontmatter(blockLines) {
-    const keys = topLevelKeys(blockLines);
-    return keys.length >= 2 && (keys.includes('date') || keys.includes('categories'));
+    return topLevelKeys(blockLines).length >= 2;
 }
 
-// Lenient — mirrors what Obsidian actually indexes: opened, closed, at least one key.
+// Mirrors what Obsidian actually indexes: opened and closed by a bare `---`,
+// at least one key.
 function hasValidFrontmatter(text) {
-    const lines = String(text || '').split('\n');
-    const end = closingDelimiter(lines);
+    const lines = String(text || '').replace(/\r\n/g, '\n').split('\n');
+    const end = closingDelimiter(lines, DELIM_STRICT);
     if (end < 1) return false;
     return topLevelKeys(lines.slice(1, end)).length > 0;
 }
@@ -74,29 +80,26 @@ function stubFrontmatter(date) {
     return ['---', 'categories:', '  - "[[Meetings]]"', `date: ${date}`, 'topics:', '---', ''];
 }
 
-function todayIso() {
-    const d = new Date();
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-}
-
 /**
  * Make a model-generated summary safe to write: frontmatter always opened and
  * closed, no model preamble above it.
  *
  * @param  {string} text            raw model output
- * @param  {object} [opts]          { date: 'YYYY-MM-DD' } used only when synthesizing
+ * @param  {object} opts            { date: 'YYYY-MM-DD' } used only when synthesizing
  * @return {{ text: string, repairs: string[] }}  repairs: preamble | trailing_space |
  *         missing_close | synthesized (empty array = output was already sound)
  */
-function normalizeSummary(text, opts) {
-    const date = (opts && opts.date) || todayIso();
+function normalizeSummary(text, { date }) {
     const repairs = [];
-    let lines = stripCodeFence(String(text || '').trim()).split('\n');
+    // CRLF up front: every check below is line-anchored, and `'---\r'` matches
+    // none of them — a sound CRLF summary would look like it had no frontmatter
+    // at all and get a stub prepended above its own block.
+    let lines = stripCodeFence(String(text || '').replace(/\r\n/g, '\n').trim()).split('\n');
 
     // Model reasoning above the block — only cut it when real frontmatter follows,
     // otherwise we'd be deleting summary prose we can't tell apart from noise.
     if (!DELIM.test(lines[0])) {
-        for (let i = 1; i < Math.min(PREAMBLE_LOOKAHEAD, lines.length); i += 1) {
+        for (let i = 1; i <= PREAMBLE_LOOKAHEAD && i < lines.length; i += 1) {
             if (!DELIM.test(lines[i])) continue;
             const rest = lines.slice(i);
             const end = closingDelimiter(rest);

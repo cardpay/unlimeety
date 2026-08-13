@@ -2277,12 +2277,16 @@ if (btnRailEdit) {
         const res = await api.overwriteSummary(fp, newText, getEffectiveFolder());
         if (res?.ok) {
           summaryStore.set(fp, newText);
-          renderSummaryRail(fp);
+          await renderSummaryRail(fp);
           // Saved, but the edit left the YAML block unusable — say so instead of
-          // letting an unindexable note sit in the vault unnoticed.
+          // letting an unindexable note sit in the vault unnoticed. In the rail,
+          // not the background toolbar: that one belongs to the summarize job and
+          // may be mid-run on another file.
           if (res.warning) {
-            showBgToolbar("error", "Summary saved with broken frontmatter", res.warning);
-            bgViewBtn.classList.add("hidden");
+            summaryRailBody.insertAdjacentHTML(
+              "afterbegin",
+              `<div class="rail-banner">${escapeHtml(res.warning)}</div>`
+            );
           }
         } else if (btn) {
           btn.disabled = false;
@@ -3566,6 +3570,12 @@ if (modalBtnSaveOpen) {
       if (!res?.ok) {
         console.error("Save & open: save failed", res?.error);
         return;
+      }
+      // Same warning the rail editor surfaces — the result view's subtitle is
+      // where the user is looking when they click this button.
+      if (res.warning) {
+        const subtitleEl = document.getElementById("modal-result-subtitle");
+        if (subtitleEl) subtitleEl.textContent = res.warning;
       }
       if (res.filePath) {
         await api.showInFinder(res.filePath);
