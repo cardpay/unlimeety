@@ -14,6 +14,10 @@ let state = {
 
 // filePath → summary text (survives library re-renders)
 const summaryStore = new Map();
+// filePath → warning text from the last write. Kept next to the summary itself so
+// the rail re-renders it; a banner poked into the DOM after the render is erased
+// by the next one while the note on disk stays broken.
+const summaryWarnings = new Map();
 
 // ─── Meeting model ────────────────────────────────────────────────────────────
 // A Meeting is the first-class entity used by the redesigned sidebar / editor /
@@ -2118,6 +2122,23 @@ function buildStructuredHtml(parsed) {
   return out.join("");
 }
 
+function setSummaryWarning(filePath, warning) {
+  if (warning) summaryWarnings.set(filePath, warning);
+  else summaryWarnings.delete(filePath);
+}
+
+// Sits above the summary body, styled apart from the informational banner below —
+// this one says the note will not be indexed, which is not an FYI.
+function buildRailWarningHtml(filePath) {
+  const warning = summaryWarnings.get(filePath);
+  if (!warning) return "";
+  return `
+    <div class="rail-banner rail-banner--warn">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+      ${escapeHtml(warning)}
+    </div>`;
+}
+
 function buildMarkdownBodyHtml(md) {
   const banner = `
     <div class="rail-banner">
@@ -2186,6 +2207,7 @@ async function renderSummaryRail(filePath) {
     if (!parsed.fallback) {
       summaryRailBody.innerHTML =
         buildRailHeaderHtml(filePath, presetName ? { label: presetName } : { label: "Structured" }) +
+        buildRailWarningHtml(filePath) +
         buildStructuredHtml(parsed);
       if (btnRailResummarizeLabel) btnRailResummarizeLabel.textContent = "Re-summarize";
       return;
@@ -2194,6 +2216,7 @@ async function renderSummaryRail(filePath) {
 
   summaryRailBody.innerHTML =
     buildRailHeaderHtml(filePath, presetName ? { label: presetName } : { label: "Markdown", muted: true }) +
+    buildRailWarningHtml(filePath) +
     buildMarkdownBodyHtml(summaryText);
   if (btnRailResummarizeLabel) btnRailResummarizeLabel.textContent = "Re-summarize";
 }
@@ -2277,17 +2300,13 @@ if (btnRailEdit) {
         const res = await api.overwriteSummary(fp, newText, getEffectiveFolder());
         if (res?.ok) {
           summaryStore.set(fp, newText);
-          await renderSummaryRail(fp);
-          // Saved, but the edit left the YAML block unusable — say so instead of
-          // letting an unindexable note sit in the vault unnoticed. In the rail,
-          // not the background toolbar: that one belongs to the summarize job and
-          // may be mid-run on another file.
-          if (res.warning) {
-            summaryRailBody.insertAdjacentHTML(
-              "afterbegin",
-              `<div class="rail-banner">${escapeHtml(res.warning)}</div>`
-            );
-          }
+          // Saved, but the YAML block is unusable — say so instead of letting an
+          // unindexable note sit in the vault unnoticed. In the rail, not the
+          // background toolbar: that one belongs to the summarize job and may be
+          // mid-run on another file. The rail renders it from the warning store,
+          // so it survives re-renders and cannot land on another file's rail.
+          setSummaryWarning(fp, res.warning);
+          if (fp === state.filePath) renderSummaryRail(fp);
         } else if (btn) {
           btn.disabled = false;
           btn.textContent = "Save";
@@ -3381,9 +3400,8 @@ async function runSummarize() {
     result = { ok: false, error: err?.message || String(err) };
   }
 
-  runningSummarize = null;
-
   if (result?.notInstalled) {
+    runningSummarize = null;
     showBgToolbar("error", "Claude Code not found", "Install it or switch provider in Settings");
     bgViewBtn.classList.remove("hidden");
     bgViewBtn.textContent = "Details";
@@ -3401,6 +3419,7 @@ async function runSummarize() {
   }
 
   if (!result?.ok) {
+    runningSummarize = null;
     showBgToolbar("error", "Summarization failed", meetingTitle);
     bgViewBtn.classList.remove("hidden");
     bgViewBtn.textContent = "Details";
@@ -3418,16 +3437,23 @@ async function runSummarize() {
   // Fences and frontmatter are already normalized in main (summarize:run).
   const summaryText = result.summary;
 
-  summaryStore.set(filePath, summaryText);
   try { localStorage.setItem("summary.prompt." + filePath, activePresetName(instruction)); } catch (_) {}
 
   if (customName) await api.setSummaryName(filePath, customName);
   const saved = await api.saveSummary(filePath, summaryText, folder);
+  // Only now: the guard has to outlive the write, or a second Summarize started
+  // during it gets its toolbar clobbered by this job finishing.
+  runningSummarize = null;
   if (!saved?.ok) {
     showBgToolbar("error", "Could not save summary", saved?.error || meetingTitle);
     bgViewBtn.classList.add("hidden");
     return;
   }
+
+  // After the write, not before — otherwise a failed save leaves the rail and the
+  // result modal rendering a summary that is not on disk.
+  summaryStore.set(filePath, summaryText);
+  setSummaryWarning(filePath, saved.warning);
 
   // Reflect the new summary on the matching sidebar card.
   const meeting = getMeetingById(filePath);
@@ -3440,8 +3466,13 @@ async function runSummarize() {
   // Re-render the rail if the summarized file is the one currently open.
   if (state.filePath === filePath) renderSummaryRail(filePath);
 
-  const label = result.repairs?.length ? "Summary ready (frontmatter repaired)" : "Summary ready";
-  showBgToolbar("done", label, saved.warning || meetingTitle);
+  // The warning goes in the label, not the subtitle: the subtitle is the only
+  // thing that says WHICH file finished, and this toolbar is shared by jobs on
+  // different meetings.
+  const label = saved.warning ? "Summary ready — frontmatter unusable"
+    : result.repairs?.length ? "Summary ready (frontmatter repaired)"
+    : "Summary ready";
+  showBgToolbar("done", label, meetingTitle);
   bgViewBtn.classList.remove("hidden");
   bgViewBtn.textContent = "View";
   bgViewBtn.onclick = () => {
@@ -3571,12 +3602,16 @@ if (modalBtnSaveOpen) {
         console.error("Save & open: save failed", res?.error);
         return;
       }
-      // Same warning the rail editor surfaces — the result view's subtitle is
-      // where the user is looking when they click this button.
+      // Same warning the rail editor surfaces. The result view's subtitle is
+      // where the user is looking when they click this button, but showInFinder
+      // takes the focus out of the app a line later and the next render resets
+      // it — so record it on the rail too, where it stays.
+      setSummaryWarning(filePath, res.warning);
       if (res.warning) {
         const subtitleEl = document.getElementById("modal-result-subtitle");
         if (subtitleEl) subtitleEl.textContent = res.warning;
       }
+      if (filePath === state.filePath) renderSummaryRail(filePath);
       if (res.filePath) {
         await api.showInFinder(res.filePath);
       }
