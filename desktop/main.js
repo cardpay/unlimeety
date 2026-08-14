@@ -660,10 +660,8 @@ function sanitizeFilenameChars(name) {
         .trim();
 }
 
-function meetingDateParts(transcriptPath, mtimeMs) {
-    const m = path.basename(transcriptPath).match(/(\d{4})-(\d{2})-(\d{2})/);
-    if (m) return { y: m[1], mo: m[2], d: m[3] };
-    const dt = new Date(mtimeMs);
+function dateParts(ms) {
+    const dt = new Date(ms);
     return {
         y: String(dt.getFullYear()),
         mo: String(dt.getMonth() + 1).padStart(2, '0'),
@@ -671,14 +669,18 @@ function meetingDateParts(transcriptPath, mtimeMs) {
     };
 }
 
+function meetingDateParts(transcriptPath, mtimeMs) {
+    const m = path.basename(transcriptPath).match(/(\d{4})-(\d{2})-(\d{2})/);
+    // A filename carries anything date-shaped. These parts feed a real YAML
+    // `date:` property now, and `2026-13-45` there is a field Obsidian cannot
+    // coerce — fall through to the timestamp rather than trust the match.
+    if (m && !Number.isNaN(Date.parse(`${m[0]}T00:00:00Z`))) return { y: m[1], mo: m[2], d: m[3] };
+    return dateParts(mtimeMs);
+}
+
 function formatDateDdMmYy(transcriptPath, mtimeMs) {
     const { y, mo, d } = meetingDateParts(transcriptPath, mtimeMs);
     return `${d}.${mo}.${y.slice(-2)}`;
-}
-
-function formatDateIso(transcriptPath, mtimeMs) {
-    const { y, mo, d } = meetingDateParts(transcriptPath, mtimeMs);
-    return `${y}-${mo}-${d}`;
 }
 
 function legacySummaryBase(transcriptPath) {
@@ -1016,11 +1018,14 @@ function findClaude() {
 }
 
 // Summarization is a pure text task — the model needs no tools. We run with ALL
-// tools disabled (`--tools ""`) and WITHOUT `--dangerously-skip-permissions`, so
+// tools disabled (`--tools=`) and WITHOUT `--dangerously-skip-permissions`, so
 // a prompt-injection payload hidden in an untrusted transcript can't make Claude
 // Code run shell commands or touch the filesystem. (Removing the bypass flag also
 // means any tool the model still tries is auto-denied in this non-TTY child.)
-const CLAUDE_BASE_ARGS = ['-p', '--output-format', 'text', '--tools', ''];
+// `--tools=` and not `--tools` `''`: on Windows we spawn through a shell, and
+// Node joins argv with spaces and no quoting there — a bare empty string
+// disappears, so the flag would swallow whatever came after it as its value.
+const CLAUDE_BASE_ARGS = ['-p', '--output-format', 'text', '--tools='];
 
 // The child inherits HOME, so without these it also inherits the user's whole
 // Claude Code setup: ~/CLAUDE.md, plugin SessionStart hooks, output styles, a
@@ -1029,6 +1034,11 @@ const CLAUDE_BASE_ARGS = ['-p', '--output-format', 'text', '--tools', ''];
 // compressed prose in the body. `--safe-mode` drops every customization while
 // leaving OAuth auth working (unlike `--bare`, which demands an API key).
 const CLAUDE_ISOLATION_ARGS = ['--safe-mode', '--permission-mode', 'manual'];
+
+// A CLI that rejects the isolation flags rejects them every time. Remembering the
+// answer keeps the doomed first spawn off every later summary, follow-up draft and
+// chat message — all three route through runClaudeCode.
+let claudeIsolationSupported = true;
 
 async function runClaudeCode(content, promptInstruction) {
     const claudePath = await findClaude();
@@ -1043,16 +1053,27 @@ async function runClaudeCode(content, promptInstruction) {
         : ['/usr/local/bin', '/opt/homebrew/bin', path.join(os.homedir(), '.local', 'bin')];
     const extendedPath = [process.env.PATH, ...extraPaths].filter(Boolean).join(path.delimiter);
 
-    const res = await spawnClaude(claudePath, [...CLAUDE_BASE_ARGS, ...CLAUDE_ISOLATION_ARGS], content, promptInstruction, extendedPath);
-    // A CLI too old for the isolation flags rejects them outright — summarizing
-    // unisolated beats not summarizing at all. Two rejection shapes, both from
-    // the same cause: `unknown option '--safe-mode'` when the flag is missing
-    // entirely, and `option '--permission-mode <mode>' argument 'manual' is
-    // invalid` when the flag exists but predates that choice.
-    if (!res.ok && /unknown option|argument '[^']*' is invalid/i.test(res.error || '')) {
-        return spawnClaude(claudePath, CLAUDE_BASE_ARGS, content, promptInstruction, extendedPath);
+    if (claudeIsolationSupported) {
+        const startedAt = Date.now();
+        const res = await spawnClaude(claudePath, [...CLAUDE_BASE_ARGS, ...CLAUDE_ISOLATION_ARGS], content, promptInstruction, extendedPath);
+        if (res.ok) return res;
+        // A CLI too old for the isolation flags rejects them outright — summarizing
+        // unisolated beats not summarizing at all. Two rejection shapes, both from
+        // the same cause: `unknown option '--safe-mode'` when the flag is missing
+        // entirely, and `option '--permission-mode <mode>' argument 'manual' is
+        // invalid` when the flag exists but predates that choice.
+        // The elapsed-time gate is what makes that safe to act on: argv parsing
+        // fails in milliseconds, before the model runs. A slower failure whose
+        // stderr merely happens to contain the phrase (a hook, an MCP server, a
+        // Node warning) would otherwise cost a second full-transcript run and
+        // silently give up the isolation this whole flag set exists for.
+        if (Date.now() - startedAt > 2000
+            || !/unknown option|argument '[^']*' is invalid/i.test(res.error || '')) {
+            return res;
+        }
+        claudeIsolationSupported = false;
     }
-    return res;
+    return spawnClaude(claudePath, CLAUDE_BASE_ARGS, content, promptInstruction, extendedPath);
 }
 
 function spawnClaude(claudePath, args, content, promptInstruction, extendedPath) {
@@ -1070,6 +1091,12 @@ function spawnClaude(claudePath, args, content, promptInstruction, extendedPath)
             stdio: ['pipe', 'pipe', 'pipe'],
             shell: process.platform === 'win32',
         });
+
+        // A child that rejects its flags exits during this write, and a transcript
+        // is far bigger than the pipe buffer — the rest of it then lands on a
+        // closed pipe. Without this listener that EPIPE is an uncaught exception
+        // and takes the whole main process down instead of resolving below.
+        proc.stdin.on('error', () => { /* child died early; `close` resolves us */ });
 
         // Instruction first, a blank line, then the transcript content.
         proc.stdin.write(`${promptInstruction}\n\n${content}`, 'utf-8');
@@ -1255,11 +1282,24 @@ ipcMain.handle('summarize:run', async (_e, filePath, promptInstruction) => {
     // place the block has to be made sound.
     // `content` is already in memory, so parse the header off it rather than
     // re-reading the whole transcript. Recorded-At is the meeting's own ISO
-    // timestamp — the transcript's mtime is the copy/edit time for an imported
-    // file, and only stands in when the header has no Recorded-At line.
+    // timestamp and outranks everything else — including the filename, which
+    // `meetingDateParts` prefers and which for an imported transcript is often a
+    // different day. It only steps aside when the header has no Recorded-At line.
     const { recordedAt } = parseTranscriptHeaderMain(content.slice(0, 512));
-    const stamp = Date.parse(recordedAt || '') || fs.statSync(filePath).mtimeMs;
-    const { text, repairs } = normalizeSummary(result.summary, { date: formatDateIso(filePath, stamp) });
+    const recordedMs = Date.parse(recordedAt || '');
+    let parts;
+    if (!Number.isNaN(recordedMs)) {
+        parts = dateParts(recordedMs);
+    } else {
+        // The stat must not throw here: the model call above took minutes, and the
+        // user may have renamed or deleted the transcript meanwhile. Letting ENOENT
+        // reject the handler would discard a summary that is already paid for.
+        let mtimeMs = Date.now();
+        try { mtimeMs = fs.statSync(filePath).mtimeMs; } catch { /* transcript moved mid-run */ }
+        parts = meetingDateParts(filePath, mtimeMs);
+    }
+    const date = `${parts.y}-${parts.mo}-${parts.d}`;
+    const { text, repairs } = normalizeSummary(result.summary, { date });
     return { ...result, summary: text, repairs };
 });
 

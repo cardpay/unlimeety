@@ -13,16 +13,19 @@
 // can exercise it directly.
 
 // Repair-side: tolerant, so a delimiter with trailing whitespace is recognised
-// and cleaned. Read-side (`hasValidFrontmatter`) uses DELIM_STRICT instead —
-// Obsidian does not accept `--- `, so a validator that does would pass exactly
-// the break this module repairs.
+// and cleaned. Read-side (`hasValidFrontmatter`) compares against a bare `---`
+// instead — Obsidian does not accept `--- `, so a validator that does would pass
+// exactly the break this module repairs.
 const DELIM = /^---[ \t]*$/;
-const DELIM_STRICT = /^---$/;
-const DELIM_DIRTY = /^---[ \t]+$/;
-// A line that belongs inside a YAML block: top-level key, nested key, list item,
-// or blank.
-const YAML_LINE = /^(?:[A-Za-z_][\w-]*:|\s+[A-Za-z_][\w-]*:|\s+-\s|\s*$)/;
-const TOP_LEVEL_KEY = /^([A-Za-z_][\w-]*):/;
+// A line that belongs inside a YAML block: top-level key, list item at column 0,
+// or any indented continuation (nested keys, indented list items, `|`/`>` scalar
+// bodies). Unicode-aware: these summaries are written in Russian, and an
+// ASCII-only key pattern scores a Cyrillic block as "not frontmatter".
+// A blank line is deliberately NOT in the set — it ends the block. Frontmatter
+// does not contain blank lines, but summary bodies open with them, and treating
+// one as in-block absorbs the first paragraph into the YAML.
+const YAML_LINE = /^(?:[\p{L}_][\p{L}\p{N}_-]*:|-\s|\s+\S)/u;
+const TOP_LEVEL_KEY = /^[\p{L}_][\p{L}\p{N}_-]*:/u;
 const PREAMBLE_LOOKAHEAD = 10;
 
 // Whole-response code fence: ```markdown … ``` wrapped around everything.
@@ -33,47 +36,41 @@ function stripCodeFence(text) {
     let last = lines.length - 1;
     while (last > 0 && !lines[last].trim()) last -= 1;
     if (lines[last].trim() !== '```') return text;
+    // Any fence in between means these two are not a pair — the response merely
+    // starts and ends with code blocks. Unwrapping there truncates the body.
+    if (lines.slice(1, last).some((l) => l.trim().startsWith('```'))) return text;
     return lines.slice(1, last).join('\n').trim();
 }
 
-function topLevelKeys(blockLines) {
-    return blockLines.map((l) => l.match(TOP_LEVEL_KEY)).filter(Boolean).map((m) => m[1]);
+function keyCount(blockLines) {
+    return blockLines.filter((l) => TOP_LEVEL_KEY.test(l)).length;
 }
 
 // Index of the closing delimiter for a block opened at lines[0], or -1.
-function closingDelimiter(lines, delim = DELIM) {
-    if (!lines.length || !delim.test(lines[0])) return -1;
+function closingDelimiter(lines) {
+    if (!lines.length || !DELIM.test(lines[0])) return -1;
     for (let i = 1; i < lines.length; i += 1) {
-        if (delim.test(lines[i])) return i;
+        if (DELIM.test(lines[i])) return i;
     }
     return -1;
 }
 
-// First body line for an unterminated block (lines[0] === '---'): walk while the
-// lines look like YAML, then rewind past trailing blanks. null if the block is empty.
-// ponytail: a body that opens with prose shaped like `Key: value` gets absorbed into
-// the block. Same ceiling as fix_frontmatter.py; a real YAML parser is the upgrade.
+// End of the YAML-shaped run for a block opened at lines[0] — the index of the
+// first line that cannot be inside the block (a blank, a heading, prose, or the
+// closing `---` itself). 0 when the block is empty.
 function findBlockEnd(lines) {
     let end = 1;
     while (end < lines.length && YAML_LINE.test(lines[end])) end += 1;
-    while (end > 1 && !lines[end - 1].trim()) end -= 1;
-    return end > 1 ? end : null;
-}
-
-// A `---` opener plus two top-level keys. Deliberately not keyed on specific
-// field names: a custom prompt writes whatever frontmatter it likes, and
-// requiring `date`/`categories` would leave every non-preset summary unrepaired.
-function looksLikeFrontmatter(blockLines) {
-    return topLevelKeys(blockLines).length >= 2;
+    return end > 1 ? end : 0;
 }
 
 // Mirrors what Obsidian actually indexes: opened and closed by a bare `---`,
 // at least one key.
 function hasValidFrontmatter(text) {
     const lines = String(text || '').replace(/\r\n/g, '\n').split('\n');
-    const end = closingDelimiter(lines, DELIM_STRICT);
-    if (end < 1) return false;
-    return topLevelKeys(lines.slice(1, end)).length > 0;
+    if (lines[0] !== '---') return false;
+    const end = lines.indexOf('---', 1);
+    return end > 0 && keyCount(lines.slice(1, end)) > 0;
 }
 
 function stubFrontmatter(date) {
@@ -83,6 +80,11 @@ function stubFrontmatter(date) {
 /**
  * Make a model-generated summary safe to write: frontmatter always opened and
  * closed, no model preamble above it.
+ *
+ * Fails closed. Every branch either produces an indexable note or returns the
+ * text untouched for the caller to warn about — no branch may drop a line of
+ * model output. The shape tests here cannot tell real frontmatter from prose
+ * that merely looks like it, so "unsure" must never mean "delete".
  *
  * @param  {string} text            raw model output
  * @param  {object} opts            { date: 'YYYY-MM-DD' } used only when synthesizing
@@ -96,15 +98,21 @@ function normalizeSummary(text, { date }) {
     // at all and get a stub prepended above its own block.
     let lines = stripCodeFence(String(text || '').replace(/\r\n/g, '\n').trim()).split('\n');
 
-    // Model reasoning above the block — only cut it when real frontmatter follows,
-    // otherwise we'd be deleting summary prose we can't tell apart from noise.
+    // Model reasoning above the block. Never deleted: a `---` rule followed by two
+    // `Word:` lines is shape-identical to real frontmatter, and summary prose hits
+    // that shape often (`Owner:`, `Decision:`, `Итог:`). Moved below the block
+    // instead — the note gets indexed either way, and a stray line of reasoning in
+    // the body is a nuisance the user can see and delete, unlike a deleted summary.
+    // Every `---` in the window is a candidate, not just the first: leaked reasoning
+    // can itself contain a horizontal rule, and giving up on it would bury the real
+    // block that follows under a synthesized stub.
+    let preamble = [];
     if (!DELIM.test(lines[0])) {
         for (let i = 1; i <= PREAMBLE_LOOKAHEAD && i < lines.length; i += 1) {
             if (!DELIM.test(lines[i])) continue;
             const rest = lines.slice(i);
-            const end = closingDelimiter(rest);
-            const block = end > 0 ? rest.slice(1, end) : rest.slice(1, findBlockEnd(rest) || 1);
-            if (!looksLikeFrontmatter(block)) break;
+            if (keyCount(rest.slice(1, findBlockEnd(rest))) < 2) continue;
+            preamble = lines.slice(0, i);
             lines = rest;
             repairs.push('preamble');
             break;
@@ -112,30 +120,43 @@ function normalizeSummary(text, { date }) {
     }
 
     if (DELIM.test(lines[0])) {
-        if (DELIM_DIRTY.test(lines[0])) {
+        if (lines[0] !== '---') {
             lines[0] = '---';
             repairs.push('trailing_space');
         }
-        const end = closingDelimiter(lines);
-        if (end > 0) {
-            if (DELIM_DIRTY.test(lines[end])) {
-                lines[end] = '---';
+        const blockEnd = findBlockEnd(lines);
+        const close = closingDelimiter(lines);
+        // A `---` past the end of the YAML-shaped run is a horizontal rule in the
+        // body, not the closer. Accepting it swallows everything above the rule
+        // into the block: the note stops rendering that text and the YAML no
+        // longer parses, while every check downstream reports the note as sound.
+        if (close > 0 && close <= blockEnd) {
+            if (lines[close] !== '---') {
+                lines[close] = '---';
                 if (!repairs.includes('trailing_space')) repairs.push('trailing_space');
             }
-        } else {
-            const blockEnd = findBlockEnd(lines);
-            if (blockEnd && looksLikeFrontmatter(lines.slice(1, blockEnd))) {
-                const body = lines.slice(blockEnd);
-                while (body.length && !body[0].trim()) body.shift();
-                lines = lines.slice(0, blockEnd).concat(['---', ''], body);
-                repairs.push('missing_close');
-            }
+        } else if (keyCount(lines.slice(1, blockEnd)) >= 2) {
+            const body = lines.slice(blockEnd);
+            while (body.length && !body[0].trim()) body.shift();
+            lines = lines.slice(0, blockEnd).concat(['---', ''], body);
+            repairs.push('missing_close');
         }
     }
 
-    // Still nothing parseable: prepend a minimal block so the note is at least
-    // indexable. people/type/org stay out — we don't invent metadata.
-    if (!hasValidFrontmatter(lines.join('\n'))) {
+    if (preamble.length) {
+        const close = lines.indexOf('---', 1);
+        lines = close > 0
+            ? lines.slice(0, close + 1).concat([''], preamble, lines.slice(close + 1))
+            : lines.concat([''], preamble);
+    }
+
+    // Nothing parseable and no block of the model's own to conflict with: prepend
+    // a minimal one so the note is at least indexable. people/type/org stay out —
+    // we don't invent metadata. When the text DOES open with `---` the block is
+    // real but unreadable to us; a stub above it would give the note two openers
+    // and demote the model's metadata to body text, so leave it and let
+    // `hasValidFrontmatter` drive the warning the save handlers return.
+    if (!hasValidFrontmatter(lines.join('\n')) && lines[0] !== '---') {
         lines = stubFrontmatter(date).concat(lines);
         repairs.push('synthesized');
     }

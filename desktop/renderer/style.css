@@ -1257,6 +1257,15 @@ body.mode-record #btn-ask-ai {
 
 .rail-banner svg { flex-shrink: 0; color: var(--text-muted); }
 
+/* The note will not be indexed — not the same kind of message as the one above */
+.rail-banner--warn {
+    color: var(--text-primary);
+    background: rgba(248, 113, 113, 0.15);
+    border-color: var(--danger);
+}
+
+.rail-banner--warn svg { color: var(--danger); }
+
 /* Structured sections */
 .rail-section { margin-bottom: 18px; }
 
