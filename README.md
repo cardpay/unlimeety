@@ -264,7 +264,9 @@ network requests. Useful when you'd rather not record audio at all — otherwise
 strictly more capable.
 
 Caption language: Russian, English or Serbian. Detects participants and attributes lines to them,
-auto-saves when you leave the call.
+auto-saves when you leave the call. The panel's Note field takes freeform notes while recording —
+Enter drops one into the transcript as a `[time] Note:` line, the same marker the desktop Live and
+Record tabs write, so a shared summarizer prompt recognizes either source.
 
 **Saved file format** (the desktop app writes the same header, so both paths are interchangeable):
 ```
@@ -278,6 +280,9 @@ Let's start with the weekly tasks.
 
 [14:30:12] Bob:
 Sounds good, I have an update on the project.
+
+[14:30:20] Note:
+ask Bob about the staging rollout date
 ```
 
 ---

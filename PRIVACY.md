@@ -1,6 +1,6 @@
 # Privacy Policy — Unlimeety (Chrome Extension)
 
-_Last updated: 2026-05-29_
+_Last updated: 2026-08-07_
 
 This Privacy Policy describes how the **Unlimeety** Chrome extension
 ("the extension") handles information. The extension is published by Unlimit (Cardpay).
@@ -21,12 +21,17 @@ the extension reads information that Google Meet already displays on the page:
 - **Meeting title** as displayed by Google Meet.
 - **Timestamps** generated locally for each caption line.
 
+It also processes one thing you provide yourself:
+
+- **Notes you type** into the panel's Note field while recording. Each note is stored
+  as a transcript line labelled `Note`, with the time you typed it.
+
 This data is treated as personal communications content and is handled accordingly.
 
 ## How the data is used and stored
 
-- Caption lines are kept temporarily in the extension's local storage
-  (`chrome.storage.local`) on your device while a meeting is in progress.
+- Caption lines and your typed notes are kept temporarily in the extension's local
+  storage (`chrome.storage.local`) on your device while a meeting is in progress.
 - When you click **Save** (or when you leave the call) the transcript is written
   as a plain `.txt` file to your local Downloads folder, under
   `~/Downloads/Meet_Transcripts/`.
@@ -56,7 +61,8 @@ is outside the scope of this Chrome extension.
 ## Permissions and why they are needed
 
 - **`downloads`** — to write the transcript `.txt` file into your Downloads folder.
-- **`storage`** — to temporarily hold caption lines for the active meeting on your device.
+- **`storage`** — to temporarily hold the caption lines and your typed notes for the active
+  meeting on your device, and to remember the panel's theme preference.
 - **`tabs`** — to detect when you leave or close the Google Meet tab so the transcript
   can be auto-saved, and to open the saved file in the optional desktop app.
 - **Host access to `meet.google.com`** — so the extension can read the captions and
