@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { execFile, spawn } = require('child_process');
+const { normalizeSummary, hasValidFrontmatter } = require('./summary-frontmatter');
 
 const TRANSCRIPTS_FOLDER = path.join(os.homedir(), 'Downloads', 'Meet_Transcripts');
 const RECORDINGS_FOLDER = path.join(os.homedir(), 'Downloads', 'Meet_Recordings');
@@ -659,17 +660,26 @@ function sanitizeFilenameChars(name) {
         .trim();
 }
 
-function formatDateDdMmYy(transcriptPath, mtimeMs) {
+function dateParts(ms) {
+    const dt = new Date(ms);
+    return {
+        y: String(dt.getFullYear()),
+        mo: String(dt.getMonth() + 1).padStart(2, '0'),
+        d: String(dt.getDate()).padStart(2, '0'),
+    };
+}
+
+function meetingDateParts(transcriptPath, mtimeMs) {
     const m = path.basename(transcriptPath).match(/(\d{4})-(\d{2})-(\d{2})/);
-    let y, mo, d;
-    if (m) {
-        y = m[1]; mo = m[2]; d = m[3];
-    } else {
-        const dt = new Date(mtimeMs);
-        y = String(dt.getFullYear());
-        mo = String(dt.getMonth() + 1).padStart(2, '0');
-        d = String(dt.getDate()).padStart(2, '0');
-    }
+    // A filename carries anything date-shaped. These parts feed a real YAML
+    // `date:` property now, and `2026-13-45` there is a field Obsidian cannot
+    // coerce — fall through to the timestamp rather than trust the match.
+    if (m && !Number.isNaN(Date.parse(`${m[0]}T00:00:00Z`))) return { y: m[1], mo: m[2], d: m[3] };
+    return dateParts(mtimeMs);
+}
+
+function formatDateDdMmYy(transcriptPath, mtimeMs) {
+    const { y, mo, d } = meetingDateParts(transcriptPath, mtimeMs);
     return `${d}.${mo}.${y.slice(-2)}`;
 }
 
@@ -802,6 +812,15 @@ ipcMain.handle('prompts:delete', (_e, id) => {
     return { ok: true };
 });
 
+// Generated summaries are normalized in `summarize:run`, but a hand-edited one
+// can still lose its frontmatter in the inline editor. We never rewrite what the
+// user typed — we just refuse to let the note go to the vault silently broken.
+function frontmatterWarning(text) {
+    return hasValidFrontmatter(text)
+        ? undefined
+        : 'Frontmatter is missing or unterminated — Obsidian Bases/Dataview will skip this note.';
+}
+
 ipcMain.handle('summary:save', (_e, transcriptPath, text, folder) => {
     if (!canReadPath(transcriptPath) || !summaryDirAllowed(transcriptPath, folder || null)) {
         return { ok: false, error: 'Refusing to operate on a path outside the managed folders.' };
@@ -810,7 +829,7 @@ ipcMain.handle('summary:save', (_e, transcriptPath, text, folder) => {
         const filePath = summaryFilePath(transcriptPath, folder || null);
         fs.writeFileSync(filePath, text, 'utf-8');
         registerReadablePath(filePath); // summary may live outside managed folders
-        return { ok: true, filePath };
+        return { ok: true, filePath, warning: frontmatterWarning(text) };
     } catch (err) {
         return { ok: false, error: err.message };
     }
@@ -828,7 +847,7 @@ ipcMain.handle('summary:overwrite', (_e, transcriptPath, text, folder) => {
             || summaryFilePath(transcriptPath, folder || null);
         fs.writeFileSync(filePath, text, 'utf-8');
         registerReadablePath(filePath); // summary may live outside managed folders
-        return { ok: true, filePath };
+        return { ok: true, filePath, warning: frontmatterWarning(text) };
     } catch (err) {
         return { ok: false, error: err.message };
     }
@@ -998,6 +1017,29 @@ function findClaude() {
     });
 }
 
+// Summarization is a pure text task — the model needs no tools. We run with ALL
+// tools disabled (`--tools=`) and WITHOUT `--dangerously-skip-permissions`, so
+// a prompt-injection payload hidden in an untrusted transcript can't make Claude
+// Code run shell commands or touch the filesystem. (Removing the bypass flag also
+// means any tool the model still tries is auto-denied in this non-TTY child.)
+// `--tools=` and not `--tools` `''`: on Windows we spawn through a shell, and
+// Node joins argv with spaces and no quoting there — a bare empty string
+// disappears, so the flag would swallow whatever came after it as its value.
+const CLAUDE_BASE_ARGS = ['-p', '--output-format', 'text', '--tools='];
+
+// The child inherits HOME, so without these it also inherits the user's whole
+// Claude Code setup: ~/CLAUDE.md, plugin SessionStart hooks, output styles, a
+// `defaultMode: "plan"` in settings.json. Those turn a summary into whatever
+// house style the user codes in — leaked reasoning above the frontmatter,
+// compressed prose in the body. `--safe-mode` drops every customization while
+// leaving OAuth auth working (unlike `--bare`, which demands an API key).
+const CLAUDE_ISOLATION_ARGS = ['--safe-mode', '--permission-mode', 'manual'];
+
+// A CLI that rejects the isolation flags rejects them every time. Remembering the
+// answer keeps the doomed first spawn off every later summary, follow-up draft and
+// chat message — all three route through runClaudeCode.
+let claudeIsolationSupported = true;
+
 async function runClaudeCode(content, promptInstruction) {
     const claudePath = await findClaude();
     if (!claudePath) return { ok: false, notInstalled: true };
@@ -1011,27 +1053,50 @@ async function runClaudeCode(content, promptInstruction) {
         : ['/usr/local/bin', '/opt/homebrew/bin', path.join(os.homedir(), '.local', 'bin')];
     const extendedPath = [process.env.PATH, ...extraPaths].filter(Boolean).join(path.delimiter);
 
+    if (claudeIsolationSupported) {
+        const startedAt = Date.now();
+        const res = await spawnClaude(claudePath, [...CLAUDE_BASE_ARGS, ...CLAUDE_ISOLATION_ARGS], content, promptInstruction, extendedPath);
+        if (res.ok) return res;
+        // A CLI too old for the isolation flags rejects them outright — summarizing
+        // unisolated beats not summarizing at all. Two rejection shapes, both from
+        // the same cause: `unknown option '--safe-mode'` when the flag is missing
+        // entirely, and `option '--permission-mode <mode>' argument 'manual' is
+        // invalid` when the flag exists but predates that choice.
+        // The elapsed-time gate is what makes that safe to act on: argv parsing
+        // fails in milliseconds, before the model runs. A slower failure whose
+        // stderr merely happens to contain the phrase (a hook, an MCP server, a
+        // Node warning) would otherwise cost a second full-transcript run and
+        // silently give up the isolation this whole flag set exists for.
+        if (Date.now() - startedAt > 2000
+            || !/unknown option|argument '[^']*' is invalid/i.test(res.error || '')) {
+            return res;
+        }
+        claudeIsolationSupported = false;
+    }
+    return spawnClaude(claudePath, CLAUDE_BASE_ARGS, content, promptInstruction, extendedPath);
+}
+
+function spawnClaude(claudePath, args, content, promptInstruction, extendedPath) {
     return new Promise((resolve) => {
         let stdout = '';
         let stderr = '';
 
-        // Summarization is a pure text task — the model needs no tools. We run
-        // with ALL tools disabled (`--tools ""`) and WITHOUT
-        // `--dangerously-skip-permissions`, so a prompt-injection payload hidden
-        // in an untrusted transcript can't make Claude Code run shell commands or
-        // touch the filesystem. (Removing the bypass flag also means any tool the
-        // model still tries is auto-denied in this non-TTY child process.)
-        //
         // Both the instruction and the transcript are fed via stdin and NOT as
         // argv — on Windows we spawn through a shell (claude is a .cmd), and any
         // untrusted string passed as an argument would be an argument/command-
         // injection vector. With only constant flags in argv there's nothing for
         // the shell to abuse.
-        const proc = spawn(claudePath, ['-p', '--output-format', 'text', '--tools', ''], {
+        const proc = spawn(claudePath, args, {
             env: { ...process.env, PATH: extendedPath, HOME: os.homedir() },
             stdio: ['pipe', 'pipe', 'pipe'],
             shell: process.platform === 'win32',
         });
+
+        // A child that rejects its flags exits during this write, and a transcript
+        // is far bigger than the pipe buffer — the rest of it then lands on a
+        // closed pipe. Without this listener that EPIPE is an uncaught exception
+        // and takes the whole main process down instead of resolving below.
+        proc.stdin.on('error', () => { /* child died early; `close` resolves us */ });
 
         // Instruction first, a blank line, then the transcript content.
         proc.stdin.write(`${promptInstruction}\n\n${content}`, 'utf-8');
@@ -1201,13 +1266,41 @@ ipcMain.handle('summarize:run', async (_e, filePath, promptInstruction) => {
     }
 
     const cfg = readSummarizerConfig();
+    let result;
     switch (cfg.provider) {
-        case 'openrouter':        return runOpenRouter(content, promptInstruction, cfg.openrouter);
-        case 'ollama':            return runOllama(content, promptInstruction, cfg.ollama);
-        case 'openai-compatible': return runOpenAICompat(content, promptInstruction, cfg.openaiCompatible);
+        case 'openrouter':        result = await runOpenRouter(content, promptInstruction, cfg.openrouter); break;
+        case 'ollama':            result = await runOllama(content, promptInstruction, cfg.ollama); break;
+        case 'openai-compatible': result = await runOpenAICompat(content, promptInstruction, cfg.openaiCompatible); break;
         case 'claude-code':
-        default:                  return runClaudeCode(content, promptInstruction);
+        default:                  result = await runClaudeCode(content, promptInstruction); break;
     }
+    if (!result?.ok) return result;
+
+    // The frontmatter block is model output, delimiters and all — every provider
+    // drops the closing `---` or leaks a line of reasoning above it sooner or
+    // later. This is the one place all four funnel through, so it's the only
+    // place the block has to be made sound.
+    // `content` is already in memory, so parse the header off it rather than
+    // re-reading the whole transcript. Recorded-At is the meeting's own ISO
+    // timestamp and outranks everything else — including the filename, which
+    // `meetingDateParts` prefers and which for an imported transcript is often a
+    // different day. It only steps aside when the header has no Recorded-At line.
+    const { recordedAt } = parseTranscriptHeaderMain(content.slice(0, 512));
+    const recordedMs = Date.parse(recordedAt || '');
+    let parts;
+    if (!Number.isNaN(recordedMs)) {
+        parts = dateParts(recordedMs);
+    } else {
+        // The stat must not throw here: the model call above took minutes, and the
+        // user may have renamed or deleted the transcript meanwhile. Letting ENOENT
+        // reject the handler would discard a summary that is already paid for.
+        let mtimeMs = Date.now();
+        try { mtimeMs = fs.statSync(filePath).mtimeMs; } catch { /* transcript moved mid-run */ }
+        parts = meetingDateParts(filePath, mtimeMs);
+    }
+    const date = `${parts.y}-${parts.mo}-${parts.d}`;
+    const { text, repairs } = normalizeSummary(result.summary, { date });
+    return { ...result, summary: text, repairs };
 });
 
 // ─── IPC: Follow-up draft ─────────────────────────────────────────────────────
