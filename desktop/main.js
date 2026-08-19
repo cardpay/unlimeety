@@ -443,12 +443,35 @@ ipcMain.handle('file:open', async () => {
     return { filePath, content };
 });
 
-// Same-directory temp file plus rename: the rename is atomic on APFS and NTFS,
-// so a crash or a power loss mid-write leaves the old file intact instead of a
-// truncated one. Matters most for Enhance, which has no backup to fall back on.
+// Same-directory temp file, fsync, then rename: the rename is atomic on APFS and
+// NTFS, and the fsync is what makes the claim hold through a power loss rather
+// than only a process crash — without it the directory entry can land before the
+// data blocks. Matters most for Enhance, which has no backup to fall back on.
+//
+// The temp file is opened 'wx' and named unpredictably: `wx` fails on an existing
+// entry, symlink included. Plain writeFileSync follows symlinks, so a pre-planted
+// `<transcript>.tmp -> /somewhere/else` would have turned this into a write
+// outside the managed folders — the very redirect canWritePath refuses, which
+// never saw the temp path. The mode is inherited so a 0600 transcript does not
+// come back world-readable.
 function writeFileAtomic(target, content) {
-    const tmp = `${target}.enhance.tmp`;
-    fs.writeFileSync(tmp, content, 'utf-8');
+    const tmp = `${target}.${process.pid}.${Date.now()}.tmp`;
+    let mode = 0o600;
+    try { mode = fs.statSync(target).mode & 0o777; } catch { /* new file: keep 0600 */ }
+    // The watcher keys suppression off a single filename, and the temp file's
+    // creation is an event of its own; stamp its name first, the target's after.
+    lastSelfWrite = { name: path.basename(tmp), at: Date.now() };
+    let fd;
+    try {
+        fd = fs.openSync(tmp, 'wx', mode);
+        fs.writeFileSync(fd, content, 'utf-8');
+        fs.fsyncSync(fd);
+    } catch (err) {
+        if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* already gone */ } }
+        try { fs.unlinkSync(tmp); } catch { /* never created */ }
+        throw err;
+    }
+    fs.closeSync(fd);
     try {
         fs.renameSync(tmp, target);
     } catch (err) {
@@ -1985,6 +2008,15 @@ ipcMain.handle('transcripts:create', async (_e, payload) => {
 let enhanceInFlight = false;
 let enhanceCancelled = false;
 
+// Rejections before the first usable part: the same failure repeats on every
+// part, so there is nothing to learn from parts 4..500.
+const FAIL_FAST_PARTS = 3;
+
+// Enhance is deliberately not a quit-flush slot (see before-quit): it holds
+// nothing that must be saved — the file is written only at the end — so quitting
+// mid-run costs model time, not data. Cancelling just stops the next call.
+app.on('before-quit', () => { enhanceCancelled = true; });
+
 ipcMain.handle('transcripts:enhanceCancel', () => {
     // Only meaningful while a pass is running; the flag is cleared by the run
     // itself, so setting it on an idle app is harmless.
@@ -1995,6 +2027,11 @@ ipcMain.handle('transcripts:enhanceCancel', () => {
 ipcMain.handle('transcripts:enhance', async (event, filePath) => {
     if (typeof filePath !== 'string' || !isPathInside(filePath, TRANSCRIPTS_FOLDER)) {
         return { ok: false, error: 'Refusing to operate on a path outside the transcripts folder.' };
+    }
+    // Transcripts only: the folder also holds `.summary.md` files, and a
+    // compromised renderer should not be able to have the model rewrite one.
+    if (path.extname(filePath).toLowerCase() !== '.txt') {
+        return { ok: false, error: 'Enhance only works on a transcript (.txt) file.' };
     }
     if (!canReadPath(filePath) || !canWritePath(filePath)) {
         return { ok: false, error: 'File is not accessible.' };
@@ -2010,7 +2047,7 @@ ipcMain.handle('transcripts:enhance', async (event, filePath) => {
 
     const { header, body } = enhance.splitTranscript(original);
     const blocks = enhance.parseBlocks(body);
-    const targets = enhance.spokenTargets(blocks);
+    const targets = enhance.spokenTargets(blocks, NOTE_LABEL);
     if (!targets.length) {
         return {
             ok: false,
@@ -2024,20 +2061,32 @@ ipcMain.handle('transcripts:enhance', async (event, filePath) => {
     // only carries the terms that chunk plausibly contains.
     const glossaryEntries = glossary.parse(readConfig().glossary || '');
 
+    // A renderer that reloads or goes away can no longer show the result, and the
+    // run would otherwise hold the lock for hours and write the file under a
+    // window that knows nothing about it.
+    const stopOnGone = () => { enhanceCancelled = true; };
+    event.sender.once('destroyed', stopOnGone);
+    event.sender.on('did-start-navigation', stopOnGone);
+
     enhanceInFlight = true;
     enhanceCancelled = false;
     let skipped = 0;
+    let done = 0;
     try {
         for (let i = 0; i < chunks.length; i++) {
-            if (enhanceCancelled) return { ok: false, canceled: true };
+            if (enhanceCancelled) break;
             const chunk = chunks[i];
             if (!event.sender.isDestroyed()) {
                 event.sender.send('transcripts:enhanceProgress', {
-                    filePath, done: i, total: chunks.length,
+                    filePath, done: i, total: chunks.length, skipped,
                 });
             }
             const rendered = enhance.renderChunk(chunk);
-            const block = glossary.render(glossary.select(glossaryEntries, rendered));
+            // Matched against the spoken text only: matching the rendered chunk
+            // would also hit the marker lines, so a glossary entry that happens to
+            // be a participant's surname was selected in every single chunk.
+            const spoken = chunk.map((b) => b.text).join('\n');
+            const block = glossary.render(glossary.select(glossaryEntries, spoken));
             const instruction = block
                 ? `${enhance.ENHANCE_PROMPT}\n\n${block}`
                 : enhance.ENHANCE_PROMPT;
@@ -2053,15 +2102,26 @@ ipcMain.handle('transcripts:enhance', async (event, filePath) => {
                 // the time the user asks why nothing changed.
                 console.warn(`enhance: part ${i + 1}/${chunks.length} skipped — ${merged.reason}`);
                 skipped++;
+                // Fail fast. The usual cause is a context window smaller than a
+                // chunk, and that fails identically on every part — on a long
+                // transcript the user would otherwise wait hours to be told.
+                if (skipped === FAIL_FAST_PARTS && done === 0) {
+                    return {
+                        ok: false,
+                        error: `The model's reply was unusable for the first ${skipped} parts — nothing was written. `
+                            + 'A model with a larger context window usually fixes this.',
+                    };
+                }
                 continue;
             }
             merged.texts.forEach((text, j) => { blocks[chunk[j].index].text = text; });
+            done++;
         }
 
         // Every part rejected is a failure, not a clean transcript. Saying
-        // "nothing to fix" here would report a total model failure as success —
-        // the likely cause is a context window smaller than a chunk.
-        if (skipped === chunks.length) {
+        // "nothing to fix" here would report a total model failure as success.
+        if (!done) {
+            if (enhanceCancelled) return { ok: false, canceled: true, applied: 0 };
             return {
                 ok: false,
                 error: `The model's reply was unusable for all ${chunks.length} part(s) — nothing was written. `
@@ -2069,14 +2129,12 @@ ipcMain.handle('transcripts:enhance', async (event, filePath) => {
             };
         }
 
-        const updated = enhance.assembleTranscript(header, blocks);
-        if (updated === original) {
-            return { ok: true, total: chunks.length, skipped, changed: false, content: original };
-        }
-
         // The model call took minutes; the transcript may have been renamed,
         // deleted or edited meanwhile. Writing our in-memory copy over someone
-        // else's version would silently lose their edits.
+        // else's version would silently lose their edits. Checked before the
+        // no-op comparison below, not after: on a run that changed nothing the
+        // renderer still gets `original` back, and a stale copy handed to the
+        // editor is a lost edit exactly like a stale write.
         let current;
         try {
             current = fs.readFileSync(filePath, 'utf-8');
@@ -2087,18 +2145,30 @@ ipcMain.handle('transcripts:enhance', async (event, filePath) => {
             return { ok: false, error: 'Transcript changed while it was being enhanced — nothing was written.' };
         }
 
+        const updated = enhance.matchLineEndings(enhance.assembleTranscript(header, blocks), original);
+        if (updated === original) {
+            return { ok: true, canceled: enhanceCancelled, total: chunks.length, skipped, changed: false };
+        }
+
         writeFileAtomic(filePath, updated);
         // Stamped after the write, like writeTranscriptFile: the watcher event
         // can only arrive once the data is out. Not routed through that helper —
         // it also moves currentFilePath/isDirty, and Enhance runs on transcripts
         // that are not open in the editor.
         lastSelfWrite = { name: path.basename(filePath), at: Date.now() };
-        return { ok: true, total: chunks.length, skipped, changed: true, content: updated };
+        // Cancelling keeps the parts already proofread: they each passed the same
+        // gate as any other part, and discarding an hour of model time because the
+        // user stopped the rest would be its own kind of loss.
+        return {
+            ok: true, canceled: enhanceCancelled, total: chunks.length, skipped, applied: done,
+            changed: true, content: updated,
+        };
     } catch (err) {
         return { ok: false, error: err.message };
     } finally {
         enhanceInFlight = false;
         enhanceCancelled = false;
+        if (!event.sender.isDestroyed()) event.sender.off('did-start-navigation', stopOnGone);
     }
 });
 
