@@ -136,6 +136,15 @@ the follow-up, export or share it.
 - Save named settings presets, and tune expected speaker count, merging of adjacent same-speaker
   turns, initial prompt, temperature and the Silero VAD filter.
 - Rename speakers, edit text inline, or regenerate the summary.
+- **Enhance** (meeting menu, right-click a meeting) runs the configured summarizer model over the
+  spoken text to fix recognition errors, punctuation and casing, and to restore domain terms from
+  **Settings → Domain glossary** (one term per line; known mishearings after a tab, e.g.
+  `PayCore⇥пейкор⇥пей кор`). Your own `Note:` lines are never sent; timestamps and speaker labels
+  are sent as anchors but are never rewritten. It **overwrites the transcript in place, with no
+  backup** — a part the model answers badly is left exactly as it was, if the whole reply is
+  unusable nothing is written at all, and while the note is open **Cancel changes** reverts the
+  whole run for the rest of the session. Same provider as summarization, so the same privacy note
+  applies.
 
 **Summarize, chat, share**
 
@@ -217,7 +226,7 @@ through the Live tab like any other call.
 
 ### Step 5. Configure the summarizer (optional)
 
-Transcription is always local. Summarization is the one place a cloud service can be involved — and only if you pick one. Four providers, in **Settings → Summarizer**:
+Transcription is always local. The summarizer model is the one place a cloud service can be involved — and only if you pick one. It serves Summarize, Ask AI, follow-up drafts and **Enhance**, so with a cloud provider the transcript text of those runs leaves the Mac. Four providers, in **Settings → Summarizer**:
 
 - **Claude Code** *(default)* — uses the `claude` CLI installed on your machine. See [Claude Code docs](https://docs.anthropic.com/en/docs/claude-code/overview). If `claude` is not in `PATH`, the app will tell you so on the first run.
 - **Ollama** — fully local models, nothing leaves the Mac. Requires a running `ollama serve` at `http://localhost:11434` and a pulled model (default `llama3.1`).

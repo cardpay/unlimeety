@@ -1479,13 +1479,16 @@ function openMeetingMenu(x, y, m) {
 
   // Clamp so the popover stays on-screen.
   const W = 220;
-  const H = 240;
+  const H = 280;
   const left = Math.max(8, Math.min(x, window.innerWidth - W - 8));
   const top = Math.max(8, Math.min(y, window.innerHeight - H - 8));
 
   const summarizeLabel = m.hasSummary ? "Re-summarize" : "Summarize";
   const audioDisabled = !m.hasAudio;
   const summaryDisabled = !m.hasSummary;
+  // Every one of these changes the file or its name under a run that reads it
+  // from disk, and the run would be thrown away at the end.
+  const enhancing = runningEnhance?.filePath === m.id;
 
   const root = document.createElement("div");
   root.id = "meeting-menu-root";
@@ -1496,24 +1499,28 @@ function openMeetingMenu(x, y, m) {
         <span class="meeting-menu-icon" style="color:var(--accent-lime)">${iconSvg("sparkle", { size: 13 })}</span>
         <span>${escapeHtml(summarizeLabel)}</span>
       </button>
-      <button class="meeting-menu-item" data-action="rename" type="button" role="menuitem">
+      <button class="meeting-menu-item" data-action="enhance" type="button" role="menuitem" ${enhancing ? "disabled" : ""}>
+        <span class="meeting-menu-icon">${iconSvg("text", { size: 13 })}</span>
+        <span>Enhance</span>
+      </button>
+      <button class="meeting-menu-item" data-action="rename" type="button" role="menuitem" ${enhancing ? "disabled" : ""}>
         <span class="meeting-menu-icon">${iconSvg("pencil", { size: 13 })}</span>
         <span>Rename…</span>
       </button>
-      <button class="meeting-menu-item" data-action="retranscribe" type="button" role="menuitem" ${audioDisabled ? "disabled" : ""}>
+      <button class="meeting-menu-item" data-action="retranscribe" type="button" role="menuitem" ${audioDisabled || enhancing ? "disabled" : ""}>
         <span class="meeting-menu-icon">${iconSvg("mic", { size: 13 })}</span>
         <span>Re-transcribe…</span>
       </button>
       <div class="meeting-menu-divider"></div>
-      <button class="meeting-menu-item danger" data-action="delete-audio" type="button" role="menuitem" ${audioDisabled ? "disabled" : ""}>
+      <button class="meeting-menu-item danger" data-action="delete-audio" type="button" role="menuitem" ${audioDisabled || enhancing ? "disabled" : ""}>
         <span class="meeting-menu-icon">${iconSvg("trash", { size: 13 })}</span>
         <span>Delete audio</span>
       </button>
-      <button class="meeting-menu-item danger" data-action="delete-transcript" type="button" role="menuitem">
+      <button class="meeting-menu-item danger" data-action="delete-transcript" type="button" role="menuitem" ${enhancing ? "disabled" : ""}>
         <span class="meeting-menu-icon">${iconSvg("trash", { size: 13 })}</span>
         <span>Delete transcript</span>
       </button>
-      <button class="meeting-menu-item danger" data-action="delete-summary" type="button" role="menuitem" ${summaryDisabled ? "disabled" : ""}>
+      <button class="meeting-menu-item danger" data-action="delete-summary" type="button" role="menuitem" ${summaryDisabled || enhancing ? "disabled" : ""}>
         <span class="meeting-menu-icon">${iconSvg("trash", { size: 13 })}</span>
         <span>Delete summary</span>
       </button>
@@ -1530,6 +1537,8 @@ function openMeetingMenu(x, y, m) {
       closeMeetingMenu();
       if (action === "summarize") {
         openSummarizeModal(m.id, m.title);
+      } else if (action === "enhance") {
+        await runEnhance(m);
       } else if (action === "rename") {
         const card = libraryList.querySelector(`[data-meeting-id="${CSS.escape(m.id)}"]`);
         const newTitle = await openRenamePopup(m.title, card?.getBoundingClientRect());
@@ -3365,6 +3374,136 @@ bgCloseBtn.addEventListener("click", () => {
   hideBgToolbar();
 });
 
+// ─── Enhance (LLM proofreading pass over the transcript) ─────────────────────
+// Overwrites the transcript in place: no diff to confirm, no second copy. The
+// safety net is in main — every turn keeps its original marker, and a chunk the
+// model mangles is left exactly as it was.
+let runningEnhance = null;
+
+api.onEnhanceProgress((p) => {
+  if (!runningEnhance || runningEnhance.filePath !== p?.filePath) return;
+  Object.assign(runningEnhance, { done: p.done, total: p.total, skipped: p.skipped });
+  showEnhanceProgress();
+});
+
+async function runEnhance(m) {
+  if (runningEnhance) {
+    showEnhanceProgress();
+    return;
+  }
+  // The background toolbar and its one button are shared with Summarize. Rather
+  // than arbitrate two jobs over one slot, wait: a summary takes one call, this
+  // takes hundreds.
+  if (runningSummarize) {
+    showBgToolbar("running", "Summarizing…", "Enhance can start once the summary is done");
+    return;
+  }
+  // flushBeforeReplace, not saveFile: a keystroke landing during the save leaves
+  // a remainder that saveFile only schedules, and that autosave would then change
+  // the file a second into the run and cost the whole pass.
+  if (state.filePath === m.id && !(await flushBeforeReplace())) return;
+
+  runningEnhance = { filePath: m.id, title: m.title, done: 0, total: 0 };
+  // Read-only for the duration. Otherwise a keystroke at the wrong moment either
+  // kills the run (the file no longer matches what was read) or, worse, survives
+  // as a dirty buffer whose autosave writes the pre-enhance text back over the
+  // finished result — with no backup, that is the enhancement gone.
+  const wasOpen = state.filePath === m.id;
+  if (wasOpen) editor.readOnly = true;
+  showEnhanceProgress();
+
+  let result;
+  try {
+    result = await api.enhanceTranscript(m.id);
+  } catch (err) {
+    result = { ok: false, error: err?.message || String(err) };
+  }
+  runningEnhance = null;
+  if (wasOpen) editor.readOnly = false;
+  clearEnhanceButton();
+
+  if (!result?.ok) {
+    // Same special case Summarize makes: with the default provider the CLI is
+    // simply missing, and "Enhance failed" says nothing about what to do.
+    if (result?.notInstalled) {
+      showBgToolbar("error", "Claude Code not found", "Install it, or pick another provider in Settings");
+      return;
+    }
+    if (result?.canceled) {
+      showBgToolbar("done", "Enhance stopped", `${m.title} — nothing was written`);
+      return;
+    }
+    showBgToolbar("error", "Enhance failed", result?.error || m.title);
+    return;
+  }
+
+  // Load the new text straight into the editor rather than reopening the file:
+  // the reopen path flushes the editor first, and a keystroke landing during the
+  // IPC round-trip would put the pre-enhance buffer back on disk.
+  const onScreen = state.filePath === m.id;
+  const reloaded = onScreen && !state.isDirty && typeof result.content === "string";
+  if (reloaded) {
+    // Keep the baseline pointing at the pre-Enhance text: "Cancel changes" is the
+    // only undo this feature has, and loadContent would move it to the new text.
+    const baseline = state.baselineContent;
+    loadContent(m.id, result.content);
+    state.baselineContent = baseline;
+    updateCancelBtn();
+  }
+
+  const label = result.canceled
+    ? `Enhance stopped — ${result.applied} of ${result.total} parts applied`
+    : result.skipped
+      ? `Enhanced — ${result.skipped} of ${result.total} parts left as-is`
+      : !result.changed
+        ? "Nothing to fix"
+        : "Transcript enhanced";
+  const subtitle = onScreen && !reloaded
+    ? `${m.title} — reopen the note to see it`
+    : m.title;
+  showBgToolbar("done", label, subtitle);
+  if (!reloaded) {
+    bgViewBtn.classList.remove("hidden");
+    bgViewBtn.textContent = "Open";
+    bgViewBtn.onclick = () => {
+      hideBgToolbar();
+      api.openFromLibrary(m.id);
+    };
+  }
+}
+
+// Redrawn from `runningEnhance` rather than set once, so a Summarize toolbar or a
+// closed toolbar in between cannot leave the run without its Stop button.
+function showEnhanceProgress() {
+  const job = runningEnhance;
+  if (!job) return;
+  const part = job.total ? ` — part ${job.done + 1} of ${job.total}` : "";
+  showBgToolbar("running", job.stopping ? "Stopping after this part…" : "Enhancing transcript…",
+    `${job.title}${part}${job.skipped ? ` (${job.skipped} left as-is)` : ""}`);
+  if (job.stopping) {
+    bgViewBtn.classList.add("hidden");
+    return;
+  }
+  // Stop takes effect between parts, not mid-call: with a slow local model that
+  // wait is a minute, so the label changes as soon as it is pressed.
+  bgViewBtn.classList.remove("hidden");
+  bgViewBtn.textContent = "Stop";
+  bgViewBtn.onclick = () => {
+    job.stopping = true;
+    api.cancelEnhance();
+    showEnhanceProgress();
+  };
+}
+
+function clearEnhanceButton() {
+  // Only if it is still ours: a Summarize that finished during the run owns the
+  // button now.
+  if (bgViewBtn.textContent === "Stop") {
+    bgViewBtn.classList.add("hidden");
+    bgViewBtn.onclick = null;
+  }
+}
+
 async function runSummarize() {
   const filePath = modalCurrentFilePath;
   const instruction = modalPromptInput.value.trim();
@@ -3750,6 +3889,7 @@ const settingsOlModel = document.getElementById("settings-ol-model");
 const settingsOaiUrl = document.getElementById("settings-oai-url");
 const settingsOaiKey = document.getElementById("settings-oai-key");
 const settingsOaiModel = document.getElementById("settings-oai-model");
+const settingsGlossary = document.getElementById("settings-glossary");
 const settingsPresetBtns = document.querySelectorAll(".settings-preset");
 const settingsProviderRadios = document.querySelectorAll(
   'input[name="settings-provider"]',
@@ -3881,6 +4021,7 @@ async function openSettingsModal() {
   settingsOaiModel.value = cfg?.openaiCompatible?.model || "";
   const autoStopEl = document.getElementById("settings-autostop");
   if (autoStopEl && api.getAutoStop) autoStopEl.checked = await api.getAutoStop();
+  settingsGlossary.value = (await api.getGlossary?.()) || "";
   settingsError.classList.add("hidden");
   settingsError.textContent = "";
   updateSettingsSections();
@@ -3920,6 +4061,16 @@ async function saveSettings() {
     }
   }
 
+  // Before the first write: the glossary is capped in main, and failing after
+  // the provider config was already saved leaves the modal open on a half-saved
+  // settings screen.
+  const savedGlossary = await api.setGlossary(settingsGlossary.value);
+  if (!savedGlossary?.ok) {
+    settingsError.textContent = savedGlossary?.error || "Could not save the glossary.";
+    settingsError.classList.remove("hidden");
+    return;
+  }
+
   const payload = {
     provider,
     openrouter: {
@@ -3955,6 +4106,17 @@ async function saveSettings() {
 
   closeSettingsModal();
 }
+
+// The documented format is tab-separated, and Tab in a textarea moves focus —
+// so without this the format is reachable only by pasting. Same insert-by-hand
+// shape as the transcript editor's Tab handler.
+settingsGlossary.addEventListener("keydown", (e) => {
+  if (e.key !== "Tab" || e.shiftKey) return;
+  e.preventDefault();
+  const { selectionStart: start, selectionEnd: end, value } = settingsGlossary;
+  settingsGlossary.value = value.slice(0, start) + "\t" + value.slice(end);
+  settingsGlossary.selectionStart = settingsGlossary.selectionEnd = start + 1;
+});
 
 document.getElementById("btn-settings").addEventListener("click", openSettingsModal);
 document.getElementById("settings-close").addEventListener("click", closeSettingsModal);

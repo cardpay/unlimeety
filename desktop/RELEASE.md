@@ -68,11 +68,13 @@ DMGs are published through stable GitHub Release URLs on [github.com/cardpay/unl
 
 ### Step 1. Bump version
 
-In `desktop/package.json` change `"version"` to the new value, e.g. `1.0.1`. Commit:
+In `desktop/package.json` change `"version"` to the new value, e.g. `1.0.1`. `desktop/package-lock.json` carries the same version in two places — `npm version` keeps them in step, editing by hand does not:
 
 ```bash
-cd unlimeety
-git add desktop/package.json
+cd unlimeety/desktop
+npm version 1.0.1 --no-git-tag-version    # updates package.json + package-lock.json
+cd ..
+git add desktop/package.json desktop/package-lock.json
 git commit -m "desktop: bump version to 1.0.1"
 git push origin main
 ```
