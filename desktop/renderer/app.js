@@ -1486,7 +1486,6 @@ function openMeetingMenu(x, y, m) {
   const summarizeLabel = m.hasSummary ? "Re-summarize" : "Summarize";
   const audioDisabled = !m.hasAudio;
   const summaryDisabled = !m.hasSummary;
-  const transcriptDisabled = !m.hasTranscript;
 
   const root = document.createElement("div");
   root.id = "meeting-menu-root";
@@ -1497,7 +1496,7 @@ function openMeetingMenu(x, y, m) {
         <span class="meeting-menu-icon" style="color:var(--accent-lime)">${iconSvg("sparkle", { size: 13 })}</span>
         <span>${escapeHtml(summarizeLabel)}</span>
       </button>
-      <button class="meeting-menu-item" data-action="enhance" type="button" role="menuitem" ${transcriptDisabled ? "disabled" : ""}>
+      <button class="meeting-menu-item" data-action="enhance" type="button" role="menuitem">
         <span class="meeting-menu-icon">${iconSvg("text", { size: 13 })}</span>
         <span>Enhance</span>
       </button>
@@ -3395,7 +3394,17 @@ async function runEnhance(m) {
 
   runningEnhance = { filePath: m.id, title: m.title };
   showBgToolbar("running", "Enhancing transcript…", m.title);
-  bgViewBtn.classList.add("hidden");
+  // A long transcript is many provider calls, each with a multi-minute timeout,
+  // and they hold the single-run lock — so the button while running is Stop.
+  // It stops before the next part rather than aborting the call in flight, and
+  // the label says so: with a slow local model that wait is a minute.
+  bgViewBtn.classList.remove("hidden");
+  bgViewBtn.textContent = "Stop";
+  bgViewBtn.onclick = () => {
+    api.cancelEnhance();
+    bgViewBtn.classList.add("hidden");
+    showBgToolbar("running", "Stopping after this part…", m.title);
+  };
 
   let result;
   try {
@@ -3404,28 +3413,36 @@ async function runEnhance(m) {
     result = { ok: false, error: err?.message || String(err) };
   }
   runningEnhance = null;
+  bgViewBtn.classList.add("hidden");
+  bgViewBtn.onclick = null;
 
+  if (result?.canceled) {
+    showBgToolbar("done", "Enhance stopped", `${m.title} — nothing was written`);
+    return;
+  }
   if (!result?.ok) {
     showBgToolbar("error", "Enhance failed", result?.error || m.title);
     return;
   }
 
-  // Re-read the note if it is the one on screen. Skipped while it is dirty:
-  // reopening flushes the editor first, and that write would land on top of the
-  // text this pass just produced.
-  const reloadable = state.filePath === m.id && !state.isDirty;
-  if (reloadable) await api.openFromLibrary(m.id);
+  // Load the new text straight into the editor rather than reopening the file:
+  // the reopen path flushes the editor first, and a keystroke landing during the
+  // IPC round-trip would put the pre-enhance buffer back on disk. Skipped while
+  // the note is dirty — those edits are the user's, and they win.
+  const onScreen = state.filePath === m.id;
+  const reloaded = onScreen && !state.isDirty && typeof result.content === "string";
+  if (reloaded) loadContent(m.id, result.content);
 
   const label = !result.changed
     ? "Nothing to fix"
     : result.skipped
       ? `Enhanced — ${result.skipped} of ${result.total} parts left as-is`
       : "Transcript enhanced";
-  const subtitle = state.filePath === m.id && !reloadable
+  const subtitle = onScreen && !reloaded
     ? `${m.title} — reopen the note to see it`
     : m.title;
   showBgToolbar("done", label, subtitle);
-  if (!reloadable) {
+  if (!reloaded) {
     bgViewBtn.classList.remove("hidden");
     bgViewBtn.textContent = "Open";
     bgViewBtn.onclick = () => {

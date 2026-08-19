@@ -10,7 +10,8 @@ const {
     renderChunk,
     mergeEnhanced,
     assembleTranscript,
-    stripFence,
+    spokenTargets,
+    MARKER_RE,
     ENHANCE_PROMPT,
 } = require('../transcript-enhance');
 
@@ -107,8 +108,9 @@ const TRANSCRIPT = [
 
 // A block larger than the whole budget goes on its own rather than being cut.
 {
-    const long = { marker: '[00:00] Alpha:', text: 'я'.repeat(500), gap: '\n' };
-    const short = { marker: '[09:00] Beta:', text: 'ок', gap: '\n' };
+    const [long, short] = parseBlocks(
+        `[00:00] Alpha:\n${'я'.repeat(500)}\n\n[09:00] Beta:\nок\n`,
+    );
     const chunks = chunkBlocks([long, short], 100);
     assert.strictEqual(chunks.length, 2);
     assert.strictEqual(chunks[0].length, 1, 'the oversized block is alone');
@@ -127,14 +129,15 @@ const TRANSCRIPT = [
     assert.strictEqual(echo.ok, true);
     assert.deepStrictEqual(echo.texts, [chunk[0].text, chunk[1].text]);
 
-    // A corrected reply is taken text-only.
+    // A corrected reply is taken text-only, and a preamble before the first
+    // marker is ignored rather than rejected — models add one constantly.
     const fixed = mergeEnhanced(chunk, [
         'Вот исправленный текст:',
         '',
         '[00:00] Alpha:',
         'Привет, начнём с эквайринга.',
         '',
-        '[99:99] СовсемДругой:',
+        '[00:12] Beta:',
         'Да, у меня две строки',
         'и вот вторая.',
     ].join('\n'));
@@ -142,32 +145,105 @@ const TRANSCRIPT = [
     assert.deepStrictEqual(fixed.texts, [
         'Привет, начнём с эквайринга.',
         'Да, у меня две строки\nи вот вторая.',
-    ], 'only the text is taken — a rewritten marker cannot leak in');
+    ]);
+
+    // A wrapping code fence is unwrapped (shared with the frontmatter gate).
+    const fenced = mergeEnhanced(chunk, '```\n' + rendered + '\n```');
+    assert.strictEqual(fenced.ok, true, 'a fenced reply is still usable');
 }
 
-// Fail closed: anything that does not line up block for block is rejected.
+// Fail closed. Every one of these is something a model actually does, and the
+// overwrite has no backup, so each has to be caught here or not at all.
 {
     const blocks = parseBlocks(splitTranscript(TRANSCRIPT).body);
     const chunk = [blocks[0], blocks[1]];
-    assert.strictEqual(mergeEnhanced(chunk, '[00:00] Alpha:\nОдин блок вместо двух.').ok, false, 'too few blocks');
-    assert.strictEqual(
-        mergeEnhanced(chunk, `${renderChunk(chunk)}\n\n[01:00] Alpha:\nЛишний блок.`).ok,
-        false,
-        'too many blocks',
-    );
-    assert.strictEqual(mergeEnhanced(chunk, 'I cannot help with that.').ok, false, 'no blocks at all');
-    assert.strictEqual(mergeEnhanced(chunk, '[00:00] Alpha:\n\n[00:12] Beta:\nтекст').ok, false, 'an emptied turn');
+    const rendered = renderChunk(chunk);
+    const rejected = (reply, why) => assert.strictEqual(mergeEnhanced(chunk, reply).ok, false, why);
+
+    rejected('[00:00] Alpha:\nОдин блок вместо двух.', 'too few blocks');
+    rejected(`${rendered}\n\n[01:00] Alpha:\nЛишний блок.`, 'too many blocks');
+    rejected('I cannot help with that.', 'no blocks at all');
+    rejected('[00:00] Alpha:\n\n[00:12] Beta:\nтекст', 'an emptied turn');
+
+    // Trailing chatter welded onto the last turn.
+    rejected(`${rendered}\n\nHope this helps! Let me know if you want a summary of the meeting.`,
+        'a closing pleasantry appended to the last turn');
+
+    // Turns returned in the other order. Markers are reused positionally, so
+    // without the marker check this would file Beta's words under Alpha's.
+    // (A model that keeps both markers in place and merely swaps the words under
+    // them is not detectable here — nothing in the reply says it happened.)
+    rejected(`${blocks[1].marker}\n${blocks[1].text}\n\n${blocks[0].marker}\n${blocks[0].text}`,
+        'reordered turns');
+    rejected(`[00:00] Alpha:\n${blocks[0].text}\n\n[99:99] СовсемДругой:\n${blocks[1].text}`,
+        'a rewritten marker');
+
+    // What a small model does when the chunk overflows its context.
+    rejected('[00:00] Alpha:\nОк.\n\n[00:12] Beta:\nОк.', 'turns collapsed to a stub');
+    // A translation is the same length as the original, so only the alphabet
+    // gives it away.
+    rejected('[00:00] Alpha:\nHi, let\'s start with acquiring.\n\n[00:12] Beta:\nYes, I have two lines and here is the second.',
+        'a translated chunk');
 }
 
-// ─── stripFence ───────────────────────────────────────────────────────────────
+// Length bounds leave normal proofreading alone: punctuation, casing and a
+// restored term all fit, and a short turn may grow proportionally more.
 {
-    assert.strictEqual(stripFence('```\n[00:00] A:\nтекст\n```'), '[00:00] A:\nтекст', 'bare fence');
-    assert.strictEqual(stripFence('```text\n[00:00] A:\nтекст\n```\n'), '[00:00] A:\nтекст', 'tagged fence');
-    assert.strictEqual(stripFence('[00:00] A:\nтекст'), '[00:00] A:\nтекст', 'unfenced text is untouched');
-    assert.strictEqual(
-        stripFence('[00:00] A:\nсмотри ```code``` внутри'),
-        '[00:00] A:\nсмотри ```code``` внутри',
-        'an inner fence is not a wrapper',
+    const chunk = parseBlocks('[00:00] Alpha:\nв пейкоре сломался эквайрин надо чинить\n\n[00:10] Beta:\nага\n');
+    const ok = mergeEnhanced(chunk, '[00:00] Alpha:\nВ PayCore сломался эквайринг, надо чинить.\n\n[00:10] Beta:\nАга.');
+    assert.strictEqual(ok.ok, true, ok.reason || '');
+}
+
+// The alphabet check runs one way only: a Latin turn corrected into Cyrillic is
+// what proofreading a Russian transcript looks like ("ok" → "Ок.").
+{
+    const chunk = parseBlocks('[00:00] Alpha:\nok\n\n[00:10] Beta:\npipeline упал\n');
+    const ok = mergeEnhanced(chunk, '[00:00] Alpha:\nОк.\n\n[00:10] Beta:\nPipeline упал.');
+    assert.strictEqual(ok.ok, true, ok.reason || '');
+}
+
+// ─── CRLF ─────────────────────────────────────────────────────────────────────
+// A transcript hand-edited on Windows must not read as one long header — that
+// would hand the marker lines to the model as ordinary prose.
+{
+    const crlf = TRANSCRIPT.replace(/\n/g, '\r\n');
+    const { header, body } = splitTranscript(crlf);
+    const blocks = parseBlocks(body);
+    assert.strictEqual(blocks.length, 4, 'CRLF markers are still markers');
+    assert.deepStrictEqual(blocks.map(isNoteBlock), [false, false, true, false], 'and notes are still notes');
+    assert.strictEqual(assembleTranscript(header, blocks), crlf, 'CRLF survives the round trip');
+    assert.ok(MARKER_RE.test('[00:00] Alpha:\r'), 'the marker pattern tolerates the carriage return');
+}
+
+// ─── spokenTargets ────────────────────────────────────────────────────────────
+{
+    const blocks = parseBlocks(splitTranscript(TRANSCRIPT).body);
+    assert.deepStrictEqual(
+        spokenTargets(blocks).map((b) => b.index),
+        [0, 1, 3],
+        'notes are excluded and every target carries its index',
+    );
+}
+
+// An empty turn is skipped: there is nothing to proofread, and a model asked to
+// return something for it invents a line.
+{
+    const blocks = parseBlocks('[00:00] Alpha:\nПривет.\n\n[00:12] Beta:\n\n');
+    assert.strictEqual(blocks.length, 2);
+    assert.deepStrictEqual(spokenTargets(blocks).map((b) => b.index), [0]);
+}
+
+// A marker that is the file's last line with nothing after it: if such a turn
+// ever gained text, fusing it onto the marker line would destroy the marker.
+{
+    const tail = 'Meeting: x\n\n[00:00] Alpha:\nПривет.\n\n[00:12] Beta:';
+    const { header, body } = splitTranscript(tail);
+    const blocks = parseBlocks(body);
+    assert.strictEqual(assembleTranscript(header, blocks), tail, 'lossless as it stands');
+    blocks[1].text = 'Да, ок.';
+    assert.ok(
+        MARKER_RE.test(assembleTranscript(header, blocks).split('\n').at(-2)),
+        'the marker keeps its own line once the turn has text',
     );
 }
 

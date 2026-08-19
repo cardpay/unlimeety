@@ -64,6 +64,7 @@ contextBridge.exposeInMainWorld('transcriber', {
     renameTranscript: (filePath, newTitle) => ipcRenderer.invoke('transcripts:rename', filePath, newTitle),
     getAudioPath: (filePath) => ipcRenderer.invoke('transcripts:getAudioPath', filePath),
     enhanceTranscript: (filePath) => ipcRenderer.invoke('transcripts:enhance', filePath),
+    cancelEnhance: () => ipcRenderer.invoke('transcripts:enhanceCancel'),
     onEnhanceProgress: (cb) => ipcRenderer.on('transcripts:enhanceProgress', (_e, p) => cb(p)),
     onTranscriptsChanged: (cb) => ipcRenderer.on('transcripts:changed', () => cb()),
 
