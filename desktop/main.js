@@ -4,6 +4,8 @@ const fs = require('fs');
 const os = require('os');
 const { execFile, spawn } = require('child_process');
 const { normalizeSummary, hasValidFrontmatter } = require('./summary-frontmatter');
+const glossary = require('./glossary');
+const enhance = require('./transcript-enhance');
 
 const TRANSCRIPTS_FOLDER = path.join(os.homedir(), 'Downloads', 'Meet_Transcripts');
 const RECORDINGS_FOLDER = path.join(os.homedir(), 'Downloads', 'Meet_Recordings');
@@ -441,6 +443,43 @@ ipcMain.handle('file:open', async () => {
     return { filePath, content };
 });
 
+// Same-directory temp file, fsync, then rename: the rename is atomic on APFS and
+// NTFS, and the fsync is what makes the claim hold through a power loss rather
+// than only a process crash — without it the directory entry can land before the
+// data blocks. Matters most for Enhance, which has no backup to fall back on.
+//
+// The temp file is opened 'wx' and named unpredictably: `wx` fails on an existing
+// entry, symlink included. Plain writeFileSync follows symlinks, so a pre-planted
+// `<transcript>.tmp -> /somewhere/else` would have turned this into a write
+// outside the managed folders — the very redirect canWritePath refuses, which
+// never saw the temp path. The mode is inherited so a 0600 transcript does not
+// come back world-readable.
+function writeFileAtomic(target, content) {
+    const tmp = `${target}.${process.pid}.${Date.now()}.tmp`;
+    let mode = 0o600;
+    try { mode = fs.statSync(target).mode & 0o777; } catch { /* new file: keep 0600 */ }
+    // The watcher keys suppression off a single filename, and the temp file's
+    // creation is an event of its own; stamp its name first, the target's after.
+    lastSelfWrite = { name: path.basename(tmp), at: Date.now() };
+    let fd;
+    try {
+        fd = fs.openSync(tmp, 'wx', mode);
+        fs.writeFileSync(fd, content, 'utf-8');
+        fs.fsyncSync(fd);
+    } catch (err) {
+        if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* already gone */ } }
+        try { fs.unlinkSync(tmp); } catch { /* never created */ }
+        throw err;
+    }
+    fs.closeSync(fd);
+    try {
+        fs.renameSync(tmp, target);
+    } catch (err) {
+        try { fs.unlinkSync(tmp); } catch { /* leave no litter behind */ }
+        throw err;
+    }
+}
+
 function writeTranscriptFile(filePath, content) {
     const target = filePath || currentFilePath;
     if (!target) return { ok: false, error: 'No file path' };
@@ -801,6 +840,27 @@ ipcMain.handle('prompts:save', (_e, prompt) => {
     const idx = cfg.customPrompts.findIndex(p => p.id === clean.id);
     if (idx >= 0) cfg.customPrompts[idx] = clean;
     else cfg.customPrompts.push(clean);
+    writeConfig(cfg);
+    return { ok: true };
+});
+
+// Domain glossary for the Enhance pass — plain text, one entry per line.
+// Deliberately not merged into the summarizer payload: it is not a provider
+// setting, and it outlives any switch between providers.
+// The prompt block is rebuilt for every chunk, on the main process, so this cap
+// is a latency budget as much as a size limit: matching ~700 entries against one
+// chunk costs a few hundred ms, and every one of those blocks IPC.
+const MAX_GLOSSARY_CHARS = 16 * 1024;
+
+ipcMain.handle('settings:getGlossary', () => readConfig().glossary || '');
+
+ipcMain.handle('settings:setGlossary', (_e, text) => {
+    if (typeof text !== 'string') return { ok: false, error: 'invalid glossary payload' };
+    if (text.length > MAX_GLOSSARY_CHARS) {
+        return { ok: false, error: `Glossary is too long (max ${MAX_GLOSSARY_CHARS / 1024} KB).` };
+    }
+    const cfg = readConfig();
+    cfg.glossary = text;
     writeConfig(cfg);
     return { ok: true };
 });
@@ -1246,6 +1306,18 @@ async function runOllama(content, promptInstruction, config) {
     }
 }
 
+// One dispatch for every caller that sends text through the configured model —
+// summarize:run and transcripts:enhance. Returns { ok, summary } / { ok, error }.
+async function runSummarizerProvider(content, promptInstruction, cfg) {
+    switch (cfg.provider) {
+        case 'openrouter':        return runOpenRouter(content, promptInstruction, cfg.openrouter);
+        case 'ollama':            return runOllama(content, promptInstruction, cfg.ollama);
+        case 'openai-compatible': return runOpenAICompat(content, promptInstruction, cfg.openaiCompatible);
+        case 'claude-code':
+        default:                  return runClaudeCode(content, promptInstruction);
+    }
+}
+
 ipcMain.handle('summarize:run', async (_e, filePath, promptInstruction) => {
     if (!canReadPath(filePath)) return { ok: false, error: 'File is not accessible.' };
     let content;
@@ -1266,14 +1338,7 @@ ipcMain.handle('summarize:run', async (_e, filePath, promptInstruction) => {
     }
 
     const cfg = readSummarizerConfig();
-    let result;
-    switch (cfg.provider) {
-        case 'openrouter':        result = await runOpenRouter(content, promptInstruction, cfg.openrouter); break;
-        case 'ollama':            result = await runOllama(content, promptInstruction, cfg.ollama); break;
-        case 'openai-compatible': result = await runOpenAICompat(content, promptInstruction, cfg.openaiCompatible); break;
-        case 'claude-code':
-        default:                  result = await runClaudeCode(content, promptInstruction); break;
-    }
+    const result = await runSummarizerProvider(content, promptInstruction, cfg);
     if (!result?.ok) return result;
 
     // The frontmatter block is model output, delimiters and all — every provider
@@ -1933,6 +1998,177 @@ ipcMain.handle('transcripts:create', async (_e, payload) => {
         return { ok: true, filePath };
     } catch (err) {
         return { ok: false, error: err.message };
+    }
+});
+
+// ─── IPC: Enhance (LLM proofreading pass over the transcript) ─────────────────
+
+// One at a time, process-wide: two passes over the same transcript would each
+// hold a full copy in memory and the loser would write its stale one back.
+let enhanceInFlight = false;
+let enhanceCancelled = false;
+
+// Rejections before the first usable part: the same failure repeats on every
+// part, so there is nothing to learn from parts 4..500.
+const FAIL_FAST_PARTS = 3;
+
+// Enhance is deliberately not a quit-flush slot (see before-quit): it holds
+// nothing that must be saved — the file is written only at the end — so quitting
+// mid-run costs model time, not data. Cancelling just stops the next call.
+app.on('before-quit', () => { enhanceCancelled = true; });
+
+ipcMain.handle('transcripts:enhanceCancel', () => {
+    // Only meaningful while a pass is running; the flag is cleared by the run
+    // itself, so setting it on an idle app is harmless.
+    enhanceCancelled = enhanceInFlight;
+    return { ok: true };
+});
+
+ipcMain.handle('transcripts:enhance', async (event, filePath) => {
+    if (typeof filePath !== 'string' || !isPathInside(filePath, TRANSCRIPTS_FOLDER)) {
+        return { ok: false, error: 'Refusing to operate on a path outside the transcripts folder.' };
+    }
+    // Transcripts only: the folder also holds `.summary.md` files, and a
+    // compromised renderer should not be able to have the model rewrite one.
+    if (path.extname(filePath).toLowerCase() !== '.txt') {
+        return { ok: false, error: 'Enhance only works on a transcript (.txt) file.' };
+    }
+    if (!canReadPath(filePath) || !canWritePath(filePath)) {
+        return { ok: false, error: 'File is not accessible.' };
+    }
+    if (enhanceInFlight) return { ok: false, error: 'Another transcript is being enhanced.' };
+
+    let original;
+    try {
+        original = fs.readFileSync(filePath, 'utf-8');
+    } catch {
+        return { ok: false, error: 'Could not read transcript file.' };
+    }
+
+    const { header, body } = enhance.splitTranscript(original);
+    const blocks = enhance.parseBlocks(body);
+    const targets = enhance.spokenTargets(blocks, NOTE_LABEL);
+    if (!targets.length) {
+        return {
+            ok: false,
+            error: 'No spoken turns to enhance — each turn needs its "[mm:ss] Speaker:" line on a line of its own.',
+        };
+    }
+
+    const chunks = enhance.chunkBlocks(targets);
+    const cfg = readSummarizerConfig();
+    // Parsed once for the whole run; `select` still runs per chunk, so the block
+    // only carries the terms that chunk plausibly contains.
+    const glossaryEntries = glossary.parse(readConfig().glossary || '');
+
+    // A renderer that reloads or goes away can no longer show the result, and the
+    // run would otherwise hold the lock for hours and write the file under a
+    // window that knows nothing about it.
+    const stopOnGone = () => { enhanceCancelled = true; };
+    event.sender.once('destroyed', stopOnGone);
+    event.sender.on('did-start-navigation', stopOnGone);
+
+    enhanceInFlight = true;
+    enhanceCancelled = false;
+    let skipped = 0;
+    let done = 0;
+    try {
+        for (let i = 0; i < chunks.length; i++) {
+            if (enhanceCancelled) break;
+            const chunk = chunks[i];
+            if (!event.sender.isDestroyed()) {
+                event.sender.send('transcripts:enhanceProgress', {
+                    filePath, done: i, total: chunks.length, skipped,
+                });
+            }
+            const rendered = enhance.renderChunk(chunk);
+            // Matched against the spoken text only: matching the rendered chunk
+            // would also hit the marker lines, so a glossary entry that happens to
+            // be a participant's surname was selected in every single chunk.
+            const spoken = chunk.map((b) => b.text).join('\n');
+            const block = glossary.render(glossary.select(glossaryEntries, spoken));
+            const instruction = block
+                ? `${enhance.ENHANCE_PROMPT}\n\n${block}`
+                : enhance.ENHANCE_PROMPT;
+            const result = await runSummarizerProvider(rendered, instruction, cfg);
+            // A provider-level failure (no model, no network, no CLI) is the
+            // user's problem to fix, not something to paper over by writing a
+            // half-enhanced transcript — bail with the file untouched.
+            if (!result?.ok) return result;
+
+            const merged = enhance.mergeEnhanced(chunk, result.summary);
+            if (!merged.ok) {
+                // The only diagnosis there is: the reply itself is long gone by
+                // the time the user asks why nothing changed.
+                console.warn(`enhance: part ${i + 1}/${chunks.length} skipped — ${merged.reason}`);
+                skipped++;
+                // Fail fast. The usual cause is a context window smaller than a
+                // chunk, and that fails identically on every part — on a long
+                // transcript the user would otherwise wait hours to be told.
+                if (skipped === FAIL_FAST_PARTS && done === 0) {
+                    return {
+                        ok: false,
+                        error: `The model's reply was unusable for the first ${skipped} parts — nothing was written. `
+                            + 'A model with a larger context window usually fixes this.',
+                    };
+                }
+                continue;
+            }
+            merged.texts.forEach((text, j) => { blocks[chunk[j].index].text = text; });
+            done++;
+        }
+
+        // Every part rejected is a failure, not a clean transcript. Saying
+        // "nothing to fix" here would report a total model failure as success.
+        if (!done) {
+            if (enhanceCancelled) return { ok: false, canceled: true, applied: 0 };
+            return {
+                ok: false,
+                error: `The model's reply was unusable for all ${chunks.length} part(s) — nothing was written. `
+                    + 'A model with a larger context window usually fixes this.',
+            };
+        }
+
+        // The model call took minutes; the transcript may have been renamed,
+        // deleted or edited meanwhile. Writing our in-memory copy over someone
+        // else's version would silently lose their edits. Checked before the
+        // no-op comparison below, not after: on a run that changed nothing the
+        // renderer still gets `original` back, and a stale copy handed to the
+        // editor is a lost edit exactly like a stale write.
+        let current;
+        try {
+            current = fs.readFileSync(filePath, 'utf-8');
+        } catch {
+            return { ok: false, error: 'Transcript disappeared while it was being enhanced.' };
+        }
+        if (current !== original) {
+            return { ok: false, error: 'Transcript changed while it was being enhanced — nothing was written.' };
+        }
+
+        const updated = enhance.matchLineEndings(enhance.assembleTranscript(header, blocks), original);
+        if (updated === original) {
+            return { ok: true, canceled: enhanceCancelled, total: chunks.length, skipped, changed: false };
+        }
+
+        writeFileAtomic(filePath, updated);
+        // Stamped after the write, like writeTranscriptFile: the watcher event
+        // can only arrive once the data is out. Not routed through that helper —
+        // it also moves currentFilePath/isDirty, and Enhance runs on transcripts
+        // that are not open in the editor.
+        lastSelfWrite = { name: path.basename(filePath), at: Date.now() };
+        // Cancelling keeps the parts already proofread: they each passed the same
+        // gate as any other part, and discarding an hour of model time because the
+        // user stopped the rest would be its own kind of loss.
+        return {
+            ok: true, canceled: enhanceCancelled, total: chunks.length, skipped, applied: done,
+            changed: true, content: updated,
+        };
+    } catch (err) {
+        return { ok: false, error: err.message };
+    } finally {
+        enhanceInFlight = false;
+        enhanceCancelled = false;
+        if (!event.sender.isDestroyed()) event.sender.off('did-start-navigation', stopOnGone);
     }
 });
 

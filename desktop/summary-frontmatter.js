@@ -164,4 +164,4 @@ function normalizeSummary(text, { date }) {
     return { text: lines.join('\n'), repairs };
 }
 
-module.exports = { normalizeSummary, hasValidFrontmatter };
+module.exports = { normalizeSummary, hasValidFrontmatter, stripCodeFence };

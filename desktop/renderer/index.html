@@ -1181,6 +1181,13 @@
           <div id="settings-calendars-list"></div>
         </div>
 
+        <label class="modal-label" style="margin-top:18px" for="settings-glossary">Domain glossary</label>
+        <div class="settings-radio-sub" style="margin-bottom:8px">
+          Terms Enhance restores when speech recognition mangles them. One per line;
+          add known mishearings after a tab: <code>PayCore⇥пейкор⇥пей кор</code>.
+        </div>
+        <textarea id="settings-glossary" class="modal-textarea" rows="6" spellcheck="false" maxlength="16384" placeholder="PayCore&#9;пейкор&#10;эквайринг"></textarea>
+
         <label class="modal-label" style="margin-top:18px">Recording</label>
         <label class="settings-radio" style="cursor:pointer">
           <input type="checkbox" id="settings-autostop" />
