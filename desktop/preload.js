@@ -42,6 +42,8 @@ contextBridge.exposeInMainWorld('transcriber', {
     setSummarizer:    (cfg)  => ipcRenderer.invoke('settings:setSummarizer', cfg),
     getAutoStop:      ()     => ipcRenderer.invoke('settings:getAutoStop'),
     setAutoStop:      (on)   => ipcRenderer.invoke('settings:setAutoStop', on),
+    getGlossary:      ()     => ipcRenderer.invoke('settings:getGlossary'),
+    setGlossary:      (text) => ipcRenderer.invoke('settings:setGlossary', text),
 
     // ── Custom prompts ────────────────────────────────────────────────────────
     listPrompts:  ()       => ipcRenderer.invoke('prompts:list'),
@@ -61,6 +63,8 @@ contextBridge.exposeInMainWorld('transcriber', {
     createTranscript: (payload) => ipcRenderer.invoke('transcripts:create', payload),
     renameTranscript: (filePath, newTitle) => ipcRenderer.invoke('transcripts:rename', filePath, newTitle),
     getAudioPath: (filePath) => ipcRenderer.invoke('transcripts:getAudioPath', filePath),
+    enhanceTranscript: (filePath) => ipcRenderer.invoke('transcripts:enhance', filePath),
+    onEnhanceProgress: (cb) => ipcRenderer.on('transcripts:enhanceProgress', (_e, p) => cb(p)),
     onTranscriptsChanged: (cb) => ipcRenderer.on('transcripts:changed', () => cb()),
 
     // ── Follow-up draft ───────────────────────────────────────────────────────

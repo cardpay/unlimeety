@@ -4,6 +4,8 @@ const fs = require('fs');
 const os = require('os');
 const { execFile, spawn } = require('child_process');
 const { normalizeSummary, hasValidFrontmatter } = require('./summary-frontmatter');
+const glossary = require('./glossary');
+const enhance = require('./transcript-enhance');
 
 const TRANSCRIPTS_FOLDER = path.join(os.homedir(), 'Downloads', 'Meet_Transcripts');
 const RECORDINGS_FOLDER = path.join(os.homedir(), 'Downloads', 'Meet_Recordings');
@@ -805,6 +807,24 @@ ipcMain.handle('prompts:save', (_e, prompt) => {
     return { ok: true };
 });
 
+// Domain glossary for the Enhance pass — plain text, one entry per line.
+// Deliberately not merged into the summarizer payload: it is not a provider
+// setting, and it outlives any switch between providers.
+const MAX_GLOSSARY_CHARS = 64 * 1024;
+
+ipcMain.handle('settings:getGlossary', () => readConfig().glossary || '');
+
+ipcMain.handle('settings:setGlossary', (_e, text) => {
+    if (typeof text !== 'string') return { ok: false, error: 'invalid glossary payload' };
+    if (text.length > MAX_GLOSSARY_CHARS) {
+        return { ok: false, error: `Glossary is too long (max ${MAX_GLOSSARY_CHARS / 1024} KB).` };
+    }
+    const cfg = readConfig();
+    cfg.glossary = text;
+    writeConfig(cfg);
+    return { ok: true };
+});
+
 ipcMain.handle('prompts:delete', (_e, id) => {
     const cfg = readConfig();
     cfg.customPrompts = (cfg.customPrompts || []).filter(p => p.id !== id);
@@ -1246,6 +1266,18 @@ async function runOllama(content, promptInstruction, config) {
     }
 }
 
+// One dispatch for every caller that sends text through the configured model —
+// summarize:run and transcripts:enhance. Returns { ok, summary } / { ok, error }.
+async function runSummarizerProvider(content, promptInstruction, cfg) {
+    switch (cfg.provider) {
+        case 'openrouter':        return runOpenRouter(content, promptInstruction, cfg.openrouter);
+        case 'ollama':            return runOllama(content, promptInstruction, cfg.ollama);
+        case 'openai-compatible': return runOpenAICompat(content, promptInstruction, cfg.openaiCompatible);
+        case 'claude-code':
+        default:                  return runClaudeCode(content, promptInstruction);
+    }
+}
+
 ipcMain.handle('summarize:run', async (_e, filePath, promptInstruction) => {
     if (!canReadPath(filePath)) return { ok: false, error: 'File is not accessible.' };
     let content;
@@ -1266,14 +1298,7 @@ ipcMain.handle('summarize:run', async (_e, filePath, promptInstruction) => {
     }
 
     const cfg = readSummarizerConfig();
-    let result;
-    switch (cfg.provider) {
-        case 'openrouter':        result = await runOpenRouter(content, promptInstruction, cfg.openrouter); break;
-        case 'ollama':            result = await runOllama(content, promptInstruction, cfg.ollama); break;
-        case 'openai-compatible': result = await runOpenAICompat(content, promptInstruction, cfg.openaiCompatible); break;
-        case 'claude-code':
-        default:                  result = await runClaudeCode(content, promptInstruction); break;
-    }
+    const result = await runSummarizerProvider(content, promptInstruction, cfg);
     if (!result?.ok) return result;
 
     // The frontmatter block is model output, delimiters and all — every provider
@@ -1933,6 +1958,99 @@ ipcMain.handle('transcripts:create', async (_e, payload) => {
         return { ok: true, filePath };
     } catch (err) {
         return { ok: false, error: err.message };
+    }
+});
+
+// ─── IPC: Enhance (LLM proofreading pass over the transcript) ─────────────────
+
+// One at a time, process-wide: two passes over the same transcript would each
+// hold a full copy in memory and the loser would write its stale one back.
+let enhanceInFlight = false;
+
+ipcMain.handle('transcripts:enhance', async (event, filePath) => {
+    if (typeof filePath !== 'string' || !filePath.startsWith(TRANSCRIPTS_FOLDER)) {
+        return { ok: false, error: 'Refusing to operate on a path outside the transcripts folder.' };
+    }
+    if (!canReadPath(filePath) || !canWritePath(filePath)) {
+        return { ok: false, error: 'File is not accessible.' };
+    }
+    if (enhanceInFlight) return { ok: false, error: 'Another transcript is being enhanced.' };
+
+    let original;
+    try {
+        original = fs.readFileSync(filePath, 'utf-8');
+    } catch {
+        return { ok: false, error: 'Could not read transcript file.' };
+    }
+
+    const { header, body } = enhance.splitTranscript(original);
+    const blocks = enhance.parseBlocks(body);
+    // Notes are the user's own typing (NOTE_LABEL), not speech — nothing
+    // recognised them wrong, so they never reach the model.
+    const targets = blocks
+        .map((block, index) => ({ ...block, index }))
+        .filter((block) => !enhance.isNoteBlock(block));
+    if (!targets.length) {
+        return { ok: false, error: 'This transcript has no spoken turns to enhance.' };
+    }
+
+    const chunks = enhance.chunkBlocks(targets);
+    const cfg = readSummarizerConfig();
+    const glossaryText = readConfig().glossary || '';
+
+    enhanceInFlight = true;
+    let skipped = 0;
+    try {
+        for (let i = 0; i < chunks.length; i++) {
+            const chunk = chunks[i];
+            if (!event.sender.isDestroyed()) {
+                event.sender.send('transcripts:enhanceProgress', {
+                    filePath, done: i, total: chunks.length,
+                });
+            }
+            const rendered = enhance.renderChunk(chunk);
+            const block = glossary.blockFor(glossaryText, rendered);
+            const instruction = block
+                ? `${enhance.ENHANCE_PROMPT}\n\n${block}`
+                : enhance.ENHANCE_PROMPT;
+            const result = await runSummarizerProvider(rendered, instruction, cfg);
+            // A provider-level failure (no model, no network, no CLI) is the
+            // user's problem to fix, not something to paper over by writing a
+            // half-enhanced transcript — bail with the file untouched.
+            if (!result?.ok) return result;
+
+            const merged = enhance.mergeEnhanced(chunk, result.summary);
+            if (!merged.ok) { skipped++; continue; }   // chunk stays as it was
+            merged.texts.forEach((text, j) => { blocks[chunk[j].index].text = text; });
+        }
+
+        const updated = enhance.assembleTranscript(header, blocks);
+        if (updated === original) return { ok: true, total: chunks.length, skipped, changed: false };
+
+        // The model call took minutes; the transcript may have been renamed,
+        // deleted or edited meanwhile. Writing our in-memory copy over someone
+        // else's version would silently lose their edits.
+        let current;
+        try {
+            current = fs.readFileSync(filePath, 'utf-8');
+        } catch {
+            return { ok: false, error: 'Transcript disappeared while it was being enhanced.' };
+        }
+        if (current !== original) {
+            return { ok: false, error: 'Transcript changed while it was being enhanced — nothing was written.' };
+        }
+
+        fs.writeFileSync(filePath, updated, 'utf-8');
+        // Stamped after the write, like writeTranscriptFile: the watcher event
+        // can only arrive once the data is out. Not routed through that helper —
+        // it also moves currentFilePath/isDirty, and Enhance runs on transcripts
+        // that are not open in the editor.
+        lastSelfWrite = { name: path.basename(filePath), at: Date.now() };
+        return { ok: true, total: chunks.length, skipped, changed: true };
+    } catch (err) {
+        return { ok: false, error: err.message };
+    } finally {
+        enhanceInFlight = false;
     }
 });
 
