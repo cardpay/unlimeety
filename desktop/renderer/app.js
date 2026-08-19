@@ -1479,13 +1479,14 @@ function openMeetingMenu(x, y, m) {
 
   // Clamp so the popover stays on-screen.
   const W = 220;
-  const H = 240;
+  const H = 280;
   const left = Math.max(8, Math.min(x, window.innerWidth - W - 8));
   const top = Math.max(8, Math.min(y, window.innerHeight - H - 8));
 
   const summarizeLabel = m.hasSummary ? "Re-summarize" : "Summarize";
   const audioDisabled = !m.hasAudio;
   const summaryDisabled = !m.hasSummary;
+  const transcriptDisabled = !m.hasTranscript;
 
   const root = document.createElement("div");
   root.id = "meeting-menu-root";
@@ -1495,6 +1496,10 @@ function openMeetingMenu(x, y, m) {
       <button class="meeting-menu-item" data-action="summarize" type="button" role="menuitem">
         <span class="meeting-menu-icon" style="color:var(--accent-lime)">${iconSvg("sparkle", { size: 13 })}</span>
         <span>${escapeHtml(summarizeLabel)}</span>
+      </button>
+      <button class="meeting-menu-item" data-action="enhance" type="button" role="menuitem" ${transcriptDisabled ? "disabled" : ""}>
+        <span class="meeting-menu-icon">${iconSvg("text", { size: 13 })}</span>
+        <span>Enhance</span>
       </button>
       <button class="meeting-menu-item" data-action="rename" type="button" role="menuitem">
         <span class="meeting-menu-icon">${iconSvg("pencil", { size: 13 })}</span>
@@ -1530,6 +1535,8 @@ function openMeetingMenu(x, y, m) {
       closeMeetingMenu();
       if (action === "summarize") {
         openSummarizeModal(m.id, m.title);
+      } else if (action === "enhance") {
+        await runEnhance(m);
       } else if (action === "rename") {
         const card = libraryList.querySelector(`[data-meeting-id="${CSS.escape(m.id)}"]`);
         const newTitle = await openRenamePopup(m.title, card?.getBoundingClientRect());
@@ -3365,6 +3372,69 @@ bgCloseBtn.addEventListener("click", () => {
   hideBgToolbar();
 });
 
+// ─── Enhance (LLM proofreading pass over the transcript) ─────────────────────
+// Overwrites the transcript in place: no diff to confirm, no second copy. The
+// safety net is in main — every turn keeps its original marker, and a chunk the
+// model mangles is left exactly as it was.
+let runningEnhance = null;
+
+api.onEnhanceProgress((p) => {
+  if (!runningEnhance || runningEnhance.filePath !== p?.filePath) return;
+  showBgToolbar("running", "Enhancing transcript…", `${runningEnhance.title} — part ${p.done + 1} of ${p.total}`);
+});
+
+async function runEnhance(m) {
+  if (runningEnhance) {
+    showBgToolbar("running", "Enhancing transcript…", runningEnhance.title);
+    return;
+  }
+  // Unsaved edits first: the pass reads the file from disk, and main refuses to
+  // write if the file changed under it — an unflushed buffer would either lose
+  // the edits or waste the whole run.
+  if (state.filePath === m.id && state.isDirty && !(await saveFile())) return;
+
+  runningEnhance = { filePath: m.id, title: m.title };
+  showBgToolbar("running", "Enhancing transcript…", m.title);
+  bgViewBtn.classList.add("hidden");
+
+  let result;
+  try {
+    result = await api.enhanceTranscript(m.id);
+  } catch (err) {
+    result = { ok: false, error: err?.message || String(err) };
+  }
+  runningEnhance = null;
+
+  if (!result?.ok) {
+    showBgToolbar("error", "Enhance failed", result?.error || m.title);
+    return;
+  }
+
+  // Re-read the note if it is the one on screen. Skipped while it is dirty:
+  // reopening flushes the editor first, and that write would land on top of the
+  // text this pass just produced.
+  const reloadable = state.filePath === m.id && !state.isDirty;
+  if (reloadable) await api.openFromLibrary(m.id);
+
+  const label = !result.changed
+    ? "Nothing to fix"
+    : result.skipped
+      ? `Enhanced — ${result.skipped} of ${result.total} parts left as-is`
+      : "Transcript enhanced";
+  const subtitle = state.filePath === m.id && !reloadable
+    ? `${m.title} — reopen the note to see it`
+    : m.title;
+  showBgToolbar("done", label, subtitle);
+  if (!reloadable) {
+    bgViewBtn.classList.remove("hidden");
+    bgViewBtn.textContent = "Open";
+    bgViewBtn.onclick = () => {
+      hideBgToolbar();
+      api.openFromLibrary(m.id);
+    };
+  }
+}
+
 async function runSummarize() {
   const filePath = modalCurrentFilePath;
   const instruction = modalPromptInput.value.trim();
@@ -3750,6 +3820,7 @@ const settingsOlModel = document.getElementById("settings-ol-model");
 const settingsOaiUrl = document.getElementById("settings-oai-url");
 const settingsOaiKey = document.getElementById("settings-oai-key");
 const settingsOaiModel = document.getElementById("settings-oai-model");
+const settingsGlossary = document.getElementById("settings-glossary");
 const settingsPresetBtns = document.querySelectorAll(".settings-preset");
 const settingsProviderRadios = document.querySelectorAll(
   'input[name="settings-provider"]',
@@ -3881,6 +3952,7 @@ async function openSettingsModal() {
   settingsOaiModel.value = cfg?.openaiCompatible?.model || "";
   const autoStopEl = document.getElementById("settings-autostop");
   if (autoStopEl && api.getAutoStop) autoStopEl.checked = await api.getAutoStop();
+  settingsGlossary.value = await api.getGlossary();
   settingsError.classList.add("hidden");
   settingsError.textContent = "";
   updateSettingsSections();
@@ -3952,6 +4024,13 @@ async function saveSettings() {
 
   const autoStopEl = document.getElementById("settings-autostop");
   if (autoStopEl && api.setAutoStop) await api.setAutoStop(autoStopEl.checked);
+
+  const savedGlossary = await api.setGlossary(settingsGlossary.value);
+  if (!savedGlossary?.ok) {
+    settingsError.textContent = savedGlossary?.error || "Could not save the glossary.";
+    settingsError.classList.remove("hidden");
+    return;
+  }
 
   closeSettingsModal();
 }

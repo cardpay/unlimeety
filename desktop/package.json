@@ -25,6 +25,8 @@
             "main.js",
             "preload.js",
             "summary-frontmatter.js",
+            "glossary.js",
+            "transcript-enhance.js",
             "renderer/**",
             "build/**"
         ],
