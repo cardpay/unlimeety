@@ -15,12 +15,26 @@
 
 const { stripCodeFence } = require('./summary-frontmatter');
 
-// A marker line: `[` + timestamp + `] ` + speaker + `:`. The timestamp must
-// start with a digit and the line must end at the colon, so neither a header
-// line nor a bracketed aside inside a turn ("[неразборчиво] …") can pass for one.
-const MARKER_RE = /^\[\d[^\]\n]*\][^\n]*:[ \t\r]*$/;
+// A marker line: `[` + a clock time + `] ` + speaker + `:`, ending at the colon.
+// The timestamp shape is spelled out rather than "starts with a digit" so that a
+// numbered list inside a turn or a note ("[1] уточнить лимиты у легала:") is not
+// mistaken for a turn boundary — that would split the note and hand its tail to
+// the model. Every writer in the app produces one of these: `[mm:ss]`,
+// `[h:mm:ss]`, and `[1:00:32 PM]` from a pasted text export.
+const TIMESTAMP = String.raw`\[\d{1,2}(?::\d{2}){1,2}(?:\s?[AP]M)?\]`;
+const MARKER_RE = new RegExp(`^${TIMESTAMP}[^\\n]*:[ \\t\\r]*$`, 'i');
 
-const DEFAULT_CHUNK_CHARS = 6000;
+// What the app's own transcript reader treats as the start of a turn
+// (parseSegments in renderer/app.js). It is looser than MARKER_RE: a
+// `[mm:ss] Speaker: text` line, all on one line, renders as a turn there but is
+// not a marker here. Text containing such a line therefore never goes to the
+// model — rewritten, its timestamp and speaker would be whatever the model said.
+const TURN_LIKE = /^\[\d[^\]\n]*\]/m;
+
+// Kept below a small model's context: a 6000-char Russian chunk plus a reply of
+// the same size overflows Ollama's default 4096-token window, and the whole part
+// comes back unusable.
+const DEFAULT_CHUNK_CHARS = 3000;
 
 const ENHANCE_PROMPT = `You are proofreading a meeting transcript produced by automatic speech recognition.
 
@@ -75,15 +89,19 @@ function parseBlocks(body) {
     });
 }
 
-/// `[mm:ss] Note:` turns are text the user typed during the meeting, not speech
-/// (NOTE_LABEL in main.js). Nothing recognised them wrong, so they are left out
-/// of the pass entirely.
-function isNoteBlock(block) {
-    return /\]\s*Note:[ \t\r]*$/.test(block.marker || '');
+/// `[mm:ss] Note:` turns are text the user typed during the meeting, not speech.
+/// Nothing recognised them wrong, so they are left out of the pass entirely. The
+/// label is passed in: main.js spells it once (NOTE_LABEL) for both transcript
+/// writers, the summarize gate and the renderer, and a copy here would be a
+/// fourth place to forget.
+function isNoteBlock(block, noteLabel = 'Note') {
+    return new RegExp(`\\]\\s*${noteLabel}:[ \\t\\r]*$`).test(block.marker || '');
 }
 
 function blockSize(block) {
-    return block.marker.length + 1 + block.text.length;
+    // +1 for the newline after the marker, +2 for the blank line renderChunk puts
+    // between blocks: undercounting is how a chunk overflows the model's context.
+    return block.marker.length + block.text.length + 3;
 }
 
 /// Split into chunks of at most `maxChars`, never cutting a turn. A turn bigger
@@ -111,12 +129,23 @@ function renderChunk(blocks) {
 }
 
 // Proofreading is close to length-preserving: punctuation and a restored term
-// move a turn by a few characters, a summary or a translation does not. The
-// floor and ceiling are what separate the two, and they also catch the model
-// welding "Hope this helps!" onto the last turn of a chunk.
+// move a turn by a few characters, a summary or a translation does not.
+//
+// Both bounds need the ratio *and* an absolute cap, because each is wrong alone.
+// A ratio alone scales the tolerance with the turn — 40% of a 400-character
+// monologue is 160 characters of the user's only copy, and one chunk can be a
+// single monologue. An absolute cap alone is far too loose for a two-character
+// "ок". So the floor is the stricter of the two, and so is the ceiling; the
+// ceiling is also what catches "Hope this helps!" welded onto the last turn.
 const MIN_RATIO = 0.6;
 const MAX_RATIO = 1.6;
-const MAX_SLACK = 40;   // short turns move proportionally more: "ок" → "Ок."
+const MAX_DRIFT = 40;
+
+function outOfBounds(was, now) {
+    const floor = Math.max(was.length * MIN_RATIO, was.length - MAX_DRIFT);
+    const ceiling = Math.min(was.length * MAX_RATIO + MAX_DRIFT, was.length + MAX_DRIFT);
+    return now.length < floor || now.length > ceiling;
+}
 
 // A translation is the one failure the length bounds cannot see — English runs
 // about as long as the Russian it replaces. Losing the alphabet is what gives it
@@ -125,10 +154,21 @@ const MAX_SLACK = 40;   // short turns move proportionally more: "ок" → "О�
 // is ordinary proofreading in a Russian transcript. A transcript with no
 // Cyrillic to begin with gets no protection from this check — the length bounds
 // are all there is for a Latin-to-Latin translation.
-const CYRILLIC = /\p{Script=Cyrillic}/u;
+const CYRILLIC_RUN = /\p{Script=Cyrillic}/gu;
+const LETTER_RUN = /\p{L}/gu;
 
+function cyrillicShare(text) {
+    const letters = (text.match(LETTER_RUN) || []).length;
+    if (!letters) return 0;
+    return (text.match(CYRILLIC_RUN) || []).length / letters;
+}
+
+// A share, not mere presence: a translating model keeps proper nouns, and one
+// surviving name ("…decided to redo it, Иван") is enough to defeat a
+// does-any-Cyrillic-remain check.
 function lostCyrillic(was, now) {
-    return CYRILLIC.test(was) && !CYRILLIC.test(now);
+    const before = cyrillicShare(was);
+    return before > 0.3 && cyrillicShare(now) < before / 2;
 }
 
 /// Reply → the new text of each turn, or `ok: false` if it cannot be trusted.
@@ -138,24 +178,42 @@ function lostCyrillic(was, now) {
 /// how a reordered, merged or invented block gives itself away. Reusing the
 /// original markers without checking would hide exactly that: the reply's text
 /// would be filed under the wrong speaker.
+// Whitespace inside a marker is not meaning: models re-space them constantly, and
+// the marker is thrown away at reassembly anyway. Comparing collapsed forms costs
+// nothing and saves discarding a whole chunk over a double space.
+function sameMarker(a, b) {
+    return a.replace(/\s+/g, ' ').trim() === b.replace(/\s+/g, ' ').trim();
+}
+
 function mergeEnhanced(chunk, modelText) {
     const parsed = parseBlocks(stripCodeFence(String(modelText || '').trim()));
     if (parsed.length !== chunk.length) {
         return { ok: false, reason: `expected ${chunk.length} blocks, got ${parsed.length}` };
     }
     for (let i = 0; i < chunk.length; i++) {
-        if (parsed[i].marker.trim() !== chunk[i].marker.trim()) {
+        if (!sameMarker(parsed[i].marker, chunk[i].marker)) {
             return { ok: false, reason: `block ${i + 1}: marker changed` };
         }
         const was = chunk[i].text.trim();
         const now = parsed[i].text.trim();
         if (!now) return { ok: false, reason: `block ${i + 1}: came back empty` };
-        if (now.length < was.length * MIN_RATIO || now.length > was.length * MAX_RATIO + MAX_SLACK) {
+        if (outOfBounds(was, now)) {
             return { ok: false, reason: `block ${i + 1}: length ${was.length} → ${now.length}` };
         }
-        if (lostCyrillic(was, now)) return { ok: false, reason: `block ${i + 1}: text is no longer in Cyrillic` };
+        if (lostCyrillic(was, now)) return { ok: false, reason: `block ${i + 1}: no longer in Cyrillic` };
+        // A fence that opened after a preamble is not stripped by stripCodeFence,
+        // so its closing line arrives inside the last turn.
+        if (/^\s*```/m.test(now)) return { ok: false, reason: `block ${i + 1}: code fence in the text` };
+        // A line the app's reader would render as a new turn: written back, it
+        // would split this turn and invent a timestamp and a speaker.
+        if (TURN_LIKE.test(now) && !TURN_LIKE.test(was)) {
+            return { ok: false, reason: `block ${i + 1}: a timestamped line appeared in the text` };
+        }
     }
-    return { ok: true, texts: parsed.map((b) => b.text) };
+    // Trimmed: the bounds above are measured on trimmed text, and `sep`/`gap`
+    // already carry the file's layout, so a model that pads every turn with blank
+    // lines cannot reshape the file.
+    return { ok: true, texts: parsed.map((b) => b.text.trim()) };
 }
 
 function assembleTranscript(header, blocks) {
@@ -165,13 +223,26 @@ function assembleTranscript(header, blocks) {
     return header + blocks.map((b) => `${b.marker}${b.sep || (b.text ? '\n' : '')}${b.text}${b.gap}`).join('');
 }
 
-/// The turns Enhance may touch, each tagged with its index in `blocks`. Notes are
-/// the user's own typing; an empty turn has nothing to proofread and would come
-/// back invented.
-function spokenTargets(blocks) {
+/// The turns Enhance may touch, each tagged with its index in `blocks`. Left out:
+/// notes (the user's own typing), empty turns (nothing to proofread, and the model
+/// invents a line for them), and turns whose text holds a line the app's own
+/// reader would render as another turn — rewriting those would put a
+/// model-invented timestamp and speaker into the transcript.
+function spokenTargets(blocks, noteLabel) {
     return blocks
         .map((block, index) => ({ ...block, index }))
-        .filter((block) => !isNoteBlock(block) && block.text.trim());
+        .filter((block) => !isNoteBlock(block, noteLabel)
+            && block.text.trim()
+            && !TURN_LIKE.test(block.text));
+}
+
+/// Line endings of the merged text follow the file's own: a CRLF transcript whose
+/// turns come back with LF would end up mixed.
+function matchLineEndings(text, sample) {
+    const crlf = (sample.match(/\r\n/g) || []).length;
+    const lf = (sample.match(/\n/g) || []).length;
+    if (crlf === 0 || crlf * 2 < lf) return text.replace(/\r\n/g, '\n');
+    return text.replace(/\r?\n/g, '\r\n');
 }
 
 module.exports = {
@@ -183,8 +254,7 @@ module.exports = {
     mergeEnhanced,
     assembleTranscript,
     spokenTargets,
-    blockSize,
+    matchLineEndings,
     ENHANCE_PROMPT,
-    DEFAULT_CHUNK_CHARS,
     MARKER_RE,
 };

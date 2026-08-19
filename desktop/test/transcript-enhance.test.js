@@ -11,6 +11,7 @@ const {
     mergeEnhanced,
     assembleTranscript,
     spokenTargets,
+    matchLineEndings,
     MARKER_RE,
     ENHANCE_PROMPT,
 } = require('../transcript-enhance');
@@ -61,7 +62,7 @@ const TRANSCRIPT = [
     assert.strictEqual(blocks[0].text, 'Привет, начнём с эквайрина.');
     assert.strictEqual(blocks[1].text, 'Да, у меня две строки\nи вот вторая.', 'multi-line turns stay whole');
     assert.strictEqual(blocks[2].marker, '[00:30] Note:');
-    assert.deepStrictEqual(blocks.map(isNoteBlock), [false, false, true, false]);
+    assert.deepStrictEqual(blocks.map((b) => isNoteBlock(b)), [false, false, true, false]);
 }
 
 // A line that merely starts with a bracket is not a marker.
@@ -210,7 +211,7 @@ const TRANSCRIPT = [
     const { header, body } = splitTranscript(crlf);
     const blocks = parseBlocks(body);
     assert.strictEqual(blocks.length, 4, 'CRLF markers are still markers');
-    assert.deepStrictEqual(blocks.map(isNoteBlock), [false, false, true, false], 'and notes are still notes');
+    assert.deepStrictEqual(blocks.map((b) => isNoteBlock(b)), [false, false, true, false], 'and notes are still notes');
     assert.strictEqual(assembleTranscript(header, blocks), crlf, 'CRLF survives the round trip');
     assert.ok(MARKER_RE.test('[00:00] Alpha:\r'), 'the marker pattern tolerates the carriage return');
 }
@@ -251,6 +252,101 @@ const TRANSCRIPT = [
 {
     assert.match(ENHANCE_PROMPT, /same number of blocks/i, 'the prompt states the block-count contract');
     assert.match(ENHANCE_PROMPT, /language/i, 'and forbids translating');
+}
+
+// ─── the gate on long turns ───────────────────────────────────────────────────
+// One chunk can be a single monologue, so a proportional bound alone would let a
+// model delete a hundred characters of the user's only copy and call it
+// proofreading.
+{
+    const long = 'Значит смотрите, мы вчера обсуждали пайплайн деплоя и решили что надо всё переделать. '.repeat(5).trim();
+    const chunk = parseBlocks(`[00:00] Alpha:\n${long}\n`);
+    const shortened = long.slice(0, Math.round(long.length * 0.7));
+    assert.strictEqual(mergeEnhanced(chunk, `[00:00] Alpha:\n${shortened}`).ok, false,
+        'a long turn losing 30% is rejected');
+
+    const padded = `${long}\n\nHope this helps! Let me know if you want a summary of the meeting.`;
+    assert.strictEqual(mergeEnhanced(chunk, `[00:00] Alpha:\n${padded}`).ok, false,
+        'a pleasantry welded onto a long turn is rejected');
+
+    const proofread = long.replace(/Значит смотрите/, 'Значит, смотрите,') + '.';
+    assert.strictEqual(mergeEnhanced(chunk, `[00:00] Alpha:\n${proofread}`).ok, true,
+        'ordinary punctuation fixes on a long turn still pass');
+}
+
+// A translation that keeps a name is still a translation.
+{
+    const chunk = parseBlocks('[00:00] Alpha:\nвчера мы обсуждали пайплайн деплоя и решили что Иван всё переделает\n');
+    const translated = '[00:00] Alpha:\nyesterday we discussed the deploy pipeline and decided Иван will redo it';
+    assert.strictEqual(mergeEnhanced(chunk, translated).ok, false, 'one surviving proper noun is not enough');
+}
+
+// A fence opened after a preamble is not a wrapper, so its closing line arrives
+// inside the last turn.
+{
+    const chunk = parseBlocks('[00:00] Alpha:\nПривет всем.\n\n[00:10] Beta:\nДа, всё ок.\n');
+    const reply = 'Вот исправленный текст:\n\n```\n[00:00] Alpha:\nПривет всем.\n\n[00:10] Beta:\nДа, всё ок.\n```';
+    assert.strictEqual(mergeEnhanced(chunk, reply).ok, false, 'a stray fence line is rejected');
+}
+
+// A line the app's own reader would render as a turn must not appear in text.
+{
+    const chunk = parseBlocks('[00:00] Alpha:\nПривет всем, начинаем.\n');
+    assert.strictEqual(
+        mergeEnhanced(chunk, '[00:00] Alpha:\nПривет всем.\n[00:05] Beta: а я против').ok,
+        false,
+        'an invented timestamped line is rejected',
+    );
+}
+
+// Marker whitespace is not meaning: re-spacing it must not discard the chunk.
+{
+    const chunk = parseBlocks('[00:01] Иван Петров:\nпривет коллеги\n');
+    const reply = '[00:01]  Иван   Петров:\nПривет, коллеги.';
+    assert.strictEqual(mergeEnhanced(chunk, reply).ok, true, 'a re-spaced marker is still the same marker');
+}
+
+// Padding is dropped rather than written into the file.
+{
+    const chunk = parseBlocks('[00:00] Alpha:\nпривет всем\n');
+    const merged = mergeEnhanced(chunk, `[00:00] Alpha:\n${'\n'.repeat(20)}Привет всем.`);
+    assert.strictEqual(merged.ok, true);
+    assert.strictEqual(merged.texts[0], 'Привет всем.', 'leading blank lines are not kept');
+}
+
+// ─── what never reaches the model ─────────────────────────────────────────────
+// A numbered list inside a note is not a turn boundary — splitting it would send
+// the tail of the user's own note to the model.
+{
+    const blocks = parseBlocks('[00:30] Note:\nОткрытые вопросы:\n[1] уточнить лимиты у легала:\nнаписать письмо\n');
+    assert.strictEqual(blocks.length, 1, 'the note stays whole');
+    assert.deepStrictEqual(spokenTargets(blocks, 'Note'), [], 'and is excluded');
+    assert.ok(!MARKER_RE.test('[1] уточнить лимиты у легала:'), 'a list item is not a marker');
+    assert.ok(!MARKER_RE.test('[2026] Отчёт:'), 'nor is a year');
+    assert.ok(MARKER_RE.test('[1:00:32 PM] Alpha:'), 'a 12-hour timestamp is');
+}
+
+// A turn holding a one-line "[mm:ss] Speaker: text" is left alone: the app renders
+// that line as a turn, and rewritten it would carry a model-invented timestamp.
+{
+    const blocks = parseBlocks('[00:00] Alpha:\nПривет.\n[00:10] Beta: да согласен\n\n[00:20] Alpha:\nОк.\n');
+    assert.deepStrictEqual(spokenTargets(blocks, 'Note').map((b) => b.index), [1],
+        'the block carrying the embedded turn is skipped',
+    );
+}
+
+// The note label comes from main, not from a copy in this module.
+{
+    const blocks = parseBlocks('[00:30] Заметка:\nмой текст\n');
+    assert.deepStrictEqual(spokenTargets(blocks, 'Заметка'), [], 'a renamed label is honoured');
+    assert.strictEqual(spokenTargets(blocks, 'Note').length, 1, 'and only that label');
+}
+
+// ─── matchLineEndings ─────────────────────────────────────────────────────────
+{
+    assert.strictEqual(matchLineEndings('a\nb', 'x\r\ny\r\n'), 'a\r\nb', 'CRLF file, LF reply');
+    assert.strictEqual(matchLineEndings('a\r\nb', 'x\ny\n'), 'a\nb', 'LF file, CRLF reply');
+    assert.strictEqual(matchLineEndings('a\nb', 'x\ny\n'), 'a\nb', 'LF stays LF');
 }
 
 console.log('transcript-enhance: all checks passed');

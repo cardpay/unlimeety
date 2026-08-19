@@ -139,10 +139,12 @@ the follow-up, export or share it.
 - **Enhance** (meeting menu, right-click a meeting) runs the configured summarizer model over the
   spoken text to fix recognition errors, punctuation and casing, and to restore domain terms from
   **Settings → Domain glossary** (one term per line; known mishearings after a tab, e.g.
-  `PayCore⇥пейкор⇥пей кор`). Timestamps, speakers and your own `Note:` lines are never sent for
-  rewriting and cannot change. It **overwrites the transcript in place, with no backup** — a part
-  the model answers badly is left exactly as it was, and if the whole reply is unusable nothing is
-  written at all. Same provider as summarization, so the same privacy note applies.
+  `PayCore⇥пейкор⇥пей кор`). Your own `Note:` lines are never sent; timestamps and speaker labels
+  are sent as anchors but are never rewritten. It **overwrites the transcript in place, with no
+  backup** — a part the model answers badly is left exactly as it was, if the whole reply is
+  unusable nothing is written at all, and while the note is open **Cancel changes** reverts the
+  whole run for the rest of the session. Same provider as summarization, so the same privacy note
+  applies.
 
 **Summarize, chat, share**
 

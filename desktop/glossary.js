@@ -53,9 +53,17 @@ const RU_ENDING = /(ого|его|ому|ему|ыми|ими|ый|ий|ой|а�
 
 // ponytail: ending list, not a real stemmer. Enough for the noun phrases a
 // glossary holds; swap in a real Russian stemmer only if entries start missing.
+const MIN_STEM = 3;
+
 function stemWord(word) {
     if (!/\p{Ll}/u.test(word)) return word;                          // acronym: leave alone
-    if (/[Ѐ-ӿ]/.test(word)) return word.length > 3 ? word.replace(RU_ENDING, '') : word;
+    if (/[Ѐ-ӿ]/.test(word)) {
+        if (word.length <= 3) return word;
+        const stem = word.replace(RU_ENDING, '');
+        // "ного" would stem to "н", whose matcher then hits every word starting
+        // with н and floods the entry cap with noise.
+        return stem.length >= MIN_STEM ? stem : word;
+    }
     return word.length > 4 ? word.replace(/[aeiouy]$/i, '') : word;  // schema → schem → schemas
 }
 
