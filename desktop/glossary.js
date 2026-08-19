@@ -66,6 +66,14 @@ function matcher(phrase) {
     return new RegExp(`(?<![\\p{L}\\p{N}])${body}${tail}`, 'iu');
 }
 
+// Compiled once per entry and kept on it: Enhance calls `select` once per chunk,
+// and rebuilding a few hundred regexes on every call was the dominant cost of
+// the whole pass — worse than the fuzzy scan it was meant to precede.
+function matchers(entry) {
+    if (!entry._re) entry._re = [entry.term, ...entry.aliases].map(matcher);
+    return entry._re;
+}
+
 // Levenshtein with an early exit: every row is checked against `max`, so a
 // hopeless pair costs a couple of rows instead of the full matrix.
 function withinDistance(a, b, max) {
@@ -118,7 +126,7 @@ function select(entries, text, limit = MAX_ENTRIES) {
     const fuzzy = [];
     const chunkWords = words(text);
     for (const entry of entries) {
-        if ([entry.term, ...entry.aliases].some((phrase) => matcher(phrase).test(text))) {
+        if (matchers(entry).some((re) => re.test(text))) {
             exact.push(entry);
         } else if (fuzzyHit(entry, chunkWords)) {
             fuzzy.push(entry);

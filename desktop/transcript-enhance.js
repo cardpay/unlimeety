@@ -13,10 +13,12 @@
 // Chunking exists because a meeting transcript outgrows a small model's context
 // long before it outgrows the file system. Chunks split on turn boundaries only.
 
+const { stripCodeFence } = require('./summary-frontmatter');
+
 // A marker line: `[` + timestamp + `] ` + speaker + `:`. The timestamp must
 // start with a digit and the line must end at the colon, so neither a header
 // line nor a bracketed aside inside a turn ("[неразборчиво] …") can pass for one.
-const MARKER_RE = /^\[\d[^\]\n]*\][^\n]*:[ \t]*$/;
+const MARKER_RE = /^\[\d[^\]\n]*\][^\n]*:[ \t\r]*$/;
 
 const DEFAULT_CHUNK_CHARS = 6000;
 
@@ -77,7 +79,7 @@ function parseBlocks(body) {
 /// (NOTE_LABEL in main.js). Nothing recognised them wrong, so they are left out
 /// of the pass entirely.
 function isNoteBlock(block) {
-    return /\]\s*Note:[ \t]*$/.test(block.marker || '');
+    return /\]\s*Note:[ \t\r]*$/.test(block.marker || '');
 }
 
 function blockSize(block) {
@@ -108,32 +110,68 @@ function renderChunk(blocks) {
     return blocks.map((b) => `${b.marker}\n${b.text}`).join('\n\n');
 }
 
-/// A whole-reply code fence, which some models add and some don't. An inner
-/// fence is left alone — only a wrapper is stripped.
-function stripFence(text) {
-    const trimmed = String(text || '').trim();
-    if (!trimmed.startsWith('```')) return trimmed;
-    const firstNl = trimmed.indexOf('\n');
-    if (firstNl === -1 || !trimmed.endsWith('```')) return trimmed;
-    return trimmed.slice(firstNl + 1, trimmed.length - 3).trim();
+// Proofreading is close to length-preserving: punctuation and a restored term
+// move a turn by a few characters, a summary or a translation does not. The
+// floor and ceiling are what separate the two, and they also catch the model
+// welding "Hope this helps!" onto the last turn of a chunk.
+const MIN_RATIO = 0.6;
+const MAX_RATIO = 1.6;
+const MAX_SLACK = 40;   // short turns move proportionally more: "ок" → "Ок."
+
+// A translation is the one failure the length bounds cannot see — English runs
+// about as long as the Russian it replaces. Losing the alphabet is what gives it
+// away. One direction only: a Cyrillic turn that comes back with no Cyrillic at
+// all was translated, but the reverse ("ok" → "Ок.", "пайплайн" for "pipeline")
+// is ordinary proofreading in a Russian transcript. A transcript with no
+// Cyrillic to begin with gets no protection from this check — the length bounds
+// are all there is for a Latin-to-Latin translation.
+const CYRILLIC = /\p{Script=Cyrillic}/u;
+
+function lostCyrillic(was, now) {
+    return CYRILLIC.test(was) && !CYRILLIC.test(now);
 }
 
 /// Reply → the new text of each turn, or `ok: false` if it cannot be trusted.
-/// Prose before the first marker is ignored (parseBlocks starts at the marker),
-/// but the block count must match exactly and no turn may come back empty.
+/// Prose before the first marker is ignored (parseBlocks starts at the marker) —
+/// that preamble is too common to fail on. Everything else must line up: the
+/// model is told to echo each marker, so a marker that comes back different is
+/// how a reordered, merged or invented block gives itself away. Reusing the
+/// original markers without checking would hide exactly that: the reply's text
+/// would be filed under the wrong speaker.
 function mergeEnhanced(chunk, modelText) {
-    const parsed = parseBlocks(stripFence(modelText));
+    const parsed = parseBlocks(stripCodeFence(String(modelText || '').trim()));
     if (parsed.length !== chunk.length) {
         return { ok: false, reason: `expected ${chunk.length} blocks, got ${parsed.length}` };
     }
-    if (parsed.some((b) => !b.text.trim())) {
-        return { ok: false, reason: 'a turn came back empty' };
+    for (let i = 0; i < chunk.length; i++) {
+        if (parsed[i].marker.trim() !== chunk[i].marker.trim()) {
+            return { ok: false, reason: `block ${i + 1}: marker changed` };
+        }
+        const was = chunk[i].text.trim();
+        const now = parsed[i].text.trim();
+        if (!now) return { ok: false, reason: `block ${i + 1}: came back empty` };
+        if (now.length < was.length * MIN_RATIO || now.length > was.length * MAX_RATIO + MAX_SLACK) {
+            return { ok: false, reason: `block ${i + 1}: length ${was.length} → ${now.length}` };
+        }
+        if (lostCyrillic(was, now)) return { ok: false, reason: `block ${i + 1}: text is no longer in Cyrillic` };
     }
     return { ok: true, texts: parsed.map((b) => b.text) };
 }
 
 function assembleTranscript(header, blocks) {
-    return header + blocks.map((b) => `${b.marker}${b.sep}${b.text}${b.gap}`).join('');
+    // `sep` is empty only for a marker that was the file's last line with nothing
+    // after it. If such a turn ever gained text, concatenating would fuse it onto
+    // the marker line and the marker would stop being one.
+    return header + blocks.map((b) => `${b.marker}${b.sep || (b.text ? '\n' : '')}${b.text}${b.gap}`).join('');
+}
+
+/// The turns Enhance may touch, each tagged with its index in `blocks`. Notes are
+/// the user's own typing; an empty turn has nothing to proofread and would come
+/// back invented.
+function spokenTargets(blocks) {
+    return blocks
+        .map((block, index) => ({ ...block, index }))
+        .filter((block) => !isNoteBlock(block) && block.text.trim());
 }
 
 module.exports = {
@@ -144,7 +182,7 @@ module.exports = {
     renderChunk,
     mergeEnhanced,
     assembleTranscript,
-    stripFence,
+    spokenTargets,
     blockSize,
     ENHANCE_PROMPT,
     DEFAULT_CHUNK_CHARS,
