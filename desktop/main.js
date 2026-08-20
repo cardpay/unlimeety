@@ -2103,6 +2103,64 @@ const FAIL_FAST_PARTS = 3;
 // mid-run costs model time, not data. Cancelling just stops the next call.
 app.on('before-quit', () => { enhanceCancelled = true; });
 
+// ─── Auto-queue: Live "Stop & save" → large-v3 re-transcribe → Enhance ───────
+// A background FIFO, drained by a 2s poll rather than a while-loop so it can
+// gate each queued step on that step's own resource (`transcriber.proc` for a
+// transcribe entry, `enhanceInFlight` for an enhance entry) without blocking
+// on the other — an unrelated manual Enhance shouldn't stall a queued
+// transcribe, or vice versa. Only a job still sitting in this array (not yet
+// dequeued) is lost on quit/crash; a job already running when quit begins
+// goes through the existing transcriber/enhanceInFlight quit-flush behavior
+// (wait, then mark partial/interrupted) exactly like any other manual run.
+// Not persisted, not cancellable, no progress UI — by design (see spec).
+const autoPipelineQueue = []; // { type: 'transcribe' | 'enhance', filePath, language }
+
+// Progress/events from an auto-queued job must never reach the Record tab or
+// Library UI (nobody is looking at this file) — this shim swallows them all.
+const silentEnhanceSender = {
+    send() {}, once() {}, on() {}, off() {},
+    isDestroyed() { return !mainWindow || mainWindow.isDestroyed(); },
+};
+
+function enqueueAutoPipeline(filePath, language) {
+    autoPipelineQueue.push({ type: 'transcribe', filePath, language });
+}
+
+setInterval(() => {
+    const head = autoPipelineQueue[0];
+    if (!head) return;
+
+    if (head.type === 'transcribe') {
+        if (transcriber.proc) return; // manual transcribe running — wait
+        autoPipelineQueue.shift();
+        runRecordTranscribeJob({
+            filePath: head.filePath,
+            model: 'openai_whisper-large-v3',
+            language: head.language,
+            diarize: true,
+            // numberOfSpeakers left undefined — auto-detect.
+        }, () => {}).then((result) => {
+            if (result?.ok) {
+                autoPipelineQueue.push({ type: 'enhance', filePath: result.transcriptPath });
+            } else {
+                console.warn(`auto-queue: transcribe failed for ${head.filePath} — ${result?.error || 'unknown error'}`);
+            }
+        }).catch((err) => {
+            console.warn(`auto-queue: transcribe threw for ${head.filePath} — ${err.message}`);
+        });
+    } else {
+        if (enhanceInFlight) return; // manual Enhance running — wait
+        autoPipelineQueue.shift();
+        runEnhanceJob(head.filePath, silentEnhanceSender).then((result) => {
+            if (!result?.ok) {
+                console.warn(`auto-queue: enhance failed for ${head.filePath} — ${result?.error || 'unknown error'}`);
+            }
+        }).catch((err) => {
+            console.warn(`auto-queue: enhance threw for ${head.filePath} — ${err.message}`);
+        });
+    }
+}, 2000);
+
 ipcMain.handle('transcripts:enhanceCancel', () => {
     // Only meaningful while a pass is running; the flag is cleared by the run
     // itself, so setting it on an idle app is harmless.
@@ -2110,7 +2168,10 @@ ipcMain.handle('transcripts:enhanceCancel', () => {
     return { ok: true };
 });
 
-ipcMain.handle('transcripts:enhance', async (event, filePath) => {
+// Shared by the manual `transcripts:enhance` handler and the auto-queue —
+// `sender` is `event.sender` for the manual call, a silent shim for the
+// auto-queue (its progress must never reach the Library's UI).
+async function runEnhanceJob(filePath, sender) {
     if (typeof filePath !== 'string' || !isPathInside(filePath, TRANSCRIPTS_FOLDER)) {
         return { ok: false, error: 'Refusing to operate on a path outside the transcripts folder.' };
     }
@@ -2151,8 +2212,8 @@ ipcMain.handle('transcripts:enhance', async (event, filePath) => {
     // run would otherwise hold the lock for hours and write the file under a
     // window that knows nothing about it.
     const stopOnGone = () => { enhanceCancelled = true; };
-    event.sender.once('destroyed', stopOnGone);
-    event.sender.on('did-start-navigation', stopOnGone);
+    sender.once('destroyed', stopOnGone);
+    sender.on('did-start-navigation', stopOnGone);
 
     enhanceInFlight = true;
     enhanceCancelled = false;
@@ -2162,8 +2223,8 @@ ipcMain.handle('transcripts:enhance', async (event, filePath) => {
         for (let i = 0; i < chunks.length; i++) {
             if (enhanceCancelled) break;
             const chunk = chunks[i];
-            if (!event.sender.isDestroyed()) {
-                event.sender.send('transcripts:enhanceProgress', {
+            if (!sender.isDestroyed()) {
+                sender.send('transcripts:enhanceProgress', {
                     filePath, done: i, total: chunks.length, skipped,
                 });
             }
@@ -2254,9 +2315,11 @@ ipcMain.handle('transcripts:enhance', async (event, filePath) => {
     } finally {
         enhanceInFlight = false;
         enhanceCancelled = false;
-        if (!event.sender.isDestroyed()) event.sender.off('did-start-navigation', stopOnGone);
+        if (!sender.isDestroyed()) sender.off('did-start-navigation', stopOnGone);
     }
-});
+}
+
+ipcMain.handle('transcripts:enhance', (event, filePath) => runEnhanceJob(filePath, event.sender));
 
 ipcMain.handle('transcripts:rename', async (_e, filePath, newTitle) => {
     if (typeof filePath !== 'string' || !filePath.startsWith(TRANSCRIPTS_FOLDER)) {
@@ -2827,6 +2890,11 @@ ipcMain.handle('live:saveTranscript', async (_e, payload) => {
         live.outputPath = null;
         live.notes = [];
         live.notesStartedAt = null;
+        // Background-queue a bigger, more accurate re-transcription of this
+        // same session, then (on its success) an Enhance pass over the
+        // result — no manual action needed. Skipped if the wav never existed
+        // or has since vanished; nothing else here depends on it either way.
+        if (wavPath && fs.existsSync(wavPath)) enqueueAutoPipeline(wavPath, language);
         noteSessionFlushed('live');
         return { ok: true, filePath, audioPath: wavPath };
     } catch (err) {
@@ -3096,6 +3164,19 @@ ipcMain.handle('record:stop', async () => {
     recorder.proc = null;
     recorder.outputPath = null;
     noteSessionFlushed('record');
+    return { ok: true };
+});
+
+// Not called by any UI yet — the hook a later Record-tab "auto-enhance"
+// toggle will call. Same platform gate as `record:transcribe`, checked here
+// rather than left for the queue to discover a drain cycle later, and the
+// same `canReadPath` confinement every renderer-supplied path gets.
+ipcMain.handle('record:autoQueueTranscribe', (_e, filePath, language) => {
+    if (process.platform !== 'darwin') {
+        return { ok: false, error: 'Local transcription is macOS-only.' };
+    }
+    if (!canReadPath(filePath)) return { ok: false, error: 'File is not accessible.' };
+    enqueueAutoPipeline(filePath, typeof language === 'string' ? language : '');
     return { ok: true };
 });
 
@@ -3471,7 +3552,10 @@ ipcMain.handle('record:pickAudioFile', async () => {
 
 // ─── Transcribe a saved WAV ──────────────────────────────────────────────────
 
-ipcMain.handle('record:transcribe', async (_e, opts) => {
+// Shared by the manual `record:transcribe` handler and the auto-queue —
+// `sendEvent` is `recordSendToRenderer` for the manual call, a no-op for the
+// auto-queue (its progress must never reach the Record tab's UI).
+async function runRecordTranscribeJob(opts, sendEvent) {
     if (process.platform !== 'darwin') {
         return { ok: false, error: 'Local transcription is macOS-only.' };
     }
@@ -3504,13 +3588,27 @@ ipcMain.handle('record:transcribe', async (_e, opts) => {
     // segments into one bubble. Applied after diarization labels are resolved.
     const mergeAdjacent = opts?.mergeAdjacent !== false; // default true
 
+    // Staleness guard (mirrors runEnhanceJob's own before/after content check):
+    // snapshot the canonical transcript path now, at job start, so the write
+    // far below can tell whether an editor's autosave — or a rename/delete —
+    // landed on it while this (possibly minutes-long) transcription ran. Only
+    // the non-partial path is snapshotted: an interrupted run writes to a
+    // distinct `.partial.txt` name that nothing else is racing to touch.
+    const targetTranscriptPath = recordingTranscriptPath(filePath);
+    let transcriptSnapshot;
+    try {
+        transcriptSnapshot = fs.readFileSync(targetTranscriptPath, 'utf-8');
+    } catch {
+        transcriptSnapshot = null; // no transcript there yet
+    }
+
     const segments = [];
     let diarSegments = null;
     let resolveDone;
     const done = new Promise((resolve) => { resolveDone = resolve; });
 
     const spawnRes = spawnHelperWithJsonStdout((evt) => {
-        recordSendToRenderer(evt);
+        sendEvent(evt);
         if (evt?.type === 'segment' && evt.final === true) segments.push(evt);
         if (evt?.type === 'diarizationComplete' && Array.isArray(evt.segments)) {
             diarSegments = evt.segments;
@@ -3530,12 +3628,12 @@ ipcMain.handle('record:transcribe', async (_e, opts) => {
     transcriber.interrupted = false;
 
     transcriber.proc.on('exit', (code) => {
-        recordSendToRenderer({ type: 'transcriberExited', code });
+        sendEvent({ type: 'transcriberExited', code });
         transcriber.proc = null;
         resolveDone(code);
     });
     transcriber.proc.on('error', (err) => {
-        recordSendToRenderer({ type: 'error', message: `helper spawn error: ${err.message}` });
+        sendEvent({ type: 'error', message: `helper spawn error: ${err.message}` });
         transcriber.proc = null;
         resolveDone(-1);
     });
@@ -3676,6 +3774,22 @@ ipcMain.handle('record:transcribe', async (_e, opts) => {
         // {start, text} form, so it shares the Live writer's block builder.
         const body = interleaveNotes(segBlocks, buildNoteBlocks(recordedNotes));
         const content = headerLines.join('\n') + '\n\n' + body + (body ? '\n' : '');
+
+        // Re-check right before writing: only meaningful for the canonical
+        // (non-partial) path — see the snapshot comment above.
+        if (transcriptPath === targetTranscriptPath) {
+            let currentContent;
+            try {
+                currentContent = fs.readFileSync(targetTranscriptPath, 'utf-8');
+            } catch {
+                currentContent = null;
+            }
+            if (currentContent !== transcriptSnapshot) {
+                noteSessionFlushed('transcriber');
+                return { ok: false, error: 'Transcript changed since transcription started — nothing was written.' };
+            }
+        }
+
         fs.writeFileSync(transcriptPath, content, 'utf-8');
         // Keep a partial out of Recent Documents — it isn't a document anyone
         // asked for, it's a salvage file.
@@ -3711,7 +3825,9 @@ ipcMain.handle('record:transcribe', async (_e, opts) => {
         noteSessionFlushed('transcriber');
         return { ok: false, error: err.message };
     }
-});
+}
+
+ipcMain.handle('record:transcribe', (_e, opts) => runRecordTranscribeJob(opts, recordSendToRenderer));
 
 ipcMain.handle('record:cancelTranscribe', async () => {
     if (!transcriber.proc) return { ok: false, error: 'No transcription in progress.' };
