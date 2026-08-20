@@ -28,6 +28,7 @@ contextBridge.exposeInMainWorld('transcriber', {
 
     // ── Summarization via Claude Code CLI ─────────────────────────────────────
     summarize:    (filePath, promptInstruction) => ipcRenderer.invoke('summarize:run', filePath, promptInstruction),
+    cancelSummarize: () => ipcRenderer.invoke('summarize:cancel'),
     chatAsk:      (filePath, messages)          => ipcRenderer.invoke('chat:ask', filePath, messages),
     saveSummary:  (filePath, text, folder)      => ipcRenderer.invoke('summary:save', filePath, text, folder),
     overwriteSummary: (filePath, text, folder)  => ipcRenderer.invoke('summary:overwrite', filePath, text, folder),
