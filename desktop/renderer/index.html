@@ -1041,6 +1041,12 @@
           <div class="modal-spinner"></div>
           <span id="modal-loading-text">Reading the transcript…</span>
         </div>
+        <!-- Shown only when the modal was reopened onto a run already in
+             flight — disk/cache loads reset this hidden. -->
+        <div class="modal-footer hidden" id="modal-loading-footer">
+          <span style="flex:1"></span>
+          <button class="btn btn-stop" id="modal-btn-loading-stop">Stop</button>
+        </div>
       </div>
 
       <!-- View: result -->

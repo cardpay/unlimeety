@@ -1100,7 +1100,15 @@ const CLAUDE_ISOLATION_ARGS = ['--safe-mode', '--permission-mode', 'manual'];
 // chat message — all three route through runClaudeCode.
 let claudeIsolationSupported = true;
 
-async function runClaudeCode(content, promptInstruction) {
+// `onAbort`, when passed, is called with an `{ abort() }` handle as soon as
+// one exists (once per attempt — runClaudeCode's isolation-flag fallback
+// spawns a second child and hands over a second handle for it), so a caller
+// can store the latest one and invoke `.abort()` whenever it wants to cancel
+// — including before any handle existed yet, since the caller's own onAbort
+// re-checks whether cancellation was already requested each time it receives
+// a handle. Omitted by every caller below except summarize:run, so none of
+// them changes behavior.
+async function runClaudeCode(content, promptInstruction, onAbort) {
     const claudePath = await findClaude();
     if (!claudePath) return { ok: false, notInstalled: true };
 
@@ -1115,8 +1123,8 @@ async function runClaudeCode(content, promptInstruction) {
 
     if (claudeIsolationSupported) {
         const startedAt = Date.now();
-        const res = await spawnClaude(claudePath, [...CLAUDE_BASE_ARGS, ...CLAUDE_ISOLATION_ARGS], content, promptInstruction, extendedPath);
-        if (res.ok) return res;
+        const res = await spawnClaude(claudePath, [...CLAUDE_BASE_ARGS, ...CLAUDE_ISOLATION_ARGS], content, promptInstruction, extendedPath, onAbort);
+        if (res.ok || res.canceled) return res;
         // A CLI too old for the isolation flags rejects them outright — summarizing
         // unisolated beats not summarizing at all. Two rejection shapes, both from
         // the same cause: `unknown option '--safe-mode'` when the flag is missing
@@ -1133,13 +1141,18 @@ async function runClaudeCode(content, promptInstruction) {
         }
         claudeIsolationSupported = false;
     }
-    return spawnClaude(claudePath, CLAUDE_BASE_ARGS, content, promptInstruction, extendedPath);
+    return spawnClaude(claudePath, CLAUDE_BASE_ARGS, content, promptInstruction, extendedPath, onAbort);
 }
 
-function spawnClaude(claudePath, args, content, promptInstruction, extendedPath) {
+function spawnClaude(claudePath, args, content, promptInstruction, extendedPath, onAbort) {
     return new Promise((resolve) => {
         let stdout = '';
         let stderr = '';
+        // Set by our own onAbort handle, never by the timeout below (that path
+        // resolves itself before `close`/`error` can fire) — the only thing this
+        // flag has to distinguish is "killed because the user cancelled" from
+        // "killed/exited for any other reason".
+        let canceled = false;
 
         // Both the instruction and the transcript are fed via stdin and NOT as
         // argv — on Windows we spawn through a shell (claude is a .cmd), and any
@@ -1151,6 +1164,13 @@ function spawnClaude(claudePath, args, content, promptInstruction, extendedPath)
             stdio: ['pipe', 'pipe', 'pipe'],
             shell: process.platform === 'win32',
         });
+
+        // The abort handle exists the instant the child does. If the caller asked
+        // to cancel before this point (e.g. while findClaude() above was still
+        // resolving), that request is remembered by the caller, not by us — handing
+        // over the handle here gives it something to act on, and it fires the
+        // abort right back at us synchronously when that's the case.
+        if (onAbort) onAbort({ abort: () => { canceled = true; proc.kill(); } });
 
         // A child that rejects its flags exits during this write, and a transcript
         // is far bigger than the pipe buffer — the rest of it then lands on a
@@ -1172,19 +1192,24 @@ function spawnClaude(claudePath, args, content, promptInstruction, extendedPath)
 
         proc.on('close', (code) => {
             clearTimeout(timer);
+            if (canceled) { resolve({ ok: false, canceled: true }); return; }
             if (code === 0 && stdout.trim()) resolve({ ok: true, summary: stdout.trim() });
             else resolve({ ok: false, error: stderr.trim() || `Claude Code exited with code ${code}. Try running 'claude login' in a terminal to re-authenticate.` });
         });
 
         proc.on('error', (err) => {
             clearTimeout(timer);
+            if (canceled) { resolve({ ok: false, canceled: true }); return; }
             resolve({ ok: false, error: err.message });
         });
     });
 }
 
-async function fetchWithTimeout(url, options, timeoutMs) {
+async function fetchWithTimeout(url, options, timeoutMs, onAbort) {
     const controller = new AbortController();
+    // Built synchronously, unlike claude-code's child process — there is no gap
+    // for a cancel to land before this handle exists.
+    if (onAbort) onAbort({ abort: () => controller.abort() });
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
         return await fetch(url, { ...options, signal: controller.signal });
@@ -1193,11 +1218,25 @@ async function fetchWithTimeout(url, options, timeoutMs) {
     }
 }
 
-async function runOpenRouter(content, promptInstruction, config) {
+// The timeout above aborts the same AbortController a user cancel does, so an
+// AbortError alone doesn't say which one happened. Wraps `onAbort` so the
+// caller's own abort() — and only that — flips a local flag the catch block
+// can check.
+function withCancelFlag(onAbort) {
+    if (!onAbort) return { onAbort: null, wasCanceled: () => false };
+    let canceled = false;
+    return {
+        onAbort: (handle) => onAbort({ abort: () => { canceled = true; handle.abort(); } }),
+        wasCanceled: () => canceled,
+    };
+}
+
+async function runOpenRouter(content, promptInstruction, config, onAbort) {
     const { apiKey, model, baseUrl } = config;
     if (!apiKey) return { ok: false, error: 'OpenRouter API key is not set. Open Settings to add one.' };
     if (!model) return { ok: false, error: 'OpenRouter model is not set.' };
 
+    const abortState = withCancelFlag(onAbort);
     try {
         const res = await fetchWithTimeout(`${baseUrl}/chat/completions`, {
             method: 'POST',
@@ -1214,7 +1253,7 @@ async function runOpenRouter(content, promptInstruction, config) {
                     { role: 'user', content },
                 ],
             }),
-        }, 300_000);
+        }, 300_000, abortState.onAbort);
 
         if (!res.ok) {
             const text = await res.text().catch(() => '');
@@ -1225,12 +1264,16 @@ async function runOpenRouter(content, promptInstruction, config) {
         if (!summary) return { ok: false, error: 'OpenRouter returned an empty response.' };
         return { ok: true, summary };
     } catch (err) {
-        if (err.name === 'AbortError') return { ok: false, error: 'Request to OpenRouter timed out (5 min).' };
+        if (err.name === 'AbortError') {
+            return abortState.wasCanceled()
+                ? { ok: false, canceled: true }
+                : { ok: false, error: 'Request to OpenRouter timed out (5 min).' };
+        }
         return { ok: false, error: `OpenRouter request failed: ${err.message}` };
     }
 }
 
-async function runOpenAICompat(content, promptInstruction, config) {
+async function runOpenAICompat(content, promptInstruction, config, onAbort) {
     const { apiKey, model, baseUrl } = config;
     if (!baseUrl) return { ok: false, error: 'OpenAI-compatible base URL is not set. Open Settings to add one.' };
     if (!model) return { ok: false, error: 'OpenAI-compatible model is not set.' };
@@ -1241,6 +1284,7 @@ async function runOpenAICompat(content, promptInstruction, config) {
     const headers = { 'Content-Type': 'application/json' };
     if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
 
+    const abortState = withCancelFlag(onAbort);
     try {
         const res = await fetchWithTimeout(`${baseUrl}/chat/completions`, {
             method: 'POST',
@@ -1252,7 +1296,7 @@ async function runOpenAICompat(content, promptInstruction, config) {
                     { role: 'user', content },
                 ],
             }),
-        }, 300_000);
+        }, 300_000, abortState.onAbort);
 
         if (!res.ok) {
             const text = await res.text().catch(() => '');
@@ -1263,7 +1307,11 @@ async function runOpenAICompat(content, promptInstruction, config) {
         if (!summary) return { ok: false, error: 'OpenAI-compatible endpoint returned an empty response.' };
         return { ok: true, summary };
     } catch (err) {
-        if (err.name === 'AbortError') return { ok: false, error: 'Request to OpenAI-compatible endpoint timed out (5 min).' };
+        if (err.name === 'AbortError') {
+            return abortState.wasCanceled()
+                ? { ok: false, canceled: true }
+                : { ok: false, error: 'Request to OpenAI-compatible endpoint timed out (5 min).' };
+        }
         if (err.code === 'ECONNREFUSED' || /fetch failed/i.test(err.message)) {
             return { ok: false, error: `Cannot reach OpenAI-compatible endpoint at ${baseUrl}. Is the server running?` };
         }
@@ -1271,10 +1319,11 @@ async function runOpenAICompat(content, promptInstruction, config) {
     }
 }
 
-async function runOllama(content, promptInstruction, config) {
+async function runOllama(content, promptInstruction, config, onAbort) {
     const { baseUrl, model } = config;
     if (!model) return { ok: false, error: 'Ollama model is not set.' };
 
+    const abortState = withCancelFlag(onAbort);
     try {
         const res = await fetchWithTimeout(`${baseUrl}/api/chat`, {
             method: 'POST',
@@ -1287,7 +1336,7 @@ async function runOllama(content, promptInstruction, config) {
                     { role: 'user', content },
                 ],
             }),
-        }, 600_000);
+        }, 600_000, abortState.onAbort);
 
         if (!res.ok) {
             const text = await res.text().catch(() => '');
@@ -1298,7 +1347,11 @@ async function runOllama(content, promptInstruction, config) {
         if (!summary) return { ok: false, error: 'Ollama returned an empty response.' };
         return { ok: true, summary };
     } catch (err) {
-        if (err.name === 'AbortError') return { ok: false, error: 'Request to Ollama timed out (10 min).' };
+        if (err.name === 'AbortError') {
+            return abortState.wasCanceled()
+                ? { ok: false, canceled: true }
+                : { ok: false, error: 'Request to Ollama timed out (10 min).' };
+        }
         if (err.code === 'ECONNREFUSED' || /fetch failed/i.test(err.message)) {
             return { ok: false, error: `Cannot reach Ollama at ${baseUrl}. Is it running? (\`ollama serve\`)` };
         }
@@ -1308,17 +1361,36 @@ async function runOllama(content, promptInstruction, config) {
 
 // One dispatch for every caller that sends text through the configured model —
 // summarize:run and transcripts:enhance. Returns { ok, summary } / { ok, error }.
-async function runSummarizerProvider(content, promptInstruction, cfg) {
+async function runSummarizerProvider(content, promptInstruction, cfg, onAbort) {
     switch (cfg.provider) {
-        case 'openrouter':        return runOpenRouter(content, promptInstruction, cfg.openrouter);
-        case 'ollama':            return runOllama(content, promptInstruction, cfg.ollama);
-        case 'openai-compatible': return runOpenAICompat(content, promptInstruction, cfg.openaiCompatible);
+        case 'openrouter':        return runOpenRouter(content, promptInstruction, cfg.openrouter, onAbort);
+        case 'ollama':            return runOllama(content, promptInstruction, cfg.ollama, onAbort);
+        case 'openai-compatible': return runOpenAICompat(content, promptInstruction, cfg.openaiCompatible, onAbort);
         case 'claude-code':
-        default:                  return runClaudeCode(content, promptInstruction);
+        default:                  return runClaudeCode(content, promptInstruction, onAbort);
     }
 }
 
+// One summarize job at a time, process-wide — mirrors Enhance's own
+// in-flight/cancel pair. `summarizeAbort` holds whatever the active provider
+// handed back through `onAbort`; summarize:cancel just calls it.
+let summarizeInFlight = false;
+let summarizeCancelRequested = false;
+let summarizeAbort = null;
+
+ipcMain.handle('summarize:cancel', () => {
+    // Meaningful only while a run is in flight; calling it on an idle app is a
+    // harmless no-op (still returns ok:true).
+    if (summarizeInFlight) {
+        summarizeCancelRequested = true;
+        if (summarizeAbort) summarizeAbort.abort();
+    }
+    return { ok: true };
+});
+
 ipcMain.handle('summarize:run', async (_e, filePath, promptInstruction) => {
+    // A second run must not disturb the first one's abort handle.
+    if (summarizeInFlight) return { ok: false, error: 'Another summary is already running.' };
     if (!canReadPath(filePath)) return { ok: false, error: 'File is not accessible.' };
     let content;
     try {
@@ -1338,7 +1410,21 @@ ipcMain.handle('summarize:run', async (_e, filePath, promptInstruction) => {
     }
 
     const cfg = readSummarizerConfig();
-    const result = await runSummarizerProvider(content, promptInstruction, cfg);
+    summarizeInFlight = true;
+    summarizeCancelRequested = false;
+    summarizeAbort = null;
+    let result;
+    try {
+        result = await runSummarizerProvider(content, promptInstruction, cfg, (handle) => {
+            summarizeAbort = handle;
+            // Cancel may have been requested before this provider had a handle to
+            // give us (e.g. claude-code's findClaude() gap) — fire it right away.
+            if (summarizeCancelRequested) handle.abort();
+        });
+    } finally {
+        summarizeInFlight = false;
+        summarizeAbort = null;
+    }
     if (!result?.ok) return result;
 
     // The frontmatter block is model output, delimiters and all — every provider

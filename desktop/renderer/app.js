@@ -2884,6 +2884,9 @@ const modalViewPrompt = document.getElementById("modal-view-prompt");
 const modalViewLoading = document.getElementById("modal-view-loading");
 const modalViewResult = document.getElementById("modal-view-result");
 const modalViewError = document.getElementById("modal-view-error");
+const modalLoadingText = document.getElementById("modal-loading-text");
+const modalLoadingFooter = document.getElementById("modal-loading-footer");
+const modalLoadingStopBtn = document.getElementById("modal-btn-loading-stop");
 const modalPromptInput = document.getElementById("modal-prompt-input");
 const modalFolderLabel = document.getElementById("modal-folder-label");
 const modalResultText = document.getElementById("modal-result-text");
@@ -3033,6 +3036,21 @@ async function openSummarizeModal(filePath, meetingTitle) {
     : "Summarize meeting";
   if (modalBusyBanner) modalBusyBanner.classList.add("hidden");
   summarizeModal.classList.remove("hidden");
+
+  // The loading footer's Stop button only applies to the in-flight branch
+  // below; every other path (cache, disk, reset on next open) keeps it hidden.
+  modalLoadingFooter.classList.add("hidden");
+  modalLoadingText.textContent = "Reading the transcript…";
+
+  // A job already running on this file wins over cache/disk — the toolbar
+  // that reaches Stop may have been dismissed, and this is then the only way
+  // back to it, instead of landing on an empty prompt form mid-run.
+  if (runningSummarize?.filePath === filePath) {
+    modalLoadingText.textContent = "Summarizing…";
+    showModalView(modalViewLoading);
+    modalLoadingFooter.classList.remove("hidden");
+    return;
+  }
 
   // Try memory cache first
   if (summaryStore.has(filePath)) {
@@ -3496,12 +3514,27 @@ function showEnhanceProgress() {
 }
 
 function clearEnhanceButton() {
-  // Only if it is still ours: a Summarize that finished during the run owns the
-  // button now.
-  if (bgViewBtn.textContent === "Stop") {
+  // Only if it is still ours: Summarize's own Stop button now reads "Stop" too
+  // (mirroring this one), so text alone no longer proves ownership — a
+  // Summarize still running claims the slot regardless of what the button
+  // currently displays.
+  if (!runningSummarize && bgViewBtn.textContent === "Stop") {
     bgViewBtn.classList.add("hidden");
     bgViewBtn.onclick = null;
   }
+}
+
+// Shared by the toolbar's Stop button and the modal's own Stop button (the
+// reopened-via-menu case) — same job, same cancel call, same feedback.
+function stopSummarizeWithFeedback() {
+  api.cancelSummarize();
+  // Cancel lands almost immediately (kill/abort, not "wait for the next
+  // chunk" like Enhance) but still isn't instant — say so instead of going
+  // silent between the click and the result landing in runSummarize().
+  if (runningSummarize) {
+    showBgToolbar("running", "Stopping…", runningSummarize.meetingTitle);
+  }
+  bgViewBtn.classList.add("hidden");
 }
 
 async function runSummarize() {
@@ -3511,6 +3544,12 @@ async function runSummarize() {
 
   if (runningSummarize) {
     modalBusyBanner.classList.remove("hidden");
+    return;
+  }
+  // Mirrors runEnhance's own guard against a running Summarize — one job at a
+  // time owns the shared toolbar/button.
+  if (runningEnhance) {
+    showBgToolbar("running", "Enhancing transcript…", "Summarize can start once Enhance is done");
     return;
   }
   modalBusyBanner.classList.add("hidden");
@@ -3525,11 +3564,8 @@ async function runSummarize() {
   runningSummarize = { filePath, meetingTitle, instruction, folder, customName };
   showBgToolbar("running", "Summarizing…", meetingTitle);
   bgViewBtn.classList.remove("hidden");
-  bgViewBtn.textContent = "View";
-  bgViewBtn.onclick = () => {
-    // Work is still running — open the modal but keep the toolbar visible.
-    openSummarizeModal(filePath, meetingTitle);
-  };
+  bgViewBtn.textContent = "Stop";
+  bgViewBtn.onclick = stopSummarizeWithFeedback;
   closeSummarizeModal();
 
   let result;
@@ -3538,6 +3574,16 @@ async function runSummarize() {
   } catch (err) {
     result = { ok: false, error: err?.message || String(err) };
   }
+
+  // The modal may have been reopened onto this file while the job was still
+  // running (the "Summarizing…"/Stop loading view) — that view is stale the
+  // instant we get here, so hand it whatever refresh the toolbar button
+  // itself would have done, or close it when there's nothing to refresh to.
+  const syncModal = (refresh) => {
+    if (summarizeModal.classList.contains("hidden") || modalCurrentFilePath !== filePath) return;
+    if (refresh) refresh();
+    else closeSummarizeModal();
+  };
 
   if (result?.notInstalled) {
     runningSummarize = null;
@@ -3554,11 +3600,18 @@ async function runSummarize() {
       showModalView(modalViewError);
       hideBgToolbar();
     };
+    syncModal(bgViewBtn.onclick);
     return;
   }
 
   if (!result?.ok) {
     runningSummarize = null;
+    if (result?.canceled) {
+      showBgToolbar("done", "Summary stopped", `${meetingTitle} — nothing was written`);
+      bgViewBtn.classList.add("hidden");
+      syncModal();
+      return;
+    }
     showBgToolbar("error", "Summarization failed", meetingTitle);
     bgViewBtn.classList.remove("hidden");
     bgViewBtn.textContent = "Details";
@@ -3570,6 +3623,7 @@ async function runSummarize() {
       showModalView(modalViewError);
       hideBgToolbar();
     };
+    syncModal(bgViewBtn.onclick);
     return;
   }
 
@@ -3586,6 +3640,7 @@ async function runSummarize() {
   if (!saved?.ok) {
     showBgToolbar("error", "Could not save summary", saved?.error || meetingTitle);
     bgViewBtn.classList.add("hidden");
+    syncModal();
     return;
   }
 
@@ -3618,6 +3673,7 @@ async function runSummarize() {
     hideBgToolbar();
     openSummarizeModal(filePath, meetingTitle);
   };
+  syncModal(bgViewBtn.onclick);
 }
 
 // ── Preset segmented control ─────────────────────────────────────────────────
@@ -3705,6 +3761,12 @@ document
 document.getElementById("modal-btn-back").addEventListener("click", () => {
   showModalView(modalViewPrompt);
   populateModalPrompt();
+});
+// Same job the toolbar's Stop button cancels — the modal is just the other
+// way to reach it once the toolbar has been dismissed.
+modalLoadingStopBtn.addEventListener("click", () => {
+  stopSummarizeWithFeedback();
+  closeSummarizeModal();
 });
 document.getElementById("modal-btn-err-back").addEventListener("click", () => {
   showModalView(modalViewPrompt);
