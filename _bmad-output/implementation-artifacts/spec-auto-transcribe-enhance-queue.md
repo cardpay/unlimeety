@@ -14,21 +14,20 @@ baseline_commit: '315e5b1245fc01db2f67fc9136af6abf1229980d'
 
 **Problem:** After a Live session ends, the streaming transcript is never automatically re-run through a bigger batch model or Enhanced, even though both are one-click manual actions today from the Library menu.
 
-**Approach:** On every Live "Stop & save", background-queue a `large-v3` re-transcription (language inherited from that session, speaker count auto), then on its success queue an Enhance pass for the result. One small in-process FIFO queue in `main.js` reuses the existing manual `record:transcribe` / `transcripts:enhance` handler logic verbatim (parameterizing their hardcoded event-sink) and waits for the existing single-slot guards instead of erroring when busy. Also expose the queue's transcribe entry point as a new `record:autoQueueTranscribe` IPC handler — unused by any UI yet, but the hook a later Record-tab toggle (tracked in `deferred-work.md`) will call.
+**Approach:** On every Live "Stop & save", background-queue a `large-v3` re-transcription (language inherited from that session, speaker count auto). Any transcription that finishes cleanly — this Live-triggered one, a manual "Transcribe"/"Re-transcribe…" click, or a batch run — queues an Enhance pass over its own result. One small in-process FIFO queue in `main.js` reuses the existing manual `record:transcribe` / `transcripts:enhance` handler logic verbatim (parameterizing their hardcoded event-sink) and waits for the existing single-slot guards instead of erroring when busy. Also expose the queue's transcribe entry point as a new `record:autoQueueTranscribe` IPC handler — unused by any UI yet, but the hook a later Record-tab toggle (tracked in `deferred-work.md`) will call.
 
 ## Boundaries & Constraints
 
 **Always:**
-- The pipeline's transcribe step is always `openai_whisper-large-v3`, `diarize: true`, `numberOfSpeakers` unset (auto).
-- Language comes from the Live session's own `language` (as already passed into `live:saveTranscript`) — no new UI.
-- Enhance is only auto-queued after a transcribe job this pipeline itself ran, and only on full success (not partial/interrupted).
+- The Live-triggered pipeline's transcribe step is always `openai_whisper-large-v3`, `diarize: true`, `numberOfSpeakers` unset (auto). A manual Transcribe/Re-transcribe run keeps using whatever model/settings the user picked on the transcribe-settings screen — only its *Enhance chaining* is new, not its transcribe parameters.
+- Language for the Live-triggered pipeline comes from the Live session's own `language` (as already passed into `live:saveTranscript`) — no new UI.
+- Enhance is queued after ANY transcribe job that finishes cleanly (not partial/interrupted, not discarded by the staleness guard) — whether that job was manual (single click, "Re-transcribe…", or a batch run) or the Live-triggered auto-queue entry.
 - Auto-queued jobs reuse the exact same core logic as the existing manual handlers (same validation, chunking, fail-closed merge) — no duplicated logic.
 - `record:autoQueueTranscribe`'s `filePath` goes through `canReadPath` per project convention.
 
 **Ask First:** none — resolved defaults below are reviewable at the plan checkpoint via [E] Edit.
 
 **Never:**
-- Never auto-chain Enhance after the *existing* manual Transcribe / Re-transcribe / batch-transcribe flows — only the Live "Stop & save" path chains.
 - Never persist the queue across app restarts, and never build a visible progress/queue UI for it — console-log failures only.
 - Never surface auto-job progress on the `record:event` / `transcripts:enhanceProgress` channels the interactive UI listens on — would misleadingly animate Record/Library screens for a file nobody is looking at.
 - Do not build any Record-tab UI in this pass — deferred (see `deferred-work.md`).
@@ -42,6 +41,9 @@ baseline_commit: '315e5b1245fc01db2f67fc9136af6abf1229980d'
 | Auto transcribe fails/partial | Helper crash or interrupted run | No Enhance is queued | Logged via `console.warn` |
 | Wav missing at Live save time | `live.outputPath` falsy or file gone | Nothing queued | N/A |
 | `record:autoQueueTranscribe` called with a bad path | `filePath` outside managed folders / missing | `{ok:false}`, nothing queued | Same `canReadPath` gate as `record:transcribe` |
+| Manual "Transcribe"/"Re-transcribe…" finishes cleanly | User-initiated single or batch transcribe succeeds | Enhance is queued for the resulting transcript, same as the Live-triggered path | N/A |
+| Manual transcribe is cancelled or interrupted | User clicks Cancel, or a partial/`.partial.txt` run | No Enhance is queued | N/A |
+| Staleness guard discards a transcribe write | File changed since the job started (any caller) | No Enhance is queued (nothing fresh to enhance) | `{ok:false, error:'Transcript changed...'}` |
 
 </frozen-after-approval>
 
@@ -69,8 +71,17 @@ baseline_commit: '315e5b1245fc01db2f67fc9136af6abf1229980d'
 - Given a manual Enhance is in flight, when an auto-queued transcribe job's Enhance step comes up, then it waits for the slot rather than being dropped or erroring.
 - Given `record:autoQueueTranscribe` is invoked directly (e.g. from DevTools) with a valid recording path, then the same transcribe → Enhance pipeline is queued for it.
 - Given a transcript file changes (edited, renamed, or deleted) between a transcribe job starting and its write, then no write happens, no Enhance is chained, and the guard behaves identically whether the caller was the auto-queue or the existing manual `record:transcribe`.
+- Given a user manually clicks "Transcribe" or "Re-transcribe…" (single file or as part of a batch) and it finishes cleanly, then an Enhance pass is queued for the resulting transcript exactly as it would be for the Live-triggered path.
+
+**Execution (added after human renegotiation, post-ship):**
+- [x] `desktop/main.js` -- move the "queue an Enhance job" step from the auto-queue's own `.then()` callback into `runRecordTranscribeJob`'s clean-success return path, so it fires for every caller (manual single/batch transcribe, "Re-transcribe…", and the auto-queue) rather than only the auto-queue's own transcribe entries.
 
 ## Spec Change Log
+
+- **Renegotiation (post-ship, human-directed):** user asked whether a manual re-transcription also chains to Enhance, and confirmed the desired scope covers *any* manual transcription (first-time or re-transcribe, single or batch), not just re-transcribes of an already-existing file.
+  **Amended:** removed the frozen "Never auto-chain Enhance after existing manual Transcribe/Re-transcribe/batch flows" boundary; Intent, Boundaries, and I/O matrix updated to reflect that any clean transcribe success chains Enhance regardless of caller.
+  **Avoids:** re-implementing a scope the human explicitly asked to broaden.
+  **KEEP:** the Live-triggered pipeline's own transcribe parameters (`openai_whisper-large-v3`, `diarize:true`, auto speakers, language from the Live session) are unchanged and still apply only to that path — a manual transcribe keeps using whatever the transcribe-settings screen has configured. Only the *Enhance-chaining* behavior was broadened, not the Live pipeline's own model/language defaults.
 
 - **Finding (review, iteration 1, `bad_spec`):** `runRecordTranscribeJob`'s write had no staleness check, unlike `runEnhanceJob`'s existing before/after content guard — and because Live auto-opens the just-saved transcript in the editor, the auto-queue's background write is likely (not rare) to race the editor's autosave, silently losing either the user's edit or the improved batch transcript depending on timing.
   **Amended:** added a Task requiring a staleness guard on `runRecordTranscribeJob`'s write (mirrors `runEnhanceJob`'s pattern), plus two small `patch`-tier tasks (platform check on `record:autoQueueTranscribe`, clearer quit/crash comment) folded into the same pass since a full re-implementation was already required.

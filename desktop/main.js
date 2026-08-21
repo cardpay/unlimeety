@@ -2103,7 +2103,10 @@ const FAIL_FAST_PARTS = 3;
 // mid-run costs model time, not data. Cancelling just stops the next call.
 app.on('before-quit', () => { enhanceCancelled = true; });
 
-// ─── Auto-queue: Live "Stop & save" → large-v3 re-transcribe → Enhance ───────
+// ─── Auto-queue: transcribe → Enhance, plus Live's own auto re-transcribe ────
+// Every transcription that finishes cleanly — manual click, "Re-transcribe…",
+// a batch run, or the auto-queue's own Live-triggered pass — pushes its own
+// Enhance step here (see the chaining note at runRecordTranscribeJob's return).
 // A background FIFO, drained by a 2s poll rather than a while-loop so it can
 // gate each queued step on that step's own resource (`transcriber.proc` for a
 // transcribe entry, `enhanceInFlight` for an enhance entry) without blocking
@@ -2140,9 +2143,9 @@ setInterval(() => {
             diarize: true,
             // numberOfSpeakers left undefined — auto-detect.
         }, () => {}).then((result) => {
-            if (result?.ok) {
-                autoPipelineQueue.push({ type: 'enhance', filePath: result.transcriptPath });
-            } else {
+            // On success, runRecordTranscribeJob itself queues the Enhance
+            // step (see its return) — nothing left to do here but log a miss.
+            if (!result?.ok) {
                 console.warn(`auto-queue: transcribe failed for ${head.filePath} — ${result?.error || 'unknown error'}`);
             }
         }).catch((err) => {
@@ -3554,7 +3557,8 @@ ipcMain.handle('record:pickAudioFile', async () => {
 
 // Shared by the manual `record:transcribe` handler and the auto-queue —
 // `sendEvent` is `recordSendToRenderer` for the manual call, a no-op for the
-// auto-queue (its progress must never reach the Record tab's UI).
+// auto-queue (its progress must never reach the Record tab's UI). Every clean
+// success — either caller — queues its own Enhance pass; see the return below.
 async function runRecordTranscribeJob(opts, sendEvent) {
     if (process.platform !== 'darwin') {
         return { ok: false, error: 'Local transcription is macOS-only.' };
@@ -3820,6 +3824,11 @@ async function runRecordTranscribeJob(opts, sendEvent) {
         }
         noteSessionFlushed('transcriber');
         if (interrupted) return { ok: false, error: 'Transcription interrupted.', transcriptPath };
+        // Any clean transcription — manual, "Re-transcribe…", batch, or
+        // auto-queued — chains an Enhance pass over its own result. Queued
+        // (not run inline) so it waits its turn behind whatever else is busy,
+        // same as every other auto-queue entry.
+        autoPipelineQueue.push({ type: 'enhance', filePath: transcriptPath });
         return { ok: true, transcriptPath };
     } catch (err) {
         noteSessionFlushed('transcriber');
