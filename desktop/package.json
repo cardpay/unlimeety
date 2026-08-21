@@ -27,6 +27,7 @@
             "summary-frontmatter.js",
             "glossary.js",
             "transcript-enhance.js",
+    "job-queue.js",
             "renderer/**",
             "build/**"
         ],
