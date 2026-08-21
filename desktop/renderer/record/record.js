@@ -18,6 +18,7 @@
         console.warn('[record] window.recordApi is not exposed; Record tab disabled');
         return;
     }
+    const queueApi = window.queueApi;
 
     // ─── DOM refs ────────────────────────────────────────────────────────
     const $ = (id) => document.getElementById(id);
@@ -166,20 +167,41 @@
             // stays OFF by default. Users can still opt in via the toggle.
             vadFilter: false,
         },
+        // True only for the short window where runBatchTranscribe is still
+        // firing off its submit calls — guards against a double-click queuing
+        // the same batch twice. Not a transcribing indicator any more (the
+        // queue is): see activeTranscribeJob/anyTranscribeActive below.
         batchRunning: false,
         // Set when the user enters the settings screen: holds the file paths
         // queued for the eventual batch run. Cleared when the batch finishes
         // or the user backs out via Cancel.
         pendingBatchTargets: null,
-        // File paths currently being transcribed (single-file or batch).
-        // Drives the sidebar "is-transcribing" affordance + locks the CTA.
-        transcribingPaths: new Set(),
         // Path of the recording currently loaded into the inline player (null
         // when the player is hidden). Drives the per-card play/pause icon.
         playingPath: null,
     };
 
     let currentItems = [];
+
+    // ─── Job queue ───────────────────────────────────────────────────────
+    // The single source of truth for "is this file transcribing" — replaces
+    // the old locally-tracked `transcribingPaths` set, which could only ever
+    // reflect a run this renderer itself started sequentially. A submit now
+    // returns immediately, and a transcribe can just as well be an
+    // auto-chained re-transcription this tab never asked for.
+    let queueJobs = [];
+    // The job this tab's own "transcribing" screen (single-file flow) is
+    // currently watching — what the Cancel button on that screen targets.
+    let currentTranscribeJobId = null;
+
+    function activeTranscribeJob(filePath) {
+        return queueJobs.find(
+            (j) => j.type === 'transcribe' && j.filePath === filePath
+                && (j.status === 'queued' || j.status === 'running'));
+    }
+    function anyTranscribeActive() {
+        return queueJobs.some((j) => j.type === 'transcribe' && (j.status === 'queued' || j.status === 'running'));
+    }
 
     // ─── Transcribe presets + auto-persisted settings (localStorage) ─────────
     // There's no main-process settings store; the renderer owns this. We keep
@@ -288,6 +310,21 @@
 
     api.onListChanged(() => refreshHistory());
 
+    // Sidebar spinners, the CTA's busy count, and the idle-screen banner all
+    // read `queueJobs` — refresh them on every broadcast, not just when this
+    // tab itself submitted the job (an auto-chained re-transcription from
+    // Live is just as much "transcribing" as one this tab started). Hydrated
+    // once up front too, or a reload leaves them stale until the next
+    // unrelated broadcast happens to arrive.
+    function onQueueJobsChanged(jobs) {
+        queueJobs = jobs;
+        renderSidebarList(currentItems);
+        recomputeCta();
+        updateTransActiveBanner();
+    }
+    queueApi?.onChanged(onQueueJobsChanged);
+    queueApi?.list().then(onQueueJobsChanged);
+
     // ─── Show/hide sections ──────────────────────────────────────────────
     function showSection(name) {
         state.phase = name;
@@ -315,7 +352,7 @@
     }
 
     function updateTransActiveBanner() {
-        const active = state.transcribingPaths.size > 0 || state.batchRunning;
+        const active = anyTranscribeActive() || state.batchRunning;
         transActiveBanner?.classList.toggle('hidden', !active || state.phase !== 'idle');
     }
 
@@ -530,21 +567,10 @@
         if (!targets.length) return;
         if (targets.length === 1) {
             const fp = targets[0];
-            state.transcribingPaths.add(fp);
-            renderSidebarList(currentItems);
-            recomputeCta();
-            updateTransActiveBanner();
-            updateTranscribeQueue(fp, []);
-            try {
-                await startTranscription(fp);
-            } finally {
-                state.transcribingPaths.delete(fp);
-                state.pendingBatchTargets = null;
-                clearTranscribeQueue();
-                renderSidebarList(currentItems);
-                recomputeCta();
-                updateTransActiveBanner();
-            }
+            state.pendingBatchTargets = null;
+            // Sidebar spinner / CTA lock / banner all follow the queue now
+            // (see queueApi.onChanged below) — no local bookkeeping needed.
+            await startTranscription(fp);
         } else {
             await runBatchTranscribe(targets);
         }
@@ -656,9 +682,10 @@
     }
 
     cancelTransBtn.addEventListener('click', async () => {
+        if (!currentTranscribeJobId) return;
         cancelTransBtn.disabled = true;
         cancelTransBtn.querySelector('span:last-child').textContent = 'Cancelling…';
-        await api.cancelTranscribe();
+        await queueApi.cancel(currentTranscribeJobId);
         // We'll get a `transcriberExited` event; the settings screen is
         // restored from there.
     });
@@ -670,11 +697,20 @@
         showSection('idle');
     });
 
-    viewQueueBtn?.addEventListener('click', () => showSection('transcribing'));
+    // The on-page NOW/NEXT queue widget is gone — the header panel (app.js)
+    // is the one place that shows everything queued/running across every tab.
+    viewQueueBtn?.addEventListener('click', () => window.queuePanel?.open());
 
     // ─── Helper events ───────────────────────────────────────────────────
     api.onEvent((event) => {
         if (!event || typeof event.type !== 'string') return;
+        // Transcribe events are tagged with the producing job's id (see
+        // makeTranscribeSink in main.js) — several transcribe jobs can exist
+        // at once (one running, others queued), so a background job's
+        // segment/status events must not render into whatever this tab
+        // happens to have open. Recorder-lifecycle events (recording,
+        // audioLevel, recordSaved, …) carry no jobId and always pass through.
+        if (event.jobId && event.jobId !== currentTranscribeJobId) return;
 
         switch (event.type) {
             case 'autoStop':
@@ -790,15 +826,41 @@
         }
     });
 
-    async function startTranscription(filePath) {
-        showSection('transcribing');
-        setTransStatus('loading', 'Starting…');
-        transStream.innerHTML = '';
-        transDownload.classList.add('hidden');
-        transProgressBar.style.width = '0%';
+    // Resolves once `jobId` leaves the queue (done/failed/canceled), with the
+    // same { ok, transcriptPath } / { ok: false, error } shape the direct
+    // record:transcribe call used to resolve with — record:transcribe now
+    // only submits, so this is what actually waits for the result.
+    function waitForQueueJob(jobId) {
+        return new Promise((resolve) => {
+            let dispose;
+            const check = (jobs) => {
+                const job = jobs.find((j) => j.id === jobId);
+                if (!job) {
+                    // The only way a submitted job vanishes outright (rather
+                    // than settling to a terminal status) is a cancel while
+                    // it was still `queued` — job-queue.js drops those
+                    // instead of marking them. Without this the promise would
+                    // never resolve and this screen would hang forever.
+                    dispose?.();
+                    resolve({ ok: false, canceled: true });
+                    return;
+                }
+                if (job.status === 'queued') {
+                    setTransStatus('loading', 'Waiting for another transcription to finish…');
+                    return;
+                }
+                if (job.status === 'running') return; // per-event progress covers this (api.onEvent below)
+                dispose?.();
+                resolve(job.result || (job.error ? { ok: false, error: job.error } : { ok: false }));
+            };
+            dispose = queueApi.onChanged(check);
+            queueApi.list().then(check);
+        });
+    }
 
-        // Both single-file and batch flows go through the same settings
-        // screen — so the saved batchSettings are the source of truth.
+    // Both single-file and batch flows go through the same settings screen —
+    // so the saved batchSettings are the source of truth for either.
+    function buildTranscribeOpts(filePath) {
         const bs = state.batchSettings;
         // Expected-speakers pill → integer count; 'auto' and '6+' mean
         // "let the model decide" (no fixed count), so only a pure-digit
@@ -806,7 +868,7 @@
         const numberOfSpeakers = /^\d+$/.test(bs.expectedSpeakers)
             ? parseInt(bs.expectedSpeakers, 10)
             : null;
-        const res = await api.transcribe({
+        return {
             filePath,
             model: bs.model,
             language: bs.language,
@@ -817,10 +879,22 @@
             temperature: bs.temperature,
             vadFilter: bs.vadFilter,
             mergeAdjacent: bs.mergeAdjacent,
-        });
+        };
+    }
 
-        if (!res?.ok) {
-            setTransStatus('idle', res?.error || 'Transcription failed');
+    // Single-file flow only — batch submits directly via runBatchTranscribe
+    // and never shows this screen (see its own comment for why).
+    async function startTranscription(filePath) {
+        showSection('transcribing');
+        setTransStatus('loading', 'Starting…');
+        transStream.innerHTML = '';
+        transDownload.classList.add('hidden');
+        transProgressBar.style.width = '0%';
+
+        const submitRes = await api.transcribe(buildTranscribeOpts(filePath));
+
+        const fail = (message) => {
+            setTransStatus('idle', message || 'Transcription failed');
             // Surface a recovery affordance: a back button reusing cancel slot.
             cancelTransBtn.querySelector('span:last-child').textContent = 'Back';
             cancelTransBtn.disabled = false;
@@ -829,57 +903,27 @@
                 cancelTransBtn.querySelector('span:last-child').textContent = 'Cancel';
                 showSection('transcribeSettings');
             };
-            return;
-        }
+        };
+
+        if (!submitRes?.ok) { fail(submitRes?.error); return; }
+
+        currentTranscribeJobId = submitRes.jobId;
+        const res = await waitForQueueJob(submitRes.jobId);
+        currentTranscribeJobId = null;
+
+        if (!res?.ok) { fail(res?.error); return; }
 
         showSection('idle');
         refreshHistory();
 
-        // Single-file flow: announce the freshly created transcript so the
-        // Transcripts tab (app.js) can jump to it and open it. In a batch run
-        // we stay put — the batch runner fires the event once at the very end
-        // (see runBatchTranscribe) and opens the last result.
-        if (!state.batchRunning && res.transcriptPath) {
+        // Announce the freshly created transcript so the Transcripts tab
+        // (app.js) can jump to it and open it.
+        if (res.transcriptPath) {
             document.dispatchEvent(new CustomEvent('transcript:created', {
                 detail: { filePath: res.transcriptPath },
             }));
         }
-        return res.transcriptPath;   // batch runner collects this
-    }
-
-    // ─── Transcribe queue UI ─────────────────────────────────────────────
-    function updateTranscribeQueue(currentPath, pendingPaths) {
-        const wrap = $('record-trans-queue');
-        const nowEl = $('record-trans-now-file');
-        const pendingWrap = $('record-trans-pending');
-        const pendingList = $('record-trans-pending-list');
-        if (!wrap) return;
-        if (!currentPath && (!pendingPaths || !pendingPaths.length)) {
-            wrap.classList.add('hidden');
-            return;
-        }
-        wrap.classList.remove('hidden');
-        if (nowEl) {
-            const base = currentPath ? (currentPath.split('/').pop() || currentPath) : '—';
-            nowEl.textContent = base.replace(/\.wav$/i, '');
-        }
-        const pending = (pendingPaths || []).filter(p => p && p !== currentPath);
-        if (!pendingList) return;
-        if (!pending.length) {
-            pendingWrap?.classList.add('hidden');
-            pendingList.innerHTML = '';
-            return;
-        }
-        pendingWrap?.classList.remove('hidden');
-        pendingList.innerHTML = '';
-        for (const p of pending) {
-            const li = document.createElement('li');
-            li.textContent = (p.split('/').pop() || p).replace(/\.wav$/i, '');
-            pendingList.appendChild(li);
-        }
-    }
-    function clearTranscribeQueue() {
-        updateTranscribeQueue(null, []);
+        return res.transcriptPath;
     }
 
     // ─── Sidebar library: render + batch CTA ─────────────────────────────
@@ -905,7 +949,7 @@
     function cardEl(item, opts) {
         const isPending = !item.hasTranscript;
         const isSelected = state.selectedRecordings.has(item.filePath);
-        const isTranscribing = state.transcribingPaths.has(item.filePath);
+        const isTranscribing = Boolean(activeTranscribeJob(item.filePath));
         const card = document.createElement('div');
         card.className = 'record-sb-card'
             + (isPending ? '' : ' is-transcribed')
@@ -1039,8 +1083,12 @@
         const selected = items.filter(it => state.selectedRecordings.has(it.filePath));
         const n = selected.length;
         const total = items.length;
-        const busy = state.batchRunning || state.transcribingPaths.size > 0;
-        const inFlight = state.transcribingPaths.size;
+        // Only this tab's own "still firing off submit calls" window gates
+        // the CTA — an unrelated (or even a same-file) background transcribe
+        // job must never block submitting a new batch; that would reintroduce
+        // exactly the refusal this feature exists to remove. Per-card
+        // spinners still come from the queue (see cardEl's activeTranscribeJob).
+        const busy = state.batchRunning;
 
         const summaryLabel = $('record-sb-summary-label');
         const ctaLabel = $('record-sb-cta-label');
@@ -1052,14 +1100,16 @@
         const masterCb = $('record-sb-master-cb');
 
         if (summaryLabel) {
-            if (busy) summaryLabel.textContent = `Transcribing ${inFlight}…`;
+            // `n` still reflects the submitted selection here: runBatchTranscribe
+            // only clears it once every submit call has fired (see its `finally`).
+            if (busy) summaryLabel.textContent = `Queuing ${n}…`;
             else if (total === 0) summaryLabel.textContent = 'No recordings';
             else if (n === total) summaryLabel.textContent = `${total} recordings — all selected`;
             else if (n === 0) summaryLabel.textContent = `0 of ${total} selected`;
             else summaryLabel.textContent = `${n} of ${total} selected`;
         }
         if (ctaLabel) {
-            if (busy) ctaLabel.textContent = `Transcribing… (${inFlight} left)`;
+            if (busy) ctaLabel.textContent = `Queuing ${n} recordings…`;
             else if (n === 0) ctaLabel.textContent = 'Select recordings to transcribe';
             else if (n === total) ctaLabel.textContent = `Send all ${n} to transcription`;
             else ctaLabel.textContent = `Send ${n} selected to transcription`;
@@ -1347,58 +1397,30 @@
         showSection('transcribeSettings');
     }
 
+    // One submit per file — every one is accepted immediately and drained in
+    // order by the transcribe lane; the header panel (app.js) is what shows
+    // progress and failures now, not this screen. Replaces the old
+    // sequential await-per-file loop and its on-page NOW/NEXT queue widget.
     async function runBatchTranscribe(filePaths) {
         if (state.batchRunning) return;
         state.batchRunning = true;
-        state.transcribingPaths = new Set(filePaths);
-        renderSidebarList(currentItems);
-        recomputeCta();
-        updateTransActiveBanner();
-        const failures = [];
-        const created = [];
         try {
-            for (let i = 0; i < filePaths.length; i++) {
-                const fp = filePaths[i];
-                state.outputPath = fp;
-                updateTranscribeQueue(fp, filePaths.slice(i + 1));
-                try {
-                    const tp = await startTranscription(fp);
-                    // startTranscription does not throw on transcribe failures;
-                    // it surfaces a "Back" affordance and keeps phase === 'transcribing'.
-                    // Treat a non-idle phase after the await as a failure for this item.
-                    if (state.phase !== 'idle') failures.push({ path: fp });
-                    else if (tp) created.push(tp);
-                } catch (err) {
-                    failures.push({ path: fp, err: err?.message || String(err) });
-                } finally {
-                    state.transcribingPaths.delete(fp);
-                    renderSidebarList(currentItems);
-                    recomputeCta();
-                    updateTransActiveBanner();
-                }
+            // record:transcribe only ever submits (it can't refuse — see
+            // job-queue.js) so there is no submit-failure path to handle here;
+            // a bad file/path still fails, just later, as a failed job the
+            // header panel shows.
+            for (const fp of filePaths) {
+                await api.transcribe(buildTranscribeOpts(fp));
             }
         } finally {
             state.batchRunning = false;
-            state.transcribingPaths.clear();
             state.pendingBatchTargets = null;
             state.selectedRecordings.clear();
-            clearTranscribeQueue();
+            renderSidebarList(currentItems);
+            recomputeCta();
             updateTransActiveBanner();
+            showSection('idle');
             refreshHistory();
-            // Whole batch done → jump to the last successfully created transcript.
-            if (created.length) {
-                document.dispatchEvent(new CustomEvent('transcript:created', {
-                    detail: { filePath: created[created.length - 1] },
-                }));
-            }
-            if (failures.length) {
-                console.error('Batch transcribe: failures', failures);
-                const errEl = $('record-setup-error');
-                if (errEl) {
-                    errEl.textContent = `${failures.length} of ${filePaths.length} failed. Check console.`;
-                    errEl.classList.remove('hidden');
-                }
-            }
         }
     }
     $('record-sb-settings')?.addEventListener('click', () => {
@@ -1802,7 +1824,7 @@
         const menu = document.createElement('div');
         menu.className = 'meeting-menu';
         menu.setAttribute('role', 'menu');
-        const isTranscribingNow = state.transcribingPaths.has(item.filePath);
+        const isTranscribingNow = Boolean(activeTranscribeJob(item.filePath));
         const items = [
             { label: 'Rename…', icon: 'pencil', enabled: true, action: async () => {
                 const rect = anchorBtn.getBoundingClientRect();

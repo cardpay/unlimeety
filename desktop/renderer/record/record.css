@@ -805,59 +805,6 @@ body[data-record-phase="recording"] .record-sidebar { display: none; }
     overflow: hidden;
 }
 
-.record-trans-queue {
-    padding: 10px 18px;
-    border-bottom: 1px solid var(--border);
-    background: var(--bg-base);
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-}
-.record-trans-now {
-    display: flex;
-    align-items: baseline;
-    gap: 10px;
-}
-.record-trans-now-label,
-.record-trans-pending-label {
-    text-transform: uppercase;
-    font-size: 9px;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    color: var(--text-muted);
-    flex-shrink: 0;
-    width: 40px;
-}
-.record-trans-now-file {
-    font-family: var(--font-mono);
-    font-size: 12px;
-    color: var(--accent);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    flex: 1;
-}
-.record-trans-pending {
-    display: flex;
-    align-items: baseline;
-    gap: 10px;
-}
-.record-trans-pending-list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    font-family: var(--font-mono);
-    font-size: 11px;
-    color: var(--text-muted);
-    flex: 1;
-    overflow: hidden;
-}
-.record-trans-pending-list li {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
 /* ─── Transcribe settings (Variant C) ───────────────────────────────────── */
 #record-transcribe-settings {
     flex: 1;

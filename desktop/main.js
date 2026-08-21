@@ -6,9 +6,46 @@ const { execFile, spawn } = require('child_process');
 const { normalizeSummary, hasValidFrontmatter } = require('./summary-frontmatter');
 const glossary = require('./glossary');
 const enhance = require('./transcript-enhance');
+const { createJobQueue } = require('./job-queue');
 
 const TRANSCRIPTS_FOLDER = path.join(os.homedir(), 'Downloads', 'Meet_Transcripts');
 const RECORDINGS_FOLDER = path.join(os.homedir(), 'Downloads', 'Meet_Recordings');
+
+// ─── Job queue ─────────────────────────────────────────────────────────────
+// Single queue for every transcribe/enhance/summarize run. Lanes are
+// registered next to each executor below (runEnhanceJob, runRecordTranscribeJob,
+// runSummarizeJob); this just creates the (pure, Electron-free) scheduler and
+// wires its broadcast to the renderer. See job-queue.js for the scheduling
+// rules and spec-universal-job-queue.md for the design.
+const queue = createJobQueue();
+queue.onChange((jobs) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    mainWindow.webContents.send('queue:changed', jobs);
+});
+
+// Background-queue a bigger, more accurate re-transcription of `filePath` —
+// used by live:saveTranscript (its own session's wav) and record:autoQueueTranscribe.
+// Its own successful completion chains an Enhance pass; see runRecordTranscribeJob's
+// return. Replaces the old autoPipelineQueue: same large-v3/diarize-on defaults,
+// now a visible, cancelable job instead of a silent 2s-polled FIFO.
+function queueAutoTranscribe(filePath, language) {
+    return queue.submit('transcribe', filePath, {
+        title: path.basename(filePath),
+        extra: {
+            filePath,
+            model: 'openai_whisper-large-v3',
+            language,
+            diarize: true,
+            // numberOfSpeakers left undefined — auto-detect.
+        },
+    });
+}
+
+// The header panel's only bridge: one snapshot on demand, one cancel-by-id,
+// plus the `queue:changed` broadcast wired above.
+ipcMain.handle('queue:list', () => queue.list());
+ipcMain.handle('queue:cancel', (_e, jobId) => ({ ok: queue.cancel(jobId) }));
+ipcMain.handle('queue:dismiss', (_e, jobId) => ({ ok: queue.dismiss(jobId) }));
 
 // ─── Config (persisted to userData/config.json) ───────────────────────────────
 
@@ -1110,7 +1147,17 @@ let claudeIsolationSupported = true;
 // them changes behavior.
 async function runClaudeCode(content, promptInstruction, onAbort) {
     const claudePath = await findClaude();
-    if (!claudePath) return { ok: false, notInstalled: true };
+    // `error` alongside `notInstalled` so a generic consumer (the job queue
+    // panel, which has no per-provider special-casing) still shows something
+    // actionable instead of a bare "Job failed." Summarize's own modal still
+    // reads `notInstalled` directly for its richer "Install it…" view.
+    if (!claudePath) {
+        return {
+            ok: false,
+            notInstalled: true,
+            error: 'Claude Code not found. Install it, or pick another provider in Settings.',
+        };
+    }
 
     const isWin = process.platform === 'win32';
     const extraPaths = isWin
@@ -1371,26 +1418,16 @@ async function runSummarizerProvider(content, promptInstruction, cfg, onAbort) {
     }
 }
 
-// One summarize job at a time, process-wide — mirrors Enhance's own
-// in-flight/cancel pair. `summarizeAbort` holds whatever the active provider
-// handed back through `onAbort`; summarize:cancel just calls it.
-let summarizeInFlight = false;
+// One summarize job at a time, process-wide — the summarize lane already
+// guarantees that; these two just carry the current run's cancel handle.
+// `summarizeAbort` holds whatever the active provider handed back through
+// `onAbort`; the lane's cancel hook (registered below) just calls it.
 let summarizeCancelRequested = false;
 let summarizeAbort = null;
 
-ipcMain.handle('summarize:cancel', () => {
-    // Meaningful only while a run is in flight; calling it on an idle app is a
-    // harmless no-op (still returns ok:true).
-    if (summarizeInFlight) {
-        summarizeCancelRequested = true;
-        if (summarizeAbort) summarizeAbort.abort();
-    }
-    return { ok: true };
-});
-
-ipcMain.handle('summarize:run', async (_e, filePath, promptInstruction) => {
-    // A second run must not disturb the first one's abort handle.
-    if (summarizeInFlight) return { ok: false, error: 'Another summary is already running.' };
+// The `summarize:run` body, unchanged — now called by the queue instead of
+// directly by the IPC handler, which only submits.
+async function runSummarizeJob(filePath, promptInstruction) {
     if (!canReadPath(filePath)) return { ok: false, error: 'File is not accessible.' };
     let content;
     try {
@@ -1410,7 +1447,6 @@ ipcMain.handle('summarize:run', async (_e, filePath, promptInstruction) => {
     }
 
     const cfg = readSummarizerConfig();
-    summarizeInFlight = true;
     summarizeCancelRequested = false;
     summarizeAbort = null;
     let result;
@@ -1422,7 +1458,6 @@ ipcMain.handle('summarize:run', async (_e, filePath, promptInstruction) => {
             if (summarizeCancelRequested) handle.abort();
         });
     } finally {
-        summarizeInFlight = false;
         summarizeAbort = null;
     }
     if (!result?.ok) return result;
@@ -1452,6 +1487,25 @@ ipcMain.handle('summarize:run', async (_e, filePath, promptInstruction) => {
     const date = `${parts.y}-${parts.mo}-${parts.d}`;
     const { text, repairs } = normalizeSummary(result.summary, { date });
     return { ...result, summary: text, repairs };
+}
+
+queue.registerLane('summarize', {
+    run: (job) => runSummarizeJob(job.filePath, job.extra?.promptInstruction),
+    cancel: () => {
+        summarizeCancelRequested = true;
+        if (summarizeAbort) summarizeAbort.abort();
+    },
+});
+
+// Submits and returns immediately — the result arrives via `queue:changed`.
+// A second call for the same file while one is already queued/running just
+// hands back that job's id (see job-queue.js's duplicate collapse).
+ipcMain.handle('summarize:run', (_e, filePath, promptInstruction) => {
+    const job = queue.submit('summarize', filePath, {
+        title: path.basename(filePath),
+        extra: { promptInstruction },
+    });
+    return { ok: true, jobId: job.id };
 });
 
 // ─── IPC: Follow-up draft ─────────────────────────────────────────────────────
@@ -2091,7 +2145,8 @@ ipcMain.handle('transcripts:create', async (_e, payload) => {
 
 // One at a time, process-wide: two passes over the same transcript would each
 // hold a full copy in memory and the loser would write its stale one back.
-let enhanceInFlight = false;
+// The enhance lane already guarantees this; the flag only remains to let a
+// long-running pass notice a cancel between chunks.
 let enhanceCancelled = false;
 
 // Rejections before the first usable part: the same failure repeats on every
@@ -2103,77 +2158,21 @@ const FAIL_FAST_PARTS = 3;
 // mid-run costs model time, not data. Cancelling just stops the next call.
 app.on('before-quit', () => { enhanceCancelled = true; });
 
-// ─── Auto-queue: transcribe → Enhance, plus Live's own auto re-transcribe ────
-// Every transcription that finishes cleanly — manual click, "Re-transcribe…",
-// a batch run, or the auto-queue's own Live-triggered pass — pushes its own
-// Enhance step here (see the chaining note at runRecordTranscribeJob's return).
-// A background FIFO, drained by a 2s poll rather than a while-loop so it can
-// gate each queued step on that step's own resource (`transcriber.proc` for a
-// transcribe entry, `enhanceInFlight` for an enhance entry) without blocking
-// on the other — an unrelated manual Enhance shouldn't stall a queued
-// transcribe, or vice versa. Only a job still sitting in this array (not yet
-// dequeued) is lost on quit/crash; a job already running when quit begins
-// goes through the existing transcriber/enhanceInFlight quit-flush behavior
-// (wait, then mark partial/interrupted) exactly like any other manual run.
-// Not persisted, not cancellable, no progress UI — by design (see spec).
-const autoPipelineQueue = []; // { type: 'transcribe' | 'enhance', filePath, language }
-
-// Progress/events from an auto-queued job must never reach the Record tab or
-// Library UI (nobody is looking at this file) — this shim swallows them all.
-const silentEnhanceSender = {
-    send() {}, once() {}, on() {}, off() {},
-    isDestroyed() { return !mainWindow || mainWindow.isDestroyed(); },
-};
-
-function enqueueAutoPipeline(filePath, language) {
-    autoPipelineQueue.push({ type: 'transcribe', filePath, language });
+// Every enhance job — user-clicked or auto-chained after a transcribe (see
+// runRecordTranscribeJob's return) — runs through the queue, so it always has
+// a sink rather than the real `event.sender`. `isDestroyed: () => false` is
+// deliberate: a queued job outlives the window that submitted it, and
+// teardown-on-navigation belonged to a renderer-owned run.
+function makeEnhanceSink(updateProgress) {
+    return {
+        send: (_channel, payload) => updateProgress(payload),
+        once() {}, on() {}, off() {},
+        isDestroyed: () => false,
+    };
 }
 
-setInterval(() => {
-    const head = autoPipelineQueue[0];
-    if (!head) return;
-
-    if (head.type === 'transcribe') {
-        if (transcriber.proc) return; // manual transcribe running — wait
-        autoPipelineQueue.shift();
-        runRecordTranscribeJob({
-            filePath: head.filePath,
-            model: 'openai_whisper-large-v3',
-            language: head.language,
-            diarize: true,
-            // numberOfSpeakers left undefined — auto-detect.
-        }, () => {}).then((result) => {
-            // On success, runRecordTranscribeJob itself queues the Enhance
-            // step (see its return) — nothing left to do here but log a miss.
-            if (!result?.ok) {
-                console.warn(`auto-queue: transcribe failed for ${head.filePath} — ${result?.error || 'unknown error'}`);
-            }
-        }).catch((err) => {
-            console.warn(`auto-queue: transcribe threw for ${head.filePath} — ${err.message}`);
-        });
-    } else {
-        if (enhanceInFlight) return; // manual Enhance running — wait
-        autoPipelineQueue.shift();
-        runEnhanceJob(head.filePath, silentEnhanceSender).then((result) => {
-            if (!result?.ok) {
-                console.warn(`auto-queue: enhance failed for ${head.filePath} — ${result?.error || 'unknown error'}`);
-            }
-        }).catch((err) => {
-            console.warn(`auto-queue: enhance threw for ${head.filePath} — ${err.message}`);
-        });
-    }
-}, 2000);
-
-ipcMain.handle('transcripts:enhanceCancel', () => {
-    // Only meaningful while a pass is running; the flag is cleared by the run
-    // itself, so setting it on an idle app is harmless.
-    enhanceCancelled = enhanceInFlight;
-    return { ok: true };
-});
-
-// Shared by the manual `transcripts:enhance` handler and the auto-queue —
-// `sender` is `event.sender` for the manual call, a silent shim for the
-// auto-queue (its progress must never reach the Library's UI).
+// Shared by the manual `transcripts:enhance` handler and any auto-chained
+// enhance — `sender` is always the queue's sink now (see makeEnhanceSink).
 async function runEnhanceJob(filePath, sender) {
     if (typeof filePath !== 'string' || !isPathInside(filePath, TRANSCRIPTS_FOLDER)) {
         return { ok: false, error: 'Refusing to operate on a path outside the transcripts folder.' };
@@ -2186,7 +2185,6 @@ async function runEnhanceJob(filePath, sender) {
     if (!canReadPath(filePath) || !canWritePath(filePath)) {
         return { ok: false, error: 'File is not accessible.' };
     }
-    if (enhanceInFlight) return { ok: false, error: 'Another transcript is being enhanced.' };
 
     let original;
     try {
@@ -2218,7 +2216,6 @@ async function runEnhanceJob(filePath, sender) {
     sender.once('destroyed', stopOnGone);
     sender.on('did-start-navigation', stopOnGone);
 
-    enhanceInFlight = true;
     enhanceCancelled = false;
     let skipped = 0;
     let done = 0;
@@ -2316,13 +2313,22 @@ async function runEnhanceJob(filePath, sender) {
     } catch (err) {
         return { ok: false, error: err.message };
     } finally {
-        enhanceInFlight = false;
         enhanceCancelled = false;
         if (!sender.isDestroyed()) sender.off('did-start-navigation', stopOnGone);
     }
 }
 
-ipcMain.handle('transcripts:enhance', (event, filePath) => runEnhanceJob(filePath, event.sender));
+queue.registerLane('enhance', {
+    run: (job, updateProgress) => runEnhanceJob(job.filePath, makeEnhanceSink(updateProgress)),
+    cancel: () => { enhanceCancelled = true; },
+});
+
+// Submits and returns immediately — the result (including the updated
+// content, for the in-editor reload) arrives via `queue:changed`.
+ipcMain.handle('transcripts:enhance', (_e, filePath) => {
+    const job = queue.submit('enhance', filePath, { title: path.basename(filePath) });
+    return { ok: true, jobId: job.id };
+});
 
 ipcMain.handle('transcripts:rename', async (_e, filePath, newTitle) => {
     if (typeof filePath !== 'string' || !filePath.startsWith(TRANSCRIPTS_FOLDER)) {
@@ -2897,7 +2903,7 @@ ipcMain.handle('live:saveTranscript', async (_e, payload) => {
         // same session, then (on its success) an Enhance pass over the
         // result — no manual action needed. Skipped if the wav never existed
         // or has since vanished; nothing else here depends on it either way.
-        if (wavPath && fs.existsSync(wavPath)) enqueueAutoPipeline(wavPath, language);
+        if (wavPath && fs.existsSync(wavPath)) queueAutoTranscribe(wavPath, language);
         noteSessionFlushed('live');
         return { ok: true, filePath, audioPath: wavPath };
     } catch (err) {
@@ -3005,6 +3011,43 @@ const transcriber = {
 function recordSendToRenderer(event) {
     if (!mainWindow || mainWindow.isDestroyed()) return;
     mainWindow.webContents.send('record:event', event);
+}
+
+// A short, human label for the job panel — the Record tab keeps its own rich
+// per-segment live view (still fed by recordSendToRenderer below); this is
+// only the summary a header panel row has room for.
+function transcribeStatusLabel(evt) {
+    switch (evt?.type) {
+        case 'transcribeStarted': return 'Loading model…';
+        case 'modelDownload': {
+            const pct = Math.round(Math.max(0, Math.min(1, Number(evt.progress) || 0)) * 100);
+            return `Downloading model… ${pct}%`;
+        }
+        case 'loaded': return 'Audio loaded';
+        case 'transcribing': return 'Transcribing…';
+        case 'diarizing': return 'Labeling speakers…';
+        case 'diarizationComplete': return 'Saving transcript…';
+        case 'diarizationFailed': return 'Speaker labels unavailable — saving transcript…';
+        default: return null;
+    }
+}
+
+// The transcribe lane's sink: forwards every event to the Record tab exactly
+// as a manual run always has (whoever's on that tab keeps its live progress
+// view), and separately distills the job's own `progress` for the header
+// panel. Used for both the manual `record:transcribe` handler and any
+// auto-queued re-transcription — there is no more "silent" variant; every
+// transcribe job is an ordinary, visible job. Tagged with the producing
+// job's id/filePath: several transcribe jobs can exist at once (one running,
+// others queued) and record:event has no other way to say which job a given
+// segment/status update belongs to — without this, a background job's
+// progress renders into whatever the Record tab happens to have open.
+function makeTranscribeSink(job, updateProgress) {
+    return (evt) => {
+        recordSendToRenderer({ ...evt, jobId: job.id, filePath: job.filePath });
+        const label = transcribeStatusLabel(evt);
+        if (label) updateProgress({ label });
+    };
 }
 
 function recordHandleEvent(event) {
@@ -3179,8 +3222,8 @@ ipcMain.handle('record:autoQueueTranscribe', (_e, filePath, language) => {
         return { ok: false, error: 'Local transcription is macOS-only.' };
     }
     if (!canReadPath(filePath)) return { ok: false, error: 'File is not accessible.' };
-    enqueueAutoPipeline(filePath, typeof language === 'string' ? language : '');
-    return { ok: true };
+    const job = queueAutoTranscribe(filePath, typeof language === 'string' ? language : '');
+    return { ok: true, jobId: job.id };
 });
 
 ipcMain.handle('record:openScreenSettings', () => {
@@ -3555,15 +3598,15 @@ ipcMain.handle('record:pickAudioFile', async () => {
 
 // ─── Transcribe a saved WAV ──────────────────────────────────────────────────
 
-// Shared by the manual `record:transcribe` handler and the auto-queue —
-// `sendEvent` is `recordSendToRenderer` for the manual call, a no-op for the
-// auto-queue (its progress must never reach the Record tab's UI). Every clean
-// success — either caller — queues its own Enhance pass; see the return below.
+// Shared by the manual `record:transcribe` handler and any auto-queued
+// re-transcription (queueAutoTranscribe) — both now run through the
+// transcribe lane, so the queue guarantees only one of these is ever in
+// flight at a time. Every clean success queues its own Enhance pass; see the
+// return below.
 async function runRecordTranscribeJob(opts, sendEvent) {
     if (process.platform !== 'darwin') {
         return { ok: false, error: 'Local transcription is macOS-only.' };
     }
-    if (transcriber.proc) return { ok: false, error: 'A transcription is already running.' };
 
     const filePath = String(opts?.filePath || '');
     if (!canReadPath(filePath)) return { ok: false, error: 'File is not accessible.' };
@@ -3825,10 +3868,10 @@ async function runRecordTranscribeJob(opts, sendEvent) {
         noteSessionFlushed('transcriber');
         if (interrupted) return { ok: false, error: 'Transcription interrupted.', transcriptPath };
         // Any clean transcription — manual, "Re-transcribe…", batch, or
-        // auto-queued — chains an Enhance pass over its own result. Queued
-        // (not run inline) so it waits its turn behind whatever else is busy,
-        // same as every other auto-queue entry.
-        autoPipelineQueue.push({ type: 'enhance', filePath: transcriptPath });
+        // auto-queued — chains an Enhance pass over its own result. Submitted
+        // (not run inline) so it waits its turn behind whatever else is busy
+        // in the enhance lane.
+        queue.submit('enhance', transcriptPath, { title: path.basename(transcriptPath) });
         return { ok: true, transcriptPath };
     } catch (err) {
         noteSessionFlushed('transcriber');
@@ -3836,22 +3879,42 @@ async function runRecordTranscribeJob(opts, sendEvent) {
     }
 }
 
-ipcMain.handle('record:transcribe', (_e, opts) => runRecordTranscribeJob(opts, recordSendToRenderer));
-
-ipcMain.handle('record:cancelTranscribe', async () => {
-    if (!transcriber.proc) return { ok: false, error: 'No transcription in progress.' };
-    // Same prefix-not-a-transcript problem as the quit flush: the run stops
-    // where it stops, so whatever gets written is partial.
-    transcriber.interrupted = true;
-    try { transcriber.proc.stdin.write(JSON.stringify({ cmd: 'stop' }) + '\n'); } catch {}
-    await new Promise((resolve) => {
+queue.registerLane('transcribe', {
+    run: (job, updateProgress) => runRecordTranscribeJob(job.extra, makeTranscribeSink(job, updateProgress)),
+    cancel: () => {
+        // Captured now: `transcriber` is a single shared object, and the
+        // queue starts the NEXT transcribe job the instant this one settles
+        // — so by the time the backstop below fires, `transcriber.proc` may
+        // already be a different, unrelated helper process. Only ever act on
+        // the one we actually meant to cancel.
+        const proc = transcriber.proc;
+        if (!proc) return;
+        // Same prefix-not-a-transcript problem as the quit flush: the run
+        // stops where it stops, so whatever gets written is partial.
+        transcriber.interrupted = true;
+        try { proc.stdin.write(JSON.stringify({ cmd: 'stop' }) + '\n'); } catch {}
+        // Backstop, fire-and-forget: the queue doesn't wait on cancel() — it
+        // waits for runRecordTranscribeJob's own promise (`await done`) to
+        // settle, which the 'stopped' event above already unblocks in the
+        // common case. Cleared on exit (mirrors the old record:cancelTranscribe
+        // handler's own clearTimeout) so it can never reach into whatever the
+        // next job started in the meantime.
         const t = setTimeout(() => {
-            try { transcriber.proc?.kill('SIGTERM'); } catch {}
-            resolve();
+            if (transcriber.proc === proc) { try { proc.kill('SIGTERM'); } catch {} }
         }, 5000);
-        transcriber.proc?.once('exit', () => { clearTimeout(t); resolve(); });
+        proc.once('exit', () => clearTimeout(t));
+    },
+});
+
+// Submits and returns immediately — progress and the final transcriptPath
+// arrive via `queue:changed`.
+ipcMain.handle('record:transcribe', (_e, opts) => {
+    const filePath = String(opts?.filePath || '');
+    const job = queue.submit('transcribe', filePath, {
+        title: path.basename(filePath || 'Recording'),
+        extra: opts,
     });
-    return { ok: true };
+    return { ok: true, jobId: job.id };
 });
 
 ipcMain.handle('record:getInstalledModels', () => {
