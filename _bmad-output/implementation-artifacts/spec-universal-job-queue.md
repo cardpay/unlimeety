@@ -2,7 +2,7 @@
 title: 'One visible job queue for every long-running operation'
 type: 'feature'
 created: '2026-08-21'
-status: 'in-review'
+status: 'done'
 review_loop_iteration: 0
 baseline_commit: '678dea0617d446f0aed1b0856615e922f807e01a'
 context: []
