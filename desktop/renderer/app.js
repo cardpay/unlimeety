@@ -3,6 +3,7 @@
  * ─────────────────────────────────────────────────────────────────────────── */
 
 const api = window.transcriber;
+const queueApi = window.queueApi;
 
 // ─── State ────────────────────────────────────────────────────────────────────
 let state = {
@@ -1095,6 +1096,11 @@ function loadContent(filePath, content) {
   else playerHide();
 
   updateCancelBtn();
+  // Covers navigating onto a file that already has an Enhance job running
+  // (started elsewhere, or queued before this file was opened) — locks the
+  // editor immediately rather than waiting for the user's first keystroke to
+  // race the run.
+  syncEditorReadOnly();
 }
 
 // Single source of truth for "which meeting is open".
@@ -1488,7 +1494,7 @@ function openMeetingMenu(x, y, m) {
   const summaryDisabled = !m.hasSummary;
   // Every one of these changes the file or its name under a run that reads it
   // from disk, and the run would be thrown away at the end.
-  const enhancing = runningEnhance?.filePath === m.id;
+  const enhancing = Boolean(activeJobFor("enhance", m.id));
 
   const root = document.createElement("div");
   root.id = "meeting-menu-root";
@@ -3034,7 +3040,6 @@ async function openSummarizeModal(filePath, meetingTitle) {
   modalTitleEl.textContent = cleanTitle
     ? `Summarize — ${cleanTitle}`
     : "Summarize meeting";
-  if (modalBusyBanner) modalBusyBanner.classList.add("hidden");
   summarizeModal.classList.remove("hidden");
 
   // The loading footer's Stop button only applies to the in-flight branch
@@ -3042,10 +3047,10 @@ async function openSummarizeModal(filePath, meetingTitle) {
   modalLoadingFooter.classList.add("hidden");
   modalLoadingText.textContent = "Reading the transcript…";
 
-  // A job already running on this file wins over cache/disk — the toolbar
-  // that reaches Stop may have been dismissed, and this is then the only way
-  // back to it, instead of landing on an empty prompt form mid-run.
-  if (runningSummarize?.filePath === filePath) {
+  // A job already running on this file wins over cache/disk — the header
+  // panel may not be open, and this is then the only way back to it, instead
+  // of landing on an empty prompt form mid-run.
+  if (activeJobFor("summarize", filePath)) {
     modalLoadingText.textContent = "Summarizing…";
     showModalView(modalViewLoading);
     modalLoadingFooter.classList.remove("hidden");
@@ -3359,76 +3364,185 @@ const PROVIDER_LOADING_TEXT = {
   ollama:       "Ollama is reading the transcript…",
 };
 
-// ─── Background summarization ────────────────────────────────────────────────
-// One job at a time. The modal is just a launcher — the actual run is awaited
-// outside the modal's lifetime so the user can keep working.
+// ─── Job queue (transcribe / enhance / summarize) ─────────────────────────────
+// One queue in main owns every long-running run; this is the panel that shows
+// it. Submitting always succeeds — there is no more "already running" refusal
+// anywhere below, and no more shared bottom-right toolbar arbitrating Enhance
+// against Summarize. `queueJobs` is refreshed on every `queue:changed`
+// broadcast and is the single source of truth for "is X running on file Y".
+let queueJobs = [];
 
-let runningSummarize = null;
+// jobId → what to do once that job settles (done/failed/canceled). Enhance
+// reloads the editor with the result; Summarize saves it to disk — neither
+// side effect lives in main, so the renderer still has to run it once the
+// job is known to have finished. Keyed by jobId (not filePath) so a re-submit
+// of the same file — a fresh job with a fresh id — can't be confused with a
+// stale one still being watched.
+const pendingEnhance = new Map();
+const pendingSummarize = new Map();
 
-const bgToolbar = document.getElementById("bg-summary-toolbar");
-const bgTitle = document.getElementById("bg-summary-title");
-const bgSubtitle = document.getElementById("bg-summary-subtitle");
-const bgViewBtn = document.getElementById("bg-summary-view");
-const bgCloseBtn = document.getElementById("bg-summary-close");
-const modalBusyBanner = document.getElementById("modal-busy-banner");
-
-function showBgToolbar(state, title, subtitle) {
-  bgToolbar.dataset.state = state;
-  bgTitle.textContent = title;
-  bgSubtitle.textContent = subtitle || "";
-  bgSubtitle.title = subtitle || "";
-  bgToolbar.classList.remove("hidden");
+function activeJobFor(type, filePath) {
+  return queueJobs.find(
+    (j) => j.type === type && j.filePath === filePath && (j.status === "queued" || j.status === "running")
+  );
 }
 
-function hideBgToolbar() {
-  bgToolbar.classList.add("hidden");
-  bgToolbar.dataset.state = "idle";
-  bgViewBtn.classList.add("hidden");
-  bgViewBtn.onclick = null;
+// Read-only for the duration of an Enhance on the file currently open:
+// otherwise a keystroke at the wrong moment either kills the run (the file no
+// longer matches what was read) or survives as a dirty buffer whose autosave
+// writes the pre-enhance text back over the finished result.
+function syncEditorReadOnly() {
+  editor.readOnly = Boolean(state.filePath && activeJobFor("enhance", state.filePath));
 }
 
-bgCloseBtn.addEventListener("click", () => {
-  // While running, the close button just hides the toolbar — work continues.
-  hideBgToolbar();
+// ─── Header panel ──────────────────────────────────────────────────────────
+const queueIndicatorBtn = document.getElementById("queue-indicator-btn");
+const queueIndicatorBadge = document.getElementById("queue-indicator-badge");
+const queuePanel = document.getElementById("queue-panel");
+const queuePanelList = document.getElementById("queue-panel-list");
+
+const JOB_TYPE_LABEL = { transcribe: "Transcribe", enhance: "Enhance", summarize: "Summarize" };
+
+function jobStatusText(job) {
+  if (job.status === "queued") return "Waiting…";
+  if (job.status === "running") {
+    if (job.canceling) return "Stopping…";
+    if (job.type === "enhance" && job.progress?.total) {
+      return `Enhancing — part ${job.progress.done + 1} of ${job.progress.total}`;
+    }
+    if (job.type === "transcribe" && job.progress?.label) return job.progress.label;
+    return `${JOB_TYPE_LABEL[job.type] || job.type}…`;
+  }
+  if (job.status === "canceled") return "Stopped";
+  if (job.status === "failed") return job.error || "Failed";
+  // done — "generated", not "ready": Summarize's actual disk write is a
+  // separate renderer-side step (finishSummarize) that can fail or, on a
+  // reload, never run at all — this job status only means the model call
+  // itself succeeded.
+  if (job.type === "enhance") return job.result?.changed === false ? "Nothing to fix" : "Enhanced";
+  if (job.type === "summarize") return "Summary generated";
+  return "Done";
+}
+
+// Cheap, always runs: the indicator/badge must reflect reality even while
+// the panel itself is closed (in particular, a background FAILURE has to
+// stay visible until dismissed — that's the whole point of this feature).
+function renderQueueBadge() {
+  const active = queueJobs.filter((j) => j.status === "queued" || j.status === "running");
+  const failed = queueJobs.filter((j) => j.status === "failed");
+  queueIndicatorBtn.classList.toggle("hidden", queueJobs.length === 0);
+  const showBadge = active.length > 0 || failed.length > 0;
+  queueIndicatorBadge.classList.toggle("hidden", !showBadge);
+  queueIndicatorBadge.classList.toggle("queue-indicator-badge--danger", active.length === 0 && failed.length > 0);
+  queueIndicatorBadge.textContent = String(active.length > 0 ? active.length : failed.length);
+}
+
+// Full row rebuild — resets scroll position, so this only runs while the
+// panel is actually visible (see renderQueuePanel) or right as it opens.
+function renderQueueList() {
+  if (!queueJobs.length) {
+    queuePanelList.innerHTML = '<li class="queue-panel-empty">Nothing running</li>';
+    return;
+  }
+  const scrollTop = queuePanelList.scrollTop;
+  // Most recent first — what's currently happening belongs at the top.
+  const ordered = [...queueJobs].sort((a, b) => b.createdAt - a.createdAt);
+  queuePanelList.innerHTML = ordered
+    .map((job) => {
+      const cancelable = job.status === "queued" || (job.status === "running" && !job.canceling);
+      const dismissable = !cancelable && job.status !== "running";
+      const typeLabel = escapeHtml(JOB_TYPE_LABEL[job.type] || job.type);
+      const title = escapeHtml(job.title || job.filePath);
+      const actionBtn = cancelable
+        ? '<button class="btn btn-ghost queue-job-cancel" data-action="cancel" type="button">Cancel</button>'
+        : dismissable
+          ? '<button class="btn btn-ghost queue-job-cancel" data-action="dismiss" type="button" title="Dismiss">✕</button>'
+          : "";
+      return `
+        <li class="queue-job" data-status="${job.status}" data-job-id="${escapeHtml(job.id)}">
+          <div class="queue-job-row1">
+            <span class="queue-job-title" title="${title}">${typeLabel} — ${title}</span>
+            ${actionBtn}
+          </div>
+          <div class="queue-job-meta">${escapeHtml(jobStatusText(job))}</div>
+        </li>`;
+    })
+    .join("");
+  queuePanelList.scrollTop = scrollTop;
+}
+
+function renderQueuePanel() {
+  renderQueueBadge();
+  // A progress tick fires this on every chunk of every running job — full
+  // innerHTML rebuilds are cheap enough, but resetting scroll position on
+  // every one of them while the user is reading the list is not. Only pay
+  // for it while the panel is open; openQueuePanel() renders fresh on open.
+  if (!queuePanel.classList.contains("hidden")) renderQueueList();
+}
+
+queuePanelList.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-action]");
+  if (!btn) return;
+  const jobId = btn.closest(".queue-job")?.dataset.jobId;
+  if (!jobId) return;
+  if (btn.dataset.action === "cancel") queueApi.cancel(jobId);
+  else if (btn.dataset.action === "dismiss") queueApi.dismiss(jobId);
 });
+
+function openQueuePanel() {
+  renderQueueList();
+  queuePanel.classList.remove("hidden");
+  queueIndicatorBtn.setAttribute("aria-expanded", "true");
+}
+function closeQueuePanel() {
+  queuePanel.classList.add("hidden");
+  queueIndicatorBtn.setAttribute("aria-expanded", "false");
+}
+queueIndicatorBtn.addEventListener("click", (e) => {
+  e.stopPropagation();
+  if (queuePanel.classList.contains("hidden")) openQueuePanel();
+  else closeQueuePanel();
+});
+document.addEventListener("click", (e) => {
+  if (queuePanel.classList.contains("hidden")) return;
+  if (queueIndicatorBtn.contains(e.target) || queuePanel.contains(e.target)) return;
+  closeQueuePanel();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !queuePanel.classList.contains("hidden")) closeQueuePanel();
+});
+// record.js's "View queue" button (idle-screen banner) opens this same panel
+// — the mirror of window.recordTab, which app.js calls the other way.
+window.queuePanel = { open: openQueuePanel };
 
 // ─── Enhance (LLM proofreading pass over the transcript) ─────────────────────
 // Overwrites the transcript in place: no diff to confirm, no second copy. The
 // safety net is in main — every turn keeps its original marker, and a chunk the
 // model mangles is left exactly as it was.
-let runningEnhance = null;
+function finishEnhance(info, job) {
+  const result = job.result || (job.error ? { ok: false, error: job.error } : { ok: false });
+  if (!result.ok) return; // failed/canceled — the panel row already shows why
 
-api.onEnhanceProgress((p) => {
-  if (!runningEnhance || runningEnhance.filePath !== p?.filePath) return;
-  Object.assign(runningEnhance, { done: p.done, total: p.total, skipped: p.skipped });
-  showEnhanceProgress();
-});
+  // Load the new text straight into the editor rather than reopening the file:
+  // the reopen path flushes the editor first, and a keystroke landing during the
+  // IPC round-trip would put the pre-enhance buffer back on disk.
+  const onScreen = state.filePath === info.filePath;
+  const reloaded = onScreen && !state.isDirty && typeof result.content === "string";
+  if (reloaded) {
+    // Keep the baseline pointing at the pre-Enhance text: "Cancel changes" is the
+    // only undo this feature has, and loadContent would move it to the new text.
+    const baseline = state.baselineContent;
+    loadContent(info.filePath, result.content);
+    state.baselineContent = baseline;
+    updateCancelBtn();
+  }
+}
 
 async function runEnhance(m) {
-  if (runningEnhance) {
-    showEnhanceProgress();
-    return;
-  }
-  // The background toolbar and its one button are shared with Summarize. Rather
-  // than arbitrate two jobs over one slot, wait: a summary takes one call, this
-  // takes hundreds.
-  if (runningSummarize) {
-    showBgToolbar("running", "Summarizing…", "Enhance can start once the summary is done");
-    return;
-  }
   // flushBeforeReplace, not saveFile: a keystroke landing during the save leaves
   // a remainder that saveFile only schedules, and that autosave would then change
   // the file a second into the run and cost the whole pass.
   if (state.filePath === m.id && !(await flushBeforeReplace())) return;
-
-  runningEnhance = { filePath: m.id, title: m.title, done: 0, total: 0 };
-  // Read-only for the duration. Otherwise a keystroke at the wrong moment either
-  // kills the run (the file no longer matches what was read) or, worse, survives
-  // as a dirty buffer whose autosave writes the pre-enhance text back over the
-  // finished result — with no backup, that is the enhancement gone.
-  const wasOpen = state.filePath === m.id;
-  if (wasOpen) editor.readOnly = true;
-  showEnhanceProgress();
 
   let result;
   try {
@@ -3436,194 +3550,38 @@ async function runEnhance(m) {
   } catch (err) {
     result = { ok: false, error: err?.message || String(err) };
   }
-  runningEnhance = null;
-  if (wasOpen) editor.readOnly = false;
-  clearEnhanceButton();
-
   if (!result?.ok) {
-    // Same special case Summarize makes: with the default provider the CLI is
-    // simply missing, and "Enhance failed" says nothing about what to do.
-    if (result?.notInstalled) {
-      showBgToolbar("error", "Claude Code not found", "Install it, or pick another provider in Settings");
-      return;
-    }
-    if (result?.canceled) {
-      showBgToolbar("done", "Enhance stopped", `${m.title} — nothing was written`);
-      return;
-    }
-    showBgToolbar("error", "Enhance failed", result?.error || m.title);
+    console.error("Enhance: could not submit job:", result?.error);
     return;
   }
-
-  // Load the new text straight into the editor rather than reopening the file:
-  // the reopen path flushes the editor first, and a keystroke landing during the
-  // IPC round-trip would put the pre-enhance buffer back on disk.
-  const onScreen = state.filePath === m.id;
-  const reloaded = onScreen && !state.isDirty && typeof result.content === "string";
-  if (reloaded) {
-    // Keep the baseline pointing at the pre-Enhance text: "Cancel changes" is the
-    // only undo this feature has, and loadContent would move it to the new text.
-    const baseline = state.baselineContent;
-    loadContent(m.id, result.content);
-    state.baselineContent = baseline;
-    updateCancelBtn();
-  }
-
-  const label = result.canceled
-    ? `Enhance stopped — ${result.applied} of ${result.total} parts applied`
-    : result.skipped
-      ? `Enhanced — ${result.skipped} of ${result.total} parts left as-is`
-      : !result.changed
-        ? "Nothing to fix"
-        : "Transcript enhanced";
-  const subtitle = onScreen && !reloaded
-    ? `${m.title} — reopen the note to see it`
-    : m.title;
-  showBgToolbar("done", label, subtitle);
-  if (!reloaded) {
-    bgViewBtn.classList.remove("hidden");
-    bgViewBtn.textContent = "Open";
-    bgViewBtn.onclick = () => {
-      hideBgToolbar();
-      api.openFromLibrary(m.id);
-    };
-  }
+  pendingEnhance.set(result.jobId, { filePath: m.id, title: m.title });
+  // Lock immediately — don't wait for the queue:changed round-trip, or a
+  // keystroke in that gap races the run that just started reading this file.
+  if (state.filePath === m.id) editor.readOnly = true;
 }
 
-// Redrawn from `runningEnhance` rather than set once, so a Summarize toolbar or a
-// closed toolbar in between cannot leave the run without its Stop button.
-function showEnhanceProgress() {
-  const job = runningEnhance;
-  if (!job) return;
-  const part = job.total ? ` — part ${job.done + 1} of ${job.total}` : "";
-  showBgToolbar("running", job.stopping ? "Stopping after this part…" : "Enhancing transcript…",
-    `${job.title}${part}${job.skipped ? ` (${job.skipped} left as-is)` : ""}`);
-  if (job.stopping) {
-    bgViewBtn.classList.add("hidden");
-    return;
-  }
-  // Stop takes effect between parts, not mid-call: with a slow local model that
-  // wait is a minute, so the label changes as soon as it is pressed.
-  bgViewBtn.classList.remove("hidden");
-  bgViewBtn.textContent = "Stop";
-  bgViewBtn.onclick = () => {
-    job.stopping = true;
-    api.cancelEnhance();
-    showEnhanceProgress();
-  };
-}
-
-function clearEnhanceButton() {
-  // Only if it is still ours: Summarize's own Stop button now reads "Stop" too
-  // (mirroring this one), so text alone no longer proves ownership — a
-  // Summarize still running claims the slot regardless of what the button
-  // currently displays.
-  if (!runningSummarize && bgViewBtn.textContent === "Stop") {
-    bgViewBtn.classList.add("hidden");
-    bgViewBtn.onclick = null;
-  }
-}
-
-// Shared by the toolbar's Stop button and the modal's own Stop button (the
-// reopened-via-menu case) — same job, same cancel call, same feedback.
-function stopSummarizeWithFeedback() {
-  api.cancelSummarize();
-  // Cancel lands almost immediately (kill/abort, not "wait for the next
-  // chunk" like Enhance) but still isn't instant — say so instead of going
-  // silent between the click and the result landing in runSummarize().
-  if (runningSummarize) {
-    showBgToolbar("running", "Stopping…", runningSummarize.meetingTitle);
-  }
-  bgViewBtn.classList.add("hidden");
-}
-
-async function runSummarize() {
-  const filePath = modalCurrentFilePath;
-  const instruction = modalPromptInput.value.trim();
-  if (!filePath || !instruction) return;
-
-  if (runningSummarize) {
-    modalBusyBanner.classList.remove("hidden");
-    return;
-  }
-  // Mirrors runEnhance's own guard against a running Summarize — one job at a
-  // time owns the shared toolbar/button.
-  if (runningEnhance) {
-    showBgToolbar("running", "Enhancing transcript…", "Summarize can start once Enhance is done");
-    return;
-  }
-  modalBusyBanner.classList.add("hidden");
-
-  const titleText = modalTitleEl.textContent || "";
-  const meetingTitle = titleText.startsWith("Summarize — ")
-    ? titleText.slice("Summarize — ".length)
-    : "";
-  const folder = getEffectiveFolder();
-  const customName = null;
-
-  runningSummarize = { filePath, meetingTitle, instruction, folder, customName };
-  showBgToolbar("running", "Summarizing…", meetingTitle);
-  bgViewBtn.classList.remove("hidden");
-  bgViewBtn.textContent = "Stop";
-  bgViewBtn.onclick = stopSummarizeWithFeedback;
-  closeSummarizeModal();
-
-  let result;
-  try {
-    result = await api.summarize(filePath, instruction);
-  } catch (err) {
-    result = { ok: false, error: err?.message || String(err) };
-  }
-
-  // The modal may have been reopened onto this file while the job was still
-  // running (the "Summarizing…"/Stop loading view) — that view is stale the
-  // instant we get here, so hand it whatever refresh the toolbar button
-  // itself would have done, or close it when there's nothing to refresh to.
-  const syncModal = (refresh) => {
-    if (summarizeModal.classList.contains("hidden") || modalCurrentFilePath !== filePath) return;
-    if (refresh) refresh();
-    else closeSummarizeModal();
-  };
+// ─── Summarize ────────────────────────────────────────────────────────────────
+async function finishSummarize(info, job) {
+  const { filePath, meetingTitle, instruction, folder, customName } = info;
+  const result = job.result || (job.error ? { ok: false, error: job.error } : { ok: false });
+  const modalOnThisFile = !summarizeModal.classList.contains("hidden") && modalCurrentFilePath === filePath;
 
   if (result?.notInstalled) {
-    runningSummarize = null;
-    showBgToolbar("error", "Claude Code not found", "Install it or switch provider in Settings");
-    bgViewBtn.classList.remove("hidden");
-    bgViewBtn.textContent = "Details";
-    bgViewBtn.onclick = () => {
+    if (modalOnThisFile) {
       modalErrorText.innerHTML =
         "<strong>Claude Code not found.</strong><br>" +
         "Install it from <strong>claude.ai/code</strong>, or switch the summarizer in <strong>Settings</strong>.";
-      modalCurrentFilePath = filePath;
-      modalTitleEl.textContent = meetingTitle ? `Summarize — ${meetingTitle}` : "Summarize meeting";
-      summarizeModal.classList.remove("hidden");
       showModalView(modalViewError);
-      hideBgToolbar();
-    };
-    syncModal(bgViewBtn.onclick);
+    }
     return;
   }
-
   if (!result?.ok) {
-    runningSummarize = null;
-    if (result?.canceled) {
-      showBgToolbar("done", "Summary stopped", `${meetingTitle} — nothing was written`);
-      bgViewBtn.classList.add("hidden");
-      syncModal();
-      return;
-    }
-    showBgToolbar("error", "Summarization failed", meetingTitle);
-    bgViewBtn.classList.remove("hidden");
-    bgViewBtn.textContent = "Details";
-    bgViewBtn.onclick = () => {
-      modalErrorText.textContent = result?.error || "Summarization failed.";
-      modalCurrentFilePath = filePath;
-      modalTitleEl.textContent = meetingTitle ? `Summarize — ${meetingTitle}` : "Summarize meeting";
-      summarizeModal.classList.remove("hidden");
+    if (modalOnThisFile) {
+      modalErrorText.textContent = result?.canceled
+        ? "Summary stopped — nothing was written."
+        : (result?.error || "Summarization failed.");
       showModalView(modalViewError);
-      hideBgToolbar();
-    };
-    syncModal(bgViewBtn.onclick);
+    }
     return;
   }
 
@@ -3634,18 +3592,16 @@ async function runSummarize() {
 
   if (customName) await api.setSummaryName(filePath, customName);
   const saved = await api.saveSummary(filePath, summaryText, folder);
-  // Only now: the guard has to outlive the write, or a second Summarize started
-  // during it gets its toolbar clobbered by this job finishing.
-  runningSummarize = null;
   if (!saved?.ok) {
-    showBgToolbar("error", "Could not save summary", saved?.error || meetingTitle);
-    bgViewBtn.classList.add("hidden");
-    syncModal();
+    if (modalOnThisFile) {
+      modalErrorText.textContent = saved?.error || "Could not save summary.";
+      showModalView(modalViewError);
+    }
     return;
   }
 
-  // After the write, not before — otherwise a failed save leaves the rail and the
-  // result modal rendering a summary that is not on disk.
+  // After the write, not before — otherwise a failed save leaves the rail and
+  // the result modal rendering a summary that is not on disk.
   summaryStore.set(filePath, summaryText);
   setSummaryWarning(filePath, saved.warning);
 
@@ -3660,21 +3616,85 @@ async function runSummarize() {
   // Re-render the rail if the summarized file is the one currently open.
   if (state.filePath === filePath) renderSummaryRail(filePath);
 
-  // The warning goes in the label, not the subtitle: the subtitle is the only
-  // thing that says WHICH file finished, and this toolbar is shared by jobs on
-  // different meetings.
-  const label = saved.warning ? "Summary ready — frontmatter unusable"
-    : result.repairs?.length ? "Summary ready (frontmatter repaired)"
-    : "Summary ready";
-  showBgToolbar("done", label, meetingTitle);
-  bgViewBtn.classList.remove("hidden");
-  bgViewBtn.textContent = "View";
-  bgViewBtn.onclick = () => {
-    hideBgToolbar();
-    openSummarizeModal(filePath, meetingTitle);
-  };
-  syncModal(bgViewBtn.onclick);
+  // Re-render whatever's on screen for this file — summaryStore is warm now,
+  // so this lands straight on the result view.
+  if (modalOnThisFile) openSummarizeModal(filePath, meetingTitle);
 }
+
+// Shared by the panel's per-job Cancel button and the modal's own Stop button.
+function stopSummarizeWithFeedback() {
+  const job = activeJobFor("summarize", modalCurrentFilePath);
+  if (job) queueApi.cancel(job.id);
+}
+
+async function runSummarize() {
+  const filePath = modalCurrentFilePath;
+  const instruction = modalPromptInput.value.trim();
+  if (!filePath || !instruction) return;
+
+  const titleText = modalTitleEl.textContent || "";
+  const meetingTitle = titleText.startsWith("Summarize — ")
+    ? titleText.slice("Summarize — ".length)
+    : "";
+  const folder = getEffectiveFolder();
+  const customName = null;
+
+  closeSummarizeModal();
+
+  let result;
+  try {
+    result = await api.summarize(filePath, instruction);
+  } catch (err) {
+    result = { ok: false, error: err?.message || String(err) };
+  }
+  if (!result?.ok) {
+    console.error("Summarize: could not submit job:", result?.error);
+    return;
+  }
+  pendingSummarize.set(result.jobId, { filePath, meetingTitle, instruction, folder, customName });
+}
+
+// ─── Wiring: one broadcast drives the panel and both finish-handlers ─────────
+function onQueueChanged(jobs) {
+  queueJobs = jobs;
+  renderQueuePanel();
+  syncEditorReadOnly();
+  const presentIds = new Set(jobs.map((j) => j.id));
+  for (const job of jobs) {
+    if (job.status === "queued" || job.status === "running") continue;
+    if (job.type === "enhance" && pendingEnhance.has(job.id)) {
+      const info = pendingEnhance.get(job.id);
+      pendingEnhance.delete(job.id);
+      finishEnhance(info, job);
+    } else if (job.type === "summarize" && pendingSummarize.has(job.id)) {
+      const info = pendingSummarize.get(job.id);
+      pendingSummarize.delete(job.id);
+      finishSummarize(info, job);
+    }
+  }
+  // A job canceled while still queued is dropped outright, not marked
+  // (job-queue.js) — it never appears above with a terminal status, so a
+  // pending Enhance/Summarize for it would otherwise wait forever with no
+  // "stopped" feedback and never clean up its own map entry.
+  if (pendingEnhance.size) {
+    const canceledJob = { result: { ok: false, canceled: true }, error: null };
+    for (const [jobId, info] of pendingEnhance) {
+      if (presentIds.has(jobId)) continue;
+      pendingEnhance.delete(jobId);
+      finishEnhance(info, canceledJob);
+    }
+  }
+  if (pendingSummarize.size) {
+    const canceledJob = { result: { ok: false, canceled: true }, error: null };
+    for (const [jobId, info] of pendingSummarize) {
+      if (presentIds.has(jobId)) continue;
+      pendingSummarize.delete(jobId);
+      finishSummarize(info, canceledJob);
+    }
+  }
+}
+queueApi.onChanged(onQueueChanged);
+queueApi.list().then(onQueueChanged);
 
 // ── Preset segmented control ─────────────────────────────────────────────────
 const presetMenu = document.getElementById("modal-preset-menu");

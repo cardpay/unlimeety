@@ -60,6 +60,22 @@
     <div id="toolbar-right">
       <button id="cal-smart-btn" title="Suggest a recording mode from your calendar"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg> From calendar</button>
 
+      <!-- Job queue: header indicator + popover job list. Covers every
+           transcribe/enhance/summarize job, queued or running, in one place. -->
+      <div id="queue-indicator-wrap">
+        <button class="btn btn-ghost btn-icon hidden" id="queue-indicator-btn" title="Jobs" aria-haspopup="true" aria-expanded="false">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="9"/>
+            <polyline points="12 7 12 12 15.5 14"/>
+          </svg>
+          <span id="queue-indicator-badge" class="queue-indicator-badge hidden">0</span>
+        </button>
+        <div id="queue-panel" class="queue-panel hidden" role="menu" aria-label="Jobs">
+          <div class="queue-panel-header">Jobs</div>
+          <ul id="queue-panel-list" class="queue-panel-list"></ul>
+        </div>
+      </div>
+
       <button class="btn btn-ghost btn-icon" id="btn-settings" title="Settings">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="12" cy="12" r="3"/>
@@ -921,17 +937,6 @@
           <div class="live-progress"><div class="live-progress-bar" id="record-trans-progress-bar"></div></div>
         </div>
 
-        <div id="record-trans-queue" class="record-trans-queue hidden">
-          <div class="record-trans-now">
-            <span class="record-trans-now-label">NOW</span>
-            <span id="record-trans-now-file" class="record-trans-now-file">—</span>
-          </div>
-          <div id="record-trans-pending" class="record-trans-pending hidden">
-            <span class="record-trans-pending-label">NEXT</span>
-            <ul id="record-trans-pending-list" class="record-trans-pending-list"></ul>
-          </div>
-        </div>
-
         <div class="live-stream-wrap">
           <div id="record-trans-stream" class="live-stream"></div>
         </div>
@@ -998,9 +1003,6 @@
       <!-- View: prompt editing -->
       <div id="modal-view-prompt">
         <div class="modal-body">
-          <div id="modal-busy-banner" class="modal-busy-banner hidden">
-            Wait for the current summarization to finish.
-          </div>
           <div class="preset-segmented" id="modal-preset-segmented" role="tablist">
             <button class="preset-segment" data-preset-id="meeting" aria-selected="true" role="tab">Meeting</button>
             <button class="preset-segment" data-preset-id="daily" role="tab">Daily</button>
@@ -1301,23 +1303,6 @@
           <button class="btn btn-primary" id="followup-btn-err-done">Done</button>
         </div>
       </div>
-    </div>
-  </div>
-
-  <!-- Background summarization toolbar -->
-  <div id="bg-summary-toolbar" class="bg-summary-toolbar hidden" data-state="idle">
-    <div class="bg-summary-icon">
-      <div class="bg-summary-spinner"></div>
-      <div class="bg-summary-check">✓</div>
-      <div class="bg-summary-cross">✕</div>
-    </div>
-    <div class="bg-summary-info">
-      <div class="bg-summary-title" id="bg-summary-title">Summarizing…</div>
-      <div class="bg-summary-subtitle" id="bg-summary-subtitle"></div>
-    </div>
-    <div class="bg-summary-actions">
-      <button class="btn btn-ghost btn-sm hidden" id="bg-summary-view">View</button>
-      <button class="btn btn-ghost btn-sm bg-summary-close-btn" id="bg-summary-close" title="Dismiss">✕</button>
     </div>
   </div>
 

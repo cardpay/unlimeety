@@ -94,14 +94,12 @@
 
 /* Floating menus / popups / modals — swap inky shadows for soft light ones */
 [data-theme="light"] .meeting-menu,
-[data-theme="light"] .rename-popup {
+[data-theme="light"] .rename-popup,
+[data-theme="light"] .queue-panel {
     box-shadow: 0 12px 32px rgba(28, 26, 22, 0.16), 0 2px 6px rgba(28, 26, 22, 0.06);
 }
 [data-theme="light"] .export-menu {
     box-shadow: 0 8px 24px rgba(28, 26, 22, 0.14);
-}
-[data-theme="light"] .bg-summary-toolbar {
-    box-shadow: 0 12px 32px rgba(28, 26, 22, 0.16);
 }
 [data-theme="light"] .modal-overlay {
     background: rgba(28, 26, 22, 0.38);
