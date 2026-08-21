@@ -3,7 +3,11 @@
  * ─────────────────────────────────────────────────────────────────────────── */
 
 const api = window.transcriber;
-const queueApi = window.queueApi;
+// NOT `const queueApi` — contextBridge exposes `queueApi` as a non-configurable
+// property on window, and a top-level lexical binding of the same name in a
+// classic script is a SyntaxError that kills this entire file. Same reason
+// `api` above is not called `transcriber`.
+const jobsApi = window.queueApi;
 
 // ─── State ────────────────────────────────────────────────────────────────────
 let state = {
@@ -3485,8 +3489,8 @@ queuePanelList.addEventListener("click", (e) => {
   if (!btn) return;
   const jobId = btn.closest(".queue-job")?.dataset.jobId;
   if (!jobId) return;
-  if (btn.dataset.action === "cancel") queueApi.cancel(jobId);
-  else if (btn.dataset.action === "dismiss") queueApi.dismiss(jobId);
+  if (btn.dataset.action === "cancel") jobsApi.cancel(jobId);
+  else if (btn.dataset.action === "dismiss") jobsApi.dismiss(jobId);
 });
 
 function openQueuePanel() {
@@ -3513,7 +3517,11 @@ document.addEventListener("keydown", (e) => {
 });
 // record.js's "View queue" button (idle-screen banner) opens this same panel
 // — the mirror of window.recordTab, which app.js calls the other way.
-window.queuePanel = { open: openQueuePanel };
+// Deferred by a tick on purpose: the caller's own click is still bubbling
+// toward the outside-click handler above, and that handler counts any target
+// outside the indicator as "outside" — so opening synchronously opened and
+// closed the panel in the same click, which read as the button doing nothing.
+window.queuePanel = { open: () => setTimeout(openQueuePanel, 0) };
 
 // ─── Enhance (LLM proofreading pass over the transcript) ─────────────────────
 // Overwrites the transcript in place: no diff to confirm, no second copy. The
@@ -3624,7 +3632,7 @@ async function finishSummarize(info, job) {
 // Shared by the panel's per-job Cancel button and the modal's own Stop button.
 function stopSummarizeWithFeedback() {
   const job = activeJobFor("summarize", modalCurrentFilePath);
-  if (job) queueApi.cancel(job.id);
+  if (job) jobsApi.cancel(job.id);
 }
 
 async function runSummarize() {
@@ -3693,8 +3701,8 @@ function onQueueChanged(jobs) {
     }
   }
 }
-queueApi.onChanged(onQueueChanged);
-queueApi.list().then(onQueueChanged);
+jobsApi.onChanged(onQueueChanged);
+jobsApi.list().then(onQueueChanged);
 
 // ── Preset segmented control ─────────────────────────────────────────────────
 const presetMenu = document.getElementById("modal-preset-menu");
