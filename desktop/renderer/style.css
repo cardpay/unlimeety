@@ -923,6 +923,10 @@ body.mode-record #btn-ask-ai {
     justify-content: space-between;
     gap: 8px;
     margin-top: 8px;
+    /* The model chip carries text, so this row can outgrow a 260px sidebar where
+       the icon-only chips never could. Wrapping only engages when it does. */
+    flex-wrap: wrap;
+    row-gap: 6px;
 }
 
 /* Status pill */
@@ -1038,6 +1042,37 @@ body.mode-record #btn-ask-ai {
     background: var(--accent-lime-soft);
     border-color: var(--accent-lime-border);
     color: var(--accent-lime);
+}
+
+.artifact-chip[data-kind="enhance"][data-present="true"] {
+    background: rgba(52, 211, 153, 0.13);
+    border-color: rgba(52, 211, 153, 0.27);
+    color: var(--saved);
+}
+
+/* Which model produced the transcript. Text, not a glyph — the whole point is
+   *which* one. Tiered by weight rather than hue: the row already spends its
+   colors on the artifact chips, and "accurate model vs fast model" reads fine as
+   plain emphasis. */
+.model-chip {
+    height: 18px;
+    padding: 0 6px;
+    border-radius: 5px;
+    border: 1px solid var(--border);
+    display: inline-flex;
+    align-items: center;
+    font-family: var(--font-mono);
+    font-size: 9px;
+    letter-spacing: 0.01em;
+    white-space: nowrap;
+    color: var(--text-muted);
+    background: transparent;
+}
+
+.model-chip[data-strong="true"] {
+    border-color: var(--border-strong);
+    color: var(--text-secondary);
+    font-weight: 600;
 }
 
 /* ─── Meeting context menu (right-click + ⋯ button) ─────────────────────────── */

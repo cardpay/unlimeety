@@ -1737,7 +1737,10 @@ ipcMain.handle('chat:ask', async (_e, target, messages) => {
 // ─── IPC: Transcripts library ─────────────────────────────────────────────────
 
 function parseTranscriptHeaderMain(content) {
-    const info = { title: null, generated: null, recordedAt: null, language: null, participants: [], source: null };
+    const info = {
+        title: null, generated: null, recordedAt: null, language: null,
+        participants: [], source: null, model: null, enhancedAt: null,
+    };
     for (const line of content.split('\n')) {
         if (line === '') break;
         if (line.startsWith('Meeting: '))         info.title       = line.slice(9).trim();
@@ -1745,6 +1748,11 @@ function parseTranscriptHeaderMain(content) {
         else if (line.startsWith('Recorded-At: ')) info.recordedAt = line.slice(13).trim();
         else if (line.startsWith('Language: '))   info.language    = line.slice(10).trim();
         else if (line.startsWith('Source: '))     info.source      = line.slice(8).trim();
+        // Provenance: which ASR model produced the text, and whether the Enhance
+        // proofreading pass has run over it. Absent on transcripts written before
+        // these lines existed, and on pasted ones — null, never a guess.
+        else if (line.startsWith('Model: '))      info.model       = line.slice(7).trim();
+        else if (line.startsWith('Enhanced: '))   info.enhancedAt  = line.slice(10).trim();
         else if (line.startsWith('Participants: '))
             info.participants = line.slice(14).trim().split(', ').filter(Boolean);
     }
@@ -2338,7 +2346,27 @@ async function runEnhanceJob(filePath, sender) {
             return { ok: false, error: 'Transcript changed while it was being enhanced — nothing was written.' };
         }
 
-        const updated = enhance.matchLineEndings(enhance.assembleTranscript(header, blocks), original);
+        // `changed` reports whether the proofreading altered the text, so it is
+        // decided before the Enhanced stamp goes in — the stamp differs from the
+        // original by definition and would otherwise report every no-op pass as
+        // a change ("Nothing to fix" in the queue panel).
+        const proofread = enhance.matchLineEndings(enhance.assembleTranscript(header, blocks), original);
+        // Stamped even by a pass that fixed nothing: the header line answers
+        // "has Enhance run over this transcript", not "did it change anything",
+        // and a run that found nothing to fix is exactly the case the user must
+        // not be tempted to repeat. So a no-op pass still writes — the file
+        // gains one header line and nothing else.
+        // A cancelled run leaves the transcript only partly proofread and keeps
+        // what it got (see below) — but it does not get the stamp, or the
+        // indicator would claim a pass that never finished and talk the user out
+        // of the re-run they actually need.
+        // A run that only named speakers (`done === 0`, every proofreading part
+        // rejected) is not a proofreading pass either — it keeps the names, but
+        // the text it was supposed to clean up was never touched.
+        const stamped = (enhanceCancelled || !done)
+            ? header
+            : enhance.stampHeaderLine(header, 'Enhanced', new Date().toISOString());
+        const updated = enhance.matchLineEndings(enhance.assembleTranscript(stamped, blocks), original);
         if (updated === original) {
             return { ok: true, canceled: enhanceCancelled, total: chunks.length, skipped, namedSpeakers, changed: false };
         }
@@ -2354,7 +2382,7 @@ async function runEnhanceJob(filePath, sender) {
         // user stopped the rest would be its own kind of loss.
         return {
             ok: true, canceled: enhanceCancelled, total: chunks.length, skipped, applied: done,
-            namedSpeakers, changed: true, content: updated,
+            namedSpeakers, changed: proofread !== original, content: updated,
         };
     } catch (err) {
         return { ok: false, error: err.message };
@@ -2449,6 +2477,9 @@ const live = {
     // matching stem — that way transcripts:list and record:list pair them up
     // automatically via findRelatedAudioPaths / recordingTranscriptPath.
     outputPath: null,
+    // WhisperKit model this session is running on, kept so the saved transcript
+    // can record which one produced its text. Set by live:start.
+    model: null,
     notes: [],            // freeform notes typed during this session: {text, at}
     notesStartedAt: null, // wall-clock anchor notes' elapsed offsets are measured from
 };
@@ -2706,6 +2737,7 @@ ipcMain.handle('live:start', async (_e, opts) => {
         live.stdoutBuf = '';
         live.stderrBuf = '';
         live.outputPath = outputPath;
+        live.model = payload.model;
         live.notes = [];
         // Provisional fallback — overwritten precisely once the helper's
         // 'recording' event fires (liveHandleEvent above). Stop is reachable
@@ -2766,6 +2798,7 @@ ipcMain.handle('live:start', async (_e, opts) => {
     } catch (err) {
         live.proc = null;
         live.outputPath = null;
+        live.model = null;
         return { ok: false, error: err.message };
     }
 });
@@ -2913,6 +2946,11 @@ ipcMain.handle('live:saveTranscript', async (_e, payload) => {
         const headerLines = [`Meeting: ${title}`];
         if (recordedAtIso) headerLines.push(`Recorded-At: ${recordedAtIso}`);
         headerLines.push(`Generated: ${new Date().toLocaleString()}`);
+        // Which model produced this text. Live runs on whatever the user picked
+        // for the session — usually a light one, since it has to keep up with
+        // speech; the re-transcription queued below then rewrites this same file
+        // with large-v3 and this line along with it.
+        if (live.model) headerLines.push(`Model: ${live.model}`);
         if (participants.length) headerLines.push(`Participants: ${participants.join(', ')}`);
         if (language) headerLines.push(`Language: ${language}`);
 
@@ -2943,6 +2981,7 @@ ipcMain.handle('live:saveTranscript', async (_e, payload) => {
         // should come back with it.
         flushNotesSidecar(live);
         live.outputPath = null;
+        live.model = null;
         live.notes = [];
         live.notesStartedAt = null;
         // Background-queue a bigger, more accurate re-transcription of this
@@ -3853,6 +3892,7 @@ async function runRecordTranscribeJob(opts, sendEvent) {
         if (interrupted) headerLines.push('Status: PARTIAL — transcription was interrupted, re-run it for the full text');
         if (recordedAtIso) headerLines.push(`Recorded-At: ${recordedAtIso}`);
         headerLines.push(`Generated: ${new Date().toLocaleString()}`);
+        headerLines.push(`Model: ${model}`);
         if (participants.length) headerLines.push(`Participants: ${participants.join(', ')}`);
         if (language) headerLines.push(`Language: ${language}`);
         headerLines.push(`Source: ${filePath}`);

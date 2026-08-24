@@ -277,7 +277,9 @@ auto-saves when you leave the call. The panel's Note field takes freeform notes 
 Enter drops one into the transcript as a `[time] Note:` line, the same marker the desktop Live and
 Record tabs write, so a shared summarizer prompt recognizes either source.
 
-**Saved file format** (the desktop app writes the same header, so both paths are interchangeable):
+**Saved file format** (the desktop app writes the same header, plus a `Model:` line naming the
+WhisperKit model that produced the text and, once **Enhance** has run over it, an `Enhanced:`
+timestamp — the Transcripts list shows both as chips on the meeting card):
 ```
 Meeting: Weekly sync
 Participants: Alice, Bob, Carol

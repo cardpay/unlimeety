@@ -80,6 +80,11 @@ function deriveMeetingFromTranscript(item) {
     hasTranscript,
     hasSummary,
     language: item.language,
+    // Provenance, straight from the transcript header. Undefined on transcripts
+    // written before those lines existed and on pasted ones — the card renders
+    // that as unknown rather than assuming anything.
+    model: item.model || undefined,
+    enhancedAt: item.enhancedAt || undefined,
     progress: undefined,
     failedReason: undefined,
   };
@@ -1452,9 +1457,11 @@ function buildMeetingCard(m) {
     <div class="meeting-card-row3">
       ${statusPillHtml(m.status)}
       <div class="artifact-chips">
+        ${modelChipHtml(m)}
         <span class="artifact-chip" data-kind="audio" data-present="${m.hasAudio ? "true" : "false"}" title="Audio">${iconSvg("mic", { size: 11 })}</span>
         <span class="artifact-chip" data-kind="transcript" data-present="${m.hasTranscript ? "true" : "false"}" title="Transcript">${iconSvg("text", { size: 11 })}</span>
         <span class="artifact-chip" data-kind="summary" data-present="${m.hasSummary ? "true" : "false"}" title="Summary">${iconSvg("sparkle", { size: 11 })}</span>
+        <span class="artifact-chip" data-kind="enhance" data-present="${m.enhancedAt ? "true" : "false"}" title="${escapeHtml(enhancedChipTitle(m.enhancedAt))}">${iconSvg("check", { size: 11 })}</span>
       </div>
     </div>
   `;
@@ -1784,6 +1791,34 @@ function statusPillHtml(status) {
   const label = STATUS_LABELS[status] || status;
   const hasDot = status === "recording" || status === "transcribing" || status === "audio_only";
   return `<span class="status-pill" data-status="${status}">${hasDot ? '<span class="status-dot"></span>' : ""}${escapeHtml(label)}</span>`;
+}
+
+// ─── Provenance chips (which model transcribed it, did Enhance run) ──────────
+// The header stores the raw WhisperKit id; dropping the vendor prefix and
+// unescaping the variant suffix reproduces every label the Record tab's own
+// model picker shows ("large-v3 turbo", "medium", "base", …), so there is no
+// second table to keep in sync.
+function modelLabel(id) {
+  return String(id || "").replace(/^openai_whisper-/, "").replace(/_/g, " ");
+}
+
+// The `large-*` variants are the accurate ones; everything below them trades
+// accuracy for speed. That is the distinction worth seeing from the list — the
+// exact variant is in the chip's text and tooltip either way.
+function modelIsStrong(id) {
+  return /large/i.test(String(id || ""));
+}
+
+function modelChipHtml(m) {
+  if (!m.model) return "";
+  return `<span class="model-chip" data-strong="${modelIsStrong(m.model) ? "true" : "false"}"`
+    + ` title="Transcribed with ${escapeHtml(m.model)}">${escapeHtml(modelLabel(m.model))}</span>`;
+}
+
+function enhancedChipTitle(enhancedAt) {
+  if (!enhancedAt) return "Not enhanced";
+  const at = new Date(enhancedAt);
+  return isNaN(at.getTime()) ? "Enhanced" : `Enhanced ${at.toLocaleString()}`;
 }
 
 // ─── Tiny inline-SVG icon helper (Lucide-style paths) ────────────────────────
@@ -3670,14 +3705,27 @@ async function runSummarize() {
   pendingSummarize.set(result.jobId, { filePath, meetingTitle, instruction, folder, customName });
 }
 
+// Transcribe and Enhance are the two jobs that write provenance (`Model:` /
+// `Enhanced:`) into a transcript header, and Enhance's write suppresses the
+// library watcher's own broadcast (main.js stamps lastSelfWrite for it) — so the
+// list has to be refreshed from here, or the new chips only appear on the next
+// unrelated reload. Terminal jobs stay in the panel until dismissed, so refresh
+// on the transition and remember which ids were already handled.
+const provenanceSeen = new Set();
+
 // ─── Wiring: one broadcast drives the panel and both finish-handlers ─────────
 function onQueueChanged(jobs) {
   queueJobs = jobs;
   renderQueuePanel();
   syncEditorReadOnly();
   const presentIds = new Set(jobs.map((j) => j.id));
+  let refreshLibrary = false;
   for (const job of jobs) {
     if (job.status === "queued" || job.status === "running") continue;
+    if ((job.type === "transcribe" || job.type === "enhance") && !provenanceSeen.has(job.id)) {
+      provenanceSeen.add(job.id);
+      refreshLibrary = true;
+    }
     if (job.type === "enhance" && pendingEnhance.has(job.id)) {
       const info = pendingEnhance.get(job.id);
       pendingEnhance.delete(job.id);
@@ -3708,6 +3756,14 @@ function onQueueChanged(jobs) {
       finishSummarize(info, canceledJob);
     }
   }
+  // Job ids are never reused, so a dismissed job can be forgotten outright.
+  for (const jobId of provenanceSeen) {
+    if (!presentIds.has(jobId)) provenanceSeen.delete(jobId);
+  }
+  // Last: finishEnhance above may have reloaded the editor, and loadLibrary only
+  // rebuilds the meetings list, so the order between them does not matter — but
+  // one refresh per broadcast does.
+  if (refreshLibrary) loadLibrary();
 }
 jobsApi.onChanged(onQueueChanged);
 jobsApi.list().then(onQueueChanged);
