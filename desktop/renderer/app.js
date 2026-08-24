@@ -3411,6 +3411,9 @@ function jobStatusText(job) {
   if (job.status === "queued") return "Waiting…";
   if (job.status === "running") {
     if (job.canceling) return "Stopping…";
+    if (job.type === "enhance" && job.progress?.phase === "speakers") {
+      return "Identifying speakers…";
+    }
     if (job.type === "enhance" && job.progress?.total) {
       return `Enhancing — part ${job.progress.done + 1} of ${job.progress.total}`;
     }
@@ -3423,7 +3426,12 @@ function jobStatusText(job) {
   // separate renderer-side step (finishSummarize) that can fail or, on a
   // reload, never run at all — this job status only means the model call
   // itself succeeded.
-  if (job.type === "enhance") return job.result?.changed === false ? "Nothing to fix" : "Enhanced";
+  if (job.type === "enhance") {
+    const named = job.result?.namedSpeakers
+      ? `, ${job.result.namedSpeakers} speaker${job.result.namedSpeakers > 1 ? "s" : ""} named`
+      : "";
+    return (job.result?.changed === false ? "Nothing to fix" : "Enhanced") + named;
+  }
   if (job.type === "summarize") return "Summary generated";
   return "Done";
 }

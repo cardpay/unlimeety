@@ -2193,8 +2193,60 @@ async function runEnhanceJob(filePath, sender) {
         return { ok: false, error: 'Could not read transcript file.' };
     }
 
-    const { header, body } = enhance.splitTranscript(original);
-    const blocks = enhance.parseBlocks(body);
+    const split = enhance.splitTranscript(original);
+    const body = split.body;
+    let header = split.header;
+    let blocks = enhance.parseBlocks(body);
+    const cfg = readSummarizerConfig();
+
+    // A renderer that reloads or goes away can no longer show the result, and the
+    // run would otherwise hold the lock for hours and write the file under a
+    // window that knows nothing about it. Armed before the speaker pass, not
+    // after: that pass is a model call like any other and must be cancellable.
+    const stopOnGone = () => { enhanceCancelled = true; };
+    sender.once('destroyed', stopOnGone);
+    sender.on('did-start-navigation', stopOnGone);
+    enhanceCancelled = false;
+
+    // Name the speakers first, so the proofreading pass below sees real names
+    // (it restores misheard ones) and every chunk it validates already carries
+    // the final markers. A failure here is not a failure of Enhance: the
+    // placeholders simply stay, and the proofreading still runs.
+    let namedSpeakers = 0;
+    const placeholders = enhance.placeholderSpeakers(blocks, {
+        noteLabel: NOTE_LABEL,
+        phonetic: PHONETIC_LETTERS,
+    });
+    if (placeholders.length) {
+        if (!sender.isDestroyed()) {
+            sender.send('transcripts:enhanceProgress', { filePath, phase: 'speakers' });
+        }
+        const participants = enhance.participantsFromHeader(header);
+        const evidence = enhance.speakerEvidence(blocks, NOTE_LABEL);
+        const instruction = participants.length
+            ? `${enhance.SPEAKER_PROMPT}\n\nParticipants: ${participants.join(', ')}`
+            : enhance.SPEAKER_PROMPT;
+        try {
+            const res = await runSummarizerProvider(
+                `Placeholders to identify: ${placeholders.join(', ')}\n\n${evidence}`,
+                instruction, cfg);
+            if (res?.ok && !enhanceCancelled) {
+                const named = enhance.parseSpeakerNames(res.summary, {
+                    labels: placeholders, body, participants, phonetic: PHONETIC_LETTERS,
+                });
+                if (named.size) {
+                    blocks = enhance.renameSpeakers(blocks, named);
+                    header = enhance.renameParticipantsLine(header, named);
+                    namedSpeakers = named.size;
+                }
+            } else {
+                console.warn(`enhance: speaker naming skipped — ${res?.error || 'provider failed'}`);
+            }
+        } catch (err) {
+            console.warn(`enhance: speaker naming threw — ${err.message}`);
+        }
+    }
+
     const targets = enhance.spokenTargets(blocks, NOTE_LABEL);
     if (!targets.length) {
         return {
@@ -2204,19 +2256,10 @@ async function runEnhanceJob(filePath, sender) {
     }
 
     const chunks = enhance.chunkBlocks(targets);
-    const cfg = readSummarizerConfig();
     // Parsed once for the whole run; `select` still runs per chunk, so the block
     // only carries the terms that chunk plausibly contains.
     const glossaryEntries = glossary.parse(readConfig().glossary || '');
 
-    // A renderer that reloads or goes away can no longer show the result, and the
-    // run would otherwise hold the lock for hours and write the file under a
-    // window that knows nothing about it.
-    const stopOnGone = () => { enhanceCancelled = true; };
-    sender.once('destroyed', stopOnGone);
-    sender.on('did-start-navigation', stopOnGone);
-
-    enhanceCancelled = false;
     let skipped = 0;
     let done = 0;
     try {
@@ -2267,7 +2310,10 @@ async function runEnhanceJob(filePath, sender) {
 
         // Every part rejected is a failure, not a clean transcript. Saying
         // "nothing to fix" here would report a total model failure as success.
-        if (!done) {
+        // Named speakers are a result in their own right: if every proofreading
+        // part came back unusable but the speaker pass resolved names, those
+        // still belong in the file rather than being thrown away with the rest.
+        if (!done && !namedSpeakers) {
             if (enhanceCancelled) return { ok: false, canceled: true, applied: 0 };
             return {
                 ok: false,
@@ -2294,7 +2340,7 @@ async function runEnhanceJob(filePath, sender) {
 
         const updated = enhance.matchLineEndings(enhance.assembleTranscript(header, blocks), original);
         if (updated === original) {
-            return { ok: true, canceled: enhanceCancelled, total: chunks.length, skipped, changed: false };
+            return { ok: true, canceled: enhanceCancelled, total: chunks.length, skipped, namedSpeakers, changed: false };
         }
 
         writeFileAtomic(filePath, updated);
@@ -2308,7 +2354,7 @@ async function runEnhanceJob(filePath, sender) {
         // user stopped the rest would be its own kind of loss.
         return {
             ok: true, canceled: enhanceCancelled, total: chunks.length, skipped, applied: done,
-            changed: true, content: updated,
+            namedSpeakers, changed: true, content: updated,
         };
     } catch (err) {
         return { ok: false, error: err.message };
