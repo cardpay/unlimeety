@@ -432,6 +432,33 @@ function matchLineEndings(text, sample) {
     return text.replace(/\r?\n/g, '\r\n');
 }
 
+/// Upsert a `Key: value` line into a transcript header (the part splitTranscript
+/// returns). Replaces the line where the key is already present, otherwise adds
+/// it after the last non-empty line — never into the blank line that separates
+/// the header from the first turn, or the header would stop being one. A header
+/// with no content at all (a transcript that starts at its first marker) gets a
+/// header block of its own.
+function stampHeaderLine(header, key, value) {
+    const lines = String(header || '').split('\n');
+    const line = `${key}: ${value}`;
+    // Written back onto whichever line ending the file already uses; the enhance
+    // path re-normalizes anyway (matchLineEndings), but a caller assembling a
+    // CRLF header by hand gets a CRLF line too.
+    const keep = (i) => (lines[i].endsWith('\r') ? `${line}\r` : line);
+    const bare = (i) => lines[i].replace(/\r$/, '');
+
+    const at = lines.findIndex((_, i) => bare(i).startsWith(`${key}: `));
+    if (at >= 0) {
+        lines[at] = keep(at);
+        return lines.join('\n');
+    }
+    let last = -1;
+    for (let i = 0; i < lines.length; i++) if (bare(i) !== '') last = i;
+    if (last < 0) return `${line}\n\n`;
+    lines.splice(last + 1, 0, keep(last));
+    return lines.join('\n');
+}
+
 module.exports = {
     splitTranscript,
     parseBlocks,
@@ -441,6 +468,7 @@ module.exports = {
     mergeEnhanced,
     assembleTranscript,
     spokenTargets,
+    stampHeaderLine,
     matchLineEndings,
     ENHANCE_PROMPT,
     MARKER_RE,
