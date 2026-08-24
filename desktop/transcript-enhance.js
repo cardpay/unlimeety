@@ -49,6 +49,193 @@ Rules you must not break:
 
 Output the blocks and nothing else.`;
 
+// ─── Speaker naming ─────────────────────────────────────────────────────────
+// Diarization knows how many people spoke, not who they are, so the writers
+// label turns `Speaker`, `S1`, or a phonetic placeholder (`Beta`, `Gamma 2`).
+// This pass works out the real names and rewrites the markers.
+//
+// It is deliberately NOT part of the proofreading reply. That pass is safe
+// because the marker is immutable by construction; letting the model hand
+// markers back would give away the one anchor that proves a reply lines up.
+// Instead the model answers a separate question — "who is Beta?" — and the
+// answer is a name per placeholder, applied here mechanically.
+//
+// Nothing the model says is taken on trust. A name is used only if it is
+// already a listed participant or is actually spoken somewhere in the
+// transcript, so the worst case is a placeholder left alone, never an invented
+// person. `Me` is never renamed: it is the user, and it is already correct.
+
+const MAX_NAME_CHARS = 40;
+const MAX_NAME_WORDS = 3;
+const DEFAULT_EVIDENCE_CHARS = 6000;
+
+// `[00:20] Delta:` → the three pieces around the speaker, so a rename keeps the
+// original timestamp and trailing whitespace byte for byte.
+const MARKER_PARTS = new RegExp(`^(${TIMESTAMP}\\s*)(.*?)(:[ \\t\\r]*)$`);
+
+const NAME_SHAPE = /^\p{L}[\p{L}\p{M}'’.\- ]*$/u;
+
+const SPEAKER_PROMPT = `You are identifying the speakers in a meeting transcript.
+
+Automatic diarization labelled each speaker with a placeholder because it does not know who they are. Work out each placeholder's real name from the conversation itself: self-introductions, people addressing each other by name, someone being handed a topic they own.
+
+Rules you must not break:
+- Use only names that are actually spoken in the transcript or listed as participants. Never guess a name from a role, an accent or a topic.
+- If a placeholder's name is not clearly established, answer ? for it. A wrong name is far worse than no name.
+- Answer one line per placeholder, exactly: Placeholder = Name
+- Output those lines and nothing else.`;
+
+function speakerFromMarker(marker) {
+    const m = MARKER_PARTS.exec(String(marker || ''));
+    return m ? m[2].trim() : '';
+}
+
+function markerWithSpeaker(marker, name) {
+    const m = MARKER_PARTS.exec(String(marker || ''));
+    return m ? `${m[1]}${name}${m[3]}` : marker;
+}
+
+/// A label the app itself produced for "someone we cannot name yet".
+/// `phonetic` is passed in rather than copied: main.js owns that list for
+/// humanizeSpeakerLabel, and a second copy here is a second place to forget.
+function isPlaceholderLabel(label, phonetic = []) {
+    const s = String(label || '').trim();
+    if (!s) return false;
+    if (s === 'Me') return false; // the user — already the right answer
+    if (s === 'Speaker' || s === '?' || s === '…') return true;
+    if (/^S\d+$/i.test(s)) return true;
+    // `Beta`, and the wrap-around form `Beta 2`.
+    const m = /^(\p{L}+)(?: (\d+))?$/u.exec(s);
+    return Boolean(m && phonetic.some((p) => p.toLowerCase() === m[1].toLowerCase()));
+}
+
+/// Distinct placeholder labels, in the order they first speak.
+function placeholderSpeakers(blocks, { noteLabel = 'Note', phonetic = [] } = {}) {
+    const seen = new Set();
+    const out = [];
+    for (const block of blocks) {
+        if (isNoteBlock(block, noteLabel)) continue;
+        const label = speakerFromMarker(block.marker);
+        if (!label || seen.has(label) || !isPlaceholderLabel(label, phonetic)) continue;
+        seen.add(label);
+        out.push(label);
+    }
+    return out;
+}
+
+/// The turns the model gets to reason over. Sampled evenly across the whole
+/// meeting, not just the opening: people are addressed by name throughout, and
+/// plenty of meetings start mid-thought with no introductions at all.
+// ponytail: a stride drops the turns between samples, so a name said exactly
+// once in a skipped turn is missed. Raise the budget if that shows up.
+function speakerEvidence(blocks, noteLabel = 'Note', maxChars = DEFAULT_EVIDENCE_CHARS) {
+    const usable = blocks.filter((b) => !isNoteBlock(b, noteLabel) && b.text.trim());
+    if (!usable.length) return '';
+    const total = usable.reduce((n, b) => n + blockSize(b), 0);
+    const stride = Math.max(1, Math.ceil(total / maxChars));
+    const out = [];
+    let size = 0;
+    for (let i = 0; i < usable.length && size < maxChars; i += stride) {
+        const line = `${usable[i].marker}\n${usable[i].text}`;
+        out.push(line);
+        size += line.length + 2;
+    }
+    return out.join('\n\n');
+}
+
+function participantsFromHeader(header) {
+    const line = String(header || '').split('\n').find((l) => /^Participants:/i.test(l));
+    if (!line) return [];
+    return line.slice(line.indexOf(':') + 1).split(',').map((s) => s.trim()).filter(Boolean);
+}
+
+function escapeRe(s) {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/// Spoken somewhere, as a word rather than a substring: "Ан" must not qualify
+/// on the strength of "Анна", or a placeholder gets someone else's name.
+function spokenIn(word, haystack) {
+    return new RegExp(`(^|[^\\p{L}])${escapeRe(word)}([^\\p{L}]|$)`, 'iu').test(haystack);
+}
+
+function nameIsAttested(name, body, participants) {
+    const lower = name.toLowerCase();
+    if (participants.some((p) => p.toLowerCase() === lower)) return true;
+    const parts = name.split(/\s+/).filter((p) => p.length >= 2);
+    return parts.length > 0 && parts.every((p) => spokenIn(p, body));
+}
+
+/// Model reply → a validated `label → name` map. Every rule that fails drops
+/// that one label and keeps its placeholder; nothing fails the whole pass.
+function parseSpeakerNames(reply, { labels = [], body = '', participants = [], phonetic = [] } = {}) {
+    const wanted = new Map(labels.map((l) => [l.toLowerCase(), l]));
+    const map = new Map();
+    const taken = new Set();
+    for (const line of stripCodeFence(String(reply || '')).split('\n')) {
+        const m = /^\s*(.+?)\s*[=:]\s*(.+?)\s*$/.exec(line);
+        if (!m) continue;
+        const label = wanted.get(m[1].trim().toLowerCase());
+        const name = m[2].trim().replace(/^["'«]|["'»]$/g, '').trim();
+        if (!label || map.has(label)) continue;
+        if (!name || name === '?' || /^(unknown|unclear|n\/?a)$/i.test(name)) continue;
+        if (name.length > MAX_NAME_CHARS) continue;
+        if (name.split(/\s+/).length > MAX_NAME_WORDS) continue;
+        if (!NAME_SHAPE.test(name)) continue;
+        // A placeholder is not a name — the model echoing the label back, or
+        // swapping one placeholder for another, must not be written in.
+        if (isPlaceholderLabel(name, phonetic)) continue;
+        if (taken.has(name.toLowerCase())) continue;   // two speakers, one name
+        if (!nameIsAttested(name, body, participants)) continue;
+        map.set(label, name);
+        taken.add(name.toLowerCase());
+    }
+    return map;
+}
+
+/// The written form keeps the placeholder in brackets: `Олег (Delta)`. The name
+/// is a reading of the conversation, not a fact the recorder established, so the
+/// label it replaces stays visible — the reader can still tell turns apart by
+/// diarization if the name is wrong, and a second Enhance pass sees a speaker
+/// that is no longer a placeholder and leaves it alone.
+function displaySpeaker(name, label) {
+    return `${name} (${label})`;
+}
+
+/// Mechanical: only the speaker part of a marker changes, and only for labels
+/// the map resolved.
+function renameSpeakers(blocks, map) {
+    if (!map || !map.size) return blocks;
+    return blocks.map((block) => {
+        const label = speakerFromMarker(block.marker);
+        const name = map.get(label);
+        return name
+            ? { ...block, marker: markerWithSpeaker(block.marker, displaySpeaker(name, label)) }
+            : block;
+    });
+}
+
+/// Keep the header honest: a body that says "Anna" while `Participants:` still
+/// says "Beta" is a transcript that contradicts itself.
+function renameParticipantsLine(header, map) {
+    if (!map || !map.size) return header;
+    return String(header || '').split('\n').map((line) => {
+        if (!/^Participants:/i.test(line)) return line;
+        const head = line.slice(0, line.indexOf(':') + 1);
+        const seen = new Set();
+        const names = line.slice(line.indexOf(':') + 1)
+            .split(',').map((s) => s.trim()).filter(Boolean)
+            .map((entry) => (map.has(entry) ? displaySpeaker(map.get(entry), entry) : entry))
+            .filter((entry) => {
+                const key = entry.toLowerCase();
+                if (seen.has(key)) return false;
+                seen.add(key);
+                return true;
+            });
+        return `${head} ${names.join(', ')}`;
+    }).join('\n');
+}
+
 /// Everything before the first marker line is the header; the rest is the body.
 /// Lossless: header + body === input.
 function splitTranscript(text) {
@@ -257,4 +444,15 @@ module.exports = {
     matchLineEndings,
     ENHANCE_PROMPT,
     MARKER_RE,
+    // Speaker naming
+    speakerFromMarker,
+    isPlaceholderLabel,
+    placeholderSpeakers,
+    speakerEvidence,
+    participantsFromHeader,
+    parseSpeakerNames,
+    renameSpeakers,
+    renameParticipantsLine,
+    displaySpeaker,
+    SPEAKER_PROMPT,
 };
