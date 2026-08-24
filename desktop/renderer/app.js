@@ -1460,8 +1460,8 @@ function buildMeetingCard(m) {
         ${modelChipHtml(m)}
         <span class="artifact-chip" data-kind="audio" data-present="${m.hasAudio ? "true" : "false"}" title="Audio">${iconSvg("mic", { size: 11 })}</span>
         <span class="artifact-chip" data-kind="transcript" data-present="${m.hasTranscript ? "true" : "false"}" title="Transcript">${iconSvg("text", { size: 11 })}</span>
-        <span class="artifact-chip" data-kind="summary" data-present="${m.hasSummary ? "true" : "false"}" title="Summary">${iconSvg("sparkle", { size: 11 })}</span>
         <span class="artifact-chip" data-kind="enhance" data-present="${m.enhancedAt ? "true" : "false"}" title="${escapeHtml(enhancedChipTitle(m.enhancedAt))}">${iconSvg("check", { size: 11 })}</span>
+        <span class="artifact-chip" data-kind="summary" data-present="${m.hasSummary ? "true" : "false"}" title="Summary">${iconSvg("sparkle", { size: 11 })}</span>
       </div>
     </div>
   `;
