@@ -318,19 +318,35 @@ function renderChunk(blocks) {
 // Proofreading is close to length-preserving: punctuation and a restored term
 // move a turn by a few characters, a summary or a translation does not.
 //
-// Both bounds need the ratio *and* an absolute cap, because each is wrong alone.
-// A ratio alone scales the tolerance with the turn — 40% of a 400-character
-// monologue is 160 characters of the user's only copy, and one chunk can be a
-// single monologue. An absolute cap alone is far too loose for a two-character
-// "ок". So the floor is the stricter of the two, and so is the ceiling; the
-// ceiling is also what catches "Hope this helps!" welded onto the last turn.
-const MIN_RATIO = 0.6;
-const MAX_RATIO = 1.6;
-const MAX_DRIFT = 40;
+// Both bounds combine a ratio with a small absolute allowance, as the *union* of
+// the two and not their intersection. Each is wrong alone: a ratio is far too
+// loose for a two-character "ок", and an allowance alone scales with nothing —
+// 40 characters is a rounding error in a 7000-character monologue and a rewrite
+// of "ок". So a reply passes if it is within either one.
+//
+// Taking the stricter of the two instead (what this did before) collapsed to a
+// hard ±MAX_DRIFT at every length: MAX_DRIFT was added to the ratio ceiling and
+// the result then min'd against `was + MAX_DRIFT`, so the ratio could never be
+// the stricter bound and never applied at all. That left a 7297-character turn
+// with a 0.5% tolerance, and proofreading one measures +3-5% — restored
+// punctuation, casing and domain terms on ASR output that has none. Every long
+// turn was rejected, so Enhance failed outright on any transcript with a
+// monologue in it.
+//
+// Hence the ratios. +10% is two to three times the measured drift, and still
+// under a closing pleasantry: "Hope this helps! Let me know if you want a
+// summary of the meeting." is +16% on a 400-character turn, which no absolute
+// cap can catch on a long one anyway. -25% is more than punctuation can remove,
+// while catching the summary a small model returns when a chunk overflows its
+// context. The allowance is what a two-word turn needs for a comma — small
+// enough that the same pleasantry on a short turn also trips the ceiling.
+const MIN_RATIO = 0.75;
+const MAX_RATIO = 1.1;
+const MAX_DRIFT = 12;
 
 function outOfBounds(was, now) {
-    const floor = Math.max(was.length * MIN_RATIO, was.length - MAX_DRIFT);
-    const ceiling = Math.min(was.length * MAX_RATIO + MAX_DRIFT, was.length + MAX_DRIFT);
+    const floor = Math.min(was.length * MIN_RATIO, was.length - MAX_DRIFT);
+    const ceiling = Math.max(was.length * MAX_RATIO, was.length + MAX_DRIFT);
     return now.length < floor || now.length > ceiling;
 }
 
