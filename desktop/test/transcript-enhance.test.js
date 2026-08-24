@@ -343,6 +343,34 @@ const TRANSCRIPT = [
     assert.strictEqual(spokenTargets(blocks, 'Note').length, 1, 'and only that label');
 }
 
+// ─── length bounds ────────────────────────────────────────────────────────────
+// The gate that decides whether a reply is proofreading or rewriting. Its bounds
+// have to hold at both ends of the length scale at once: a 7000-character
+// monologue and a two-letter "ок" go through the same check.
+{
+    const turn = (text) => parseBlocks(`[00:00] Alpha:\n${text}\n`);
+    const reply = (chunk, text) => mergeEnhanced(chunk, `${chunk[0].marker}\n${text}`);
+
+    // A long turn, proofread. Measured on a real run: restored punctuation,
+    // casing and domain terms add 3-5%. This is the case that used to fail —
+    // the old bounds allowed 0.5% here, so Enhance died on every long monologue.
+    const long = 'слово '.repeat(1200).trim();            // 7199 chars
+    assert.strictEqual(reply(turn(long), long + ', и вот ещё двести пятьдесят символов сверху.'.repeat(5)).ok,
+        true, 'a long turn may grow by a few percent');
+
+    // The failures the bounds still have to catch at that length.
+    assert.strictEqual(reply(turn(long), long.slice(0, 3000)).ok, false,
+        'a long turn cut in half is a summary, not a proofread');
+    assert.strictEqual(reply(turn(long), long + ' ' + long).ok, false,
+        'a long turn that doubled is the model rewriting');
+
+    // The short end, where a ratio alone would allow anything.
+    const short = 'ок';
+    assert.strictEqual(reply(turn(short), 'Ок.').ok, true, 'a two-letter turn may gain a period');
+    assert.strictEqual(reply(turn(short), 'Ок. Hope this helps!').ok, false,
+        'a pleasantry welded onto a short turn still trips the ceiling');
+}
+
 // ─── stampHeaderLine ──────────────────────────────────────────────────────────
 // The provenance stamp Enhance writes: it must land inside the header block, not
 // in the blank line that ends it, and a second Enhance must not stack a second
