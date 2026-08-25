@@ -1233,7 +1233,7 @@ body.mode-record #btn-ask-ai {
     display: flex;
     align-items: center;
     gap: 8px;
-    margin-bottom: 6px;
+    margin-bottom: 14px;   /* was 6px + .rail-path's own 14px below it */
 }
 
 .rail-header-title {
@@ -1264,17 +1264,16 @@ body.mode-record #btn-ask-ai {
     border-color: var(--border);
 }
 
-.rail-path {
-    font-family: var(--font-mono);
-    font-size: 10.5px;
+/* The file path lives in this icon's tooltip — too noisy to show inline */
+.rail-header-info {
+    display: inline-flex;
+    align-items: center;
     color: var(--text-muted);
-    margin-bottom: 14px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    direction: rtl;       /* keep the filename tail visible when truncating */
-    text-align: left;
+    cursor: help;
+    flex-shrink: 0;
 }
+
+.rail-header-info:hover { color: var(--text-secondary); }
 
 /* Banner when we render a freeform summary as plain markdown */
 .rail-banner {
