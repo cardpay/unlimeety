@@ -120,6 +120,9 @@ const sandbox = {
     },
     // Collaborators openMeetingMenu calls that are not what is under test.
     closeMeetingMenu: () => {},
+    // The card's info popover: openMeetingMenu dismisses it so the two are
+    // never on screen together.
+    closeMeetingMeta: () => {},
     iconSvg: () => '<svg/>',
     escapeHtml: (v) => String(v).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;'),
     activeJobFor: () => null,

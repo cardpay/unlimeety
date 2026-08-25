@@ -1869,7 +1869,10 @@ ipcMain.handle('transcripts:list', () => {
                     // Computed here because the renderer never holds the body of
                     // a meeting it has not opened. Cached, own try.
                     const hasSpokenTurns = cachedHasSpokenTurns(filePath, stat.mtimeMs, raw);
-                    return { filename: f, filePath, createdAt, mtime: stat.mtimeMs, hasSummary, hasAudio, hasSpokenTurns, readFailed: false, audioPath: audioPaths[0] || null, ...info };
+                    // `head` verbatim as well as the parsed fields: the card's info
+                    // panel shows every header line, and this whitelist has never
+                    // covered all of them (older extension builds wrote `Started:`).
+                    return { filename: f, filePath, createdAt, mtime: stat.mtimeMs, hasSummary, hasAudio, hasSpokenTurns, readFailed: false, audioPath: audioPaths[0] || null, header: head, ...info };
                 } catch (err) {
                     // Everything below is a fabricated default, not a finding —
                     // the read, or the summary/audio lookup after it, never

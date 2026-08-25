@@ -157,6 +157,15 @@ edit-mode textarea keep the header exactly as they are today.
   URL header line is a keyless row (it was becoming a row keyed `https`). The
   button carries `aria-describedby` to the panel's id.
 
+- **2026-08-25 (superseded in part)** — the icon no longer lives in the
+  transcript. `spec-transcript-chrome-declutter.md` moved it onto the library
+  meeting card, where its panel is built from the list payload instead of from
+  header text, and view mode kept only the inline `Status: PARTIAL …` warning.
+  The reason the header is hidden at all, and every parsing/formatting decision
+  below, still hold — only the placement and the reveal (click, not hover)
+  changed. `parseTranscriptMeta` was retired with the placement: with rows
+  coming from the meeting record, nothing read them out of text any more.
+
 ## Design Notes
 
 **Test harness.** `renderer/` has no module system (classic `<script>` tags) and
