@@ -38,6 +38,9 @@
     --u-rec:       #dc2626;
     --u-rec-dim:   rgba(220, 38, 38, 0.14);
 
+    /* Native controls (checkbox, select popup, input caret) paint light too */
+    color-scheme: light;
+
     /* Card elevation: light, layered shadow instead of the dark drop */
     box-shadow:
         0 1px 0 rgba(255, 255, 255, 0.7) inset,
@@ -76,6 +79,7 @@
         --u-lime-dim:  rgba(107, 69, 232, 0.12);
         --u-rec:       #dc2626;
         --u-rec-dim:   rgba(220, 38, 38, 0.14);
+        color-scheme: light;
         box-shadow:
             0 1px 0 rgba(255, 255, 255, 0.7) inset,
             0 12px 32px rgba(28, 26, 22, 0.16),

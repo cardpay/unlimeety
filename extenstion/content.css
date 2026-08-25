@@ -44,6 +44,10 @@
         0 18px 48px rgba(0, 0, 0, 0.55),
         0 2px 8px rgba(0, 0, 0, 0.35);
     color: var(--u-text);
+    /* Inherited, so one declaration on the root themes every native control in
+       the widget: the auto-start checkbox, the Language select's option popup,
+       and the Note field's caret and selection. Flipped in content-light.css. */
+    color-scheme: dark;
     font-family: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     font-size: 12px;
     line-height: 1.35;
@@ -265,6 +269,37 @@
 #gmt-notes-input:disabled {
     opacity: 0.5;
     cursor: not-allowed;
+}
+
+/* ─── Auto-start checkbox ───────────────────────────────────────────────────── */
+/* Left as a native checkbox: `accent-color` tints it and the root's
+   `color-scheme` decides which palette the UA paints it in, so it picks a
+   contrasting tick itself — no baked-in checkmark SVG to re-skin per theme. */
+.gmt-check {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11.5px;
+    font-weight: 500;
+    color: var(--u-text-2);
+    cursor: pointer;
+    user-select: none;
+}
+
+.gmt-check input {
+    width: 14px;
+    height: 14px;
+    margin: 0;
+    flex-shrink: 0;
+    accent-color: var(--u-lime);
+    cursor: pointer;
+}
+
+/* Match the lime focus ring #gmt-language and #gmt-notes-input already use,
+   instead of leaving keyboard users with Chrome's default. */
+.gmt-check input:focus-visible {
+    outline: 2px solid rgba(198, 244, 50, 0.55);
+    outline-offset: 1px;
 }
 
 /* ─── Main control row ──────────────────────────────────────────────────────── */
