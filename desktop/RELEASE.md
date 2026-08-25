@@ -178,6 +178,59 @@ curl -fLI https://github.com/cardpay/unlimeety/releases/latest/download/Unlimeet
 
 ---
 
+## Cutting a beta
+
+A beta ships off the `beta` branch as a **prerelease**, and it must not disturb the stable download. Three things make that true, and all three matter:
+
+- **`--prerelease`.** GitHub's `/releases/latest` resolves to the most recent release that is neither a prerelease nor a draft, so the README's `releases/latest/download/Unlimeety-arm64.dmg` keeps serving the last stable build. Drop this flag and the beta becomes the download every reader of the README gets.
+- **`--target beta`.** No PR into `main`, no version-bump PR, no tag pushed by hand — `gh release create` tags the `beta` commit directly. `main` is not involved in a beta at all.
+- **Beta-only asset names.** Assets live inside their own release, so an identically named file overwrites nothing — but a downloaded `Unlimeety-arm64.dmg` on someone's disk is then indistinguishable from the stable one. Upload the beta under its own name instead. Do **not** reach for `${version}` in `artifactName` to achieve this: that field feeds the stable release's version-free URL, and changing it breaks the README link. Rename the copy you upload.
+
+Version numbers carry the suffix, with one asymmetry worth remembering: `desktop/package.json` takes it directly (`1.5.0-beta`), while the Chrome extension cannot — `manifest.json`'s `version` accepts only one to four dot-separated integers and Chrome rejects the manifest outright with a suffix there. The extension puts the suffix in `version_name`, which is what `chrome://extensions` displays.
+
+```bash
+cd unlimeety/desktop
+npm version 1.5.0-beta --no-git-tag-version    # extension: edit manifest.json by hand
+cd ..
+git add desktop/package.json desktop/package-lock.json extenstion/manifest.json
+git commit -m "Bump to 1.5.0-beta (desktop) and 1.3.0-beta (extension)"
+git push origin beta
+
+cd desktop
+export APPLE_KEYCHAIN_PROFILE=transcriber-notarize
+export APPLE_TEAM_ID=<YOUR_TEAM_ID>
+npm run build:mac && npm run notarize:dmg       # same signing and notarization as a stable build
+cd ..
+
+# Beta-only asset names, so nothing on disk is mistaken for the stable build.
+cp desktop/dist/Unlimeety-arm64.dmg desktop/dist/Unlimeety-arm64-beta.dmg
+zip -r -X desktop/dist/unlimeety-extension-beta.zip extenstion \
+  -x "extenstion/2025_Unlimit_Sign_black.jpg" -x "*.DS_Store"
+
+gh release create v1.5.0-beta \
+  --repo cardpay/unlimeety \
+  --target beta \
+  --prerelease \
+  --title "Unlimeety 1.5.0-beta" \
+  --notes "What to test." \
+  desktop/dist/Unlimeety-arm64-beta.dmg \
+  desktop/dist/unlimeety-extension-beta.zip
+```
+
+Then prove the stable link did not move — this is the one check that catches a forgotten `--prerelease`:
+
+```bash
+curl -fsLI https://github.com/cardpay/unlimeety/releases/latest/download/Unlimeety-arm64.dmg \
+  | grep -i "^location" | tail -1
+#   Expect the URL to still name the last STABLE tag, not the beta one.
+gh release list --repo cardpay/unlimeety --limit 5
+#   Expect "Latest" to still sit on the stable release, and the beta row to read "Pre-release".
+```
+
+The extension has no build step — it is loaded unpacked, so the zip is the whole deliverable. The Unlimit logo is excluded because nothing in the extension references it.
+
+---
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
