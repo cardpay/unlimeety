@@ -1112,7 +1112,35 @@
           </label>
         </div>
 
-        <label class="modal-label">Summarizer</label>
+        <label class="modal-label" style="margin-top:18px">Date format</label>
+        <div class="settings-provider-group" id="settings-date-order-group">
+          <label class="settings-radio">
+            <input type="radio" name="settings-date-order" value="dmy" />
+            <span class="settings-radio-title">Day first</span>
+            <span class="settings-radio-sub">31/12/26</span>
+          </label>
+          <label class="settings-radio">
+            <input type="radio" name="settings-date-order" value="mdy" />
+            <span class="settings-radio-title">Month first</span>
+            <span class="settings-radio-sub">12/31/26</span>
+          </label>
+        </div>
+
+        <label class="modal-label" style="margin-top:18px">Time format</label>
+        <div class="settings-provider-group" id="settings-time-format-group">
+          <label class="settings-radio">
+            <input type="radio" name="settings-time-format" value="24h" />
+            <span class="settings-radio-title">24-hour</span>
+            <span class="settings-radio-sub">18:14</span>
+          </label>
+          <label class="settings-radio">
+            <input type="radio" name="settings-time-format" value="12h" />
+            <span class="settings-radio-title">12-hour</span>
+            <span class="settings-radio-sub">6:14 PM</span>
+          </label>
+        </div>
+
+        <label class="modal-label" style="margin-top:18px">Summarizer</label>
         <div class="settings-provider-group">
           <label class="settings-radio">
             <input type="radio" name="settings-provider" value="claude-code" />
