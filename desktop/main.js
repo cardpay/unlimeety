@@ -1828,7 +1828,10 @@ ipcMain.handle('transcripts:list', () => {
                     const hasSummary = findExistingSummaryPath(filePath) !== null;
                     const audioPaths = findRelatedAudioPaths(filePath);
                     const hasAudio = audioPaths.length > 0;
-                    return { filename: f, filePath, createdAt, mtime: stat.mtimeMs, hasSummary, hasAudio, audioPath: audioPaths[0] || null, ...info };
+                    // `head` verbatim as well as the parsed fields: the card's info
+                    // panel shows every header line, and this whitelist has never
+                    // covered all of them (older extension builds wrote `Started:`).
+                    return { filename: f, filePath, createdAt, mtime: stat.mtimeMs, hasSummary, hasAudio, audioPath: audioPaths[0] || null, header: head, ...info };
                 } catch {
                     return {
                         filename: f, filePath,

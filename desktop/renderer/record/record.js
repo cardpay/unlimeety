@@ -430,7 +430,6 @@
         outputPathEl.textContent = res.outputPath;
         buildWaveform();
         fillRecordFileCard();
-        updateStatusBar('recording');
     });
 
     // ─── Inline notes (freeform, timestamped) ───────────────────────────────
@@ -527,13 +526,6 @@
                 spkEl.appendChild(c);
             }
             if (!spkEl.children.length) spkEl.textContent = '—';
-        }
-    }
-
-    function updateStatusBar(phase) {
-        const path = document.getElementById('status-path');
-        if (phase === 'recording' && state.outputPath) {
-            if (path) path.textContent = `Recording → ${state.outputPath}`;
         }
     }
 
@@ -738,7 +730,6 @@
                 updateRecordingIndicator();
                 stopTimer();
                 state.outputPath = event.path || state.outputPath;
-                updateStatusBar('idle');
                 // Return to the idle screen — the new recording shows up in
                 // the sidebar (pre-checked, courtesy of refreshHistory) and
                 // the user transcribes via the lime CTA. Only from the
@@ -754,7 +745,6 @@
                 updateRecordingIndicator();
                 if (state.phase === 'recording') {
                     // Helper died unexpectedly. Surface as setup error.
-                    updateStatusBar('idle');
                     showSection('idle');
                     setupError.textContent = `Recorder exited unexpectedly (code ${event.code}).`;
                     setupError.classList.remove('hidden');
