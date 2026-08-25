@@ -936,6 +936,81 @@ function renameSpeakerInText(content, oldName, newName) {
   return lines.join("\n");
 }
 
+// ── transcript meta (extracted verbatim by test/transcript-meta.test.js) ──
+// The header block above the first turn is reference data nobody reads twice,
+// so view mode hides it behind an info icon. This region stays free of the DOM
+// and localStorage — `modelLabel`, `formatMeetingStamp`, `escHtml` and
+// `iconSvg` resolve from the enclosing scope, which is what lets the test eval
+// it with stubs for them. Keep the markers in place when editing.
+
+// Only ISO values are ours to reformat. `Recorded-At` and `Enhanced` are ISO,
+// but `Generated` is written with toLocaleString() (main.js and the extension's
+// background.js), and new Date() either rejects that shape outright or
+// mis-reparses a US-looking one into a different instant.
+const META_ISO = /^\d{4}-\d{2}-\d{2}T/;
+
+// Display labels for keys whose on-disk name is clumsier than it needs to be.
+// The parsed key is untouched — this is presentation only.
+const META_LABELS = { "Recorded-At": "Recorded" };
+
+// Header text → { rows: [{key, value}], warn }. A line that is not "Key: value"
+// becomes a keyless row rather than being dropped. `warn` is the interrupted-
+// transcription notice, which is the one header line that must not hide behind
+// a hover.
+function parseTranscriptMeta(header) {
+  const rows = [];
+  let warn = "";
+  for (const line of String(header || "").split("\n")) {
+    const text = line.trim();
+    if (!text) continue;
+    // Key chars only up to the colon, so free text ("draft notes: see below")
+    // stays a keyless row instead of being mangled into a labelled one — and a
+    // "//" value means the colon belonged to a URL scheme, not to a key.
+    const m = /^([A-Za-z][\w-]*):[ \t]*(.*)$/.exec(text);
+    if (!m || m[2].startsWith("//")) { rows.push({ key: "", value: text }); continue; }
+    const value = m[2].trim();
+    // Only PARTIAL escapes the panel. Live saves write "Status: live (still in
+    // progress)" on perfectly healthy transcripts (live.js), and rendering that
+    // amber beside the icon would cry wolf on every Live note.
+    if (m[1] === "Status" && /^PARTIAL\b/.test(value)) { warn = value; continue; }
+    rows.push({ key: m[1], value: metaValue(m[1], value) });
+  }
+  return { rows, warn };
+}
+
+// Display form of one header value: raw ids and ISO stamps are what the file
+// stores, the panel shows what the rest of the UI shows.
+function metaValue(key, value) {
+  if (key === "Model") return modelLabel(value);
+  if (META_ISO.test(value)) {
+    const d = new Date(value);
+    if (!isNaN(d.getTime())) return formatMeetingStamp(d);
+  }
+  return value;
+}
+
+function transcriptMetaHtml(header) {
+  const { rows, warn } = parseTranscriptMeta(header);
+  if (!rows.length && !warn) return "";
+  const btn = rows.length
+    ? `<button class="tv-meta-btn" type="button" aria-label="Transcript details"`
+      + ` aria-describedby="tv-meta-panel">${iconSvg("info")}</button>`
+    : "";
+  const panel = rows.length
+    ? `<div class="tv-meta-panel" id="tv-meta-panel" role="tooltip">` + rows.map((r) =>
+        `<div class="tv-meta-row">`
+        + (r.key ? `<span class="tv-meta-key">${escHtml(META_LABELS[r.key] || r.key)}</span>` : "")
+        + `<span class="tv-meta-val">${escHtml(r.value)}</span></div>`).join("")
+      + `</div>`
+    : "";
+  // The warning is a sibling of the panel, never a row inside it: it has to
+  // stay readable with no hover at all.
+  return `<div class="tv-meta">${btn}`
+    + (warn ? `<span class="tv-meta-warn">${escHtml(warn)}</span>` : "")
+    + `${panel}</div>`;
+}
+// ── end transcript meta ──
+
 function renderTranscriptView(content) {
   const firstTcMatch = /^\[\d[^\]]*\]/m.exec(content);
   let html = "";
@@ -945,7 +1020,7 @@ function renderTranscriptView(content) {
     if (content.trim()) html = `<div class="tv-plain">${escHtml(content)}</div>`;
   } else {
     const header = content.slice(0, firstTcMatch.index).trim();
-    if (header) html += `<div class="tv-header">${escHtml(header)}</div>`;
+    if (header) html += transcriptMetaHtml(header);
     for (const seg of parseSegments(content)) {
       // "Note" is the reserved label the recording UIs write for the user's own
       // typed notes — it's not a speaker, so it gets a plain label instead of a
@@ -1446,7 +1521,7 @@ function buildMeetingCard(m) {
     </div>
     ${showSnippet ? `<div class="meeting-snippet">${highlightSnippet(snippet, searchQuery)}</div>` : ""}
     <div class="meeting-card-row2">
-      <span class="meeting-time tnum">${escapeHtml(formatMeetingTime(m.date))}</span>
+      <span class="meeting-time tnum">${escapeHtml(formatMeetingStamp(m.date))}</span>
       ${m.durationSec ? `<span class="dot">·</span><span class="meeting-duration tnum">${escapeHtml(formatMeetingDuration(m.durationSec))}</span>` : ""}
       ${m.participants?.length ? avatarStackHtml(m.participants, 3) : ""}
     </div>
@@ -1713,11 +1788,102 @@ async function handleMeetingClick(m) {
 }
 
 // ─── Sidebar formatters ──────────────────────────────────────────────────────
-function formatMeetingTime(date) {
+// Date order and clock are view preferences, stored and applied exactly like
+// the theme (see applyTheme): localStorage, live on change, outside the
+// summarizer's Save/Cancel flow.
+//
+// ── date-time formatting (extracted verbatim by test/meeting-date-format.test.js) ──
+// Everything between these markers stays free of localStorage and the DOM so the
+// test can eval the region under node. Keep the markers in place when editing.
+const DATE_ORDER_KEY = "uds-date-order";    // 'dmy' (day first) | 'mdy' (month first)
+const TIME_FORMAT_KEY = "uds-time-format";  // '24h' | '12h'
+
+// renderMeetings() reruns on every search keystroke and builds one card per
+// meeting, so the formatter pair for each preference combination is built once
+// and reused rather than twice per card per repaint.
+const meetingFormatterCache = new Map();
+
+function meetingFormatters(order, clock) {
+  const key = `${order}|${clock}`;
+  let pair = meetingFormatterCache.get(key);
+  if (!pair) {
+    pair = {
+      // The clock keeps its own locale rather than inheriting the date's: en-GB
+      // with hour12 renders "06:14 pm" and en-US without it renders "18:14", so
+      // mixing them would make AM/PM casing and zero-padding depend on the date
+      // preference.
+      day: new Intl.DateTimeFormat(order === "mdy" ? "en-US" : "en-GB", {
+        day: "2-digit", month: "2-digit", year: "2-digit",
+      }),
+      time: clock === "12h"
+        ? new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit", hour12: true })
+        : new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit", hour12: false }),
+    };
+    meetingFormatterCache.set(key, pair);
+  }
+  return pair;
+}
+
+function formatMeetingDateTime(date, order, clock) {
   if (!(date instanceof Date) || isNaN(date.getTime())) return "";
-  const hh = String(date.getHours()).padStart(2, "0");
-  const mm = String(date.getMinutes()).padStart(2, "0");
-  return `${hh}:${mm}`;
+  try {
+    const f = meetingFormatters(order, clock);
+    // ICU 72+ separates the meridiem with U+202F — normalised to a plain space
+    // so the card text stays copy-pasteable.
+    return `${f.day.format(date)}, ${f.time.format(date).replace(/\u202f/g, " ")}`;
+  } catch (_) {
+    // A build without usable ICU data would otherwise throw once per card and
+    // take the whole sidebar down with it; a bare clock is the better failure.
+    return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+  }
+}
+
+// Defaults follow the OS locale so an unconfigured machine already reads right.
+function systemDateOrder() {
+  try {
+    const parts = new Intl.DateTimeFormat(undefined, {
+      day: "2-digit", month: "2-digit", year: "2-digit",
+    }).formatToParts(new Date());
+    const month = parts.findIndex((p) => p.type === "month");
+    const day = parts.findIndex((p) => p.type === "day");
+    return month >= 0 && day >= 0 && month < day ? "mdy" : "dmy";
+  } catch (_) {
+    return "dmy";
+  }
+}
+
+function systemTimeFormat() {
+  try {
+    return new Intl.DateTimeFormat(undefined, { hour: "numeric" }).resolvedOptions().hour12
+      ? "12h"
+      : "24h";
+  } catch (_) {
+    return "24h";
+  }
+}
+// ── end date-time formatting ──
+
+// Storage access is guarded the same way as the summary-preset reads below: a
+// browsing context with site data blocked throws on access rather than
+// returning null, and that must not cost the user the sidebar.
+function readFormatPref(key, systemDefault) {
+  try {
+    return localStorage.getItem(key) || systemDefault();
+  } catch (_) {
+    return systemDefault();
+  }
+}
+
+function dateOrderPref() {
+  return readFormatPref(DATE_ORDER_KEY, systemDateOrder);
+}
+
+function timeFormatPref() {
+  return readFormatPref(TIME_FORMAT_KEY, systemTimeFormat);
+}
+
+function formatMeetingStamp(date) {
+  return formatMeetingDateTime(date, dateOrderPref(), timeFormatPref());
 }
 
 function formatMeetingDuration(seconds) {
@@ -4088,6 +4254,25 @@ lightThemeMQ.addEventListener("change", () => {
   if ((localStorage.getItem("uds-theme") || "dark") === "system") applyTheme("system");
 });
 
+// ─── Date & time format (view preferences) ──────────────────────────────────
+// Same contract as the theme: picking a radio takes effect immediately and
+// survives Cancel — these never travel through the summarizer's Save.
+const settingsDateOrderRadios = document.querySelectorAll('input[name="settings-date-order"]');
+const settingsTimeFormatRadios = document.querySelectorAll('input[name="settings-time-format"]');
+
+function bindFormatRadios(radios, key) {
+  radios.forEach((r) =>
+    r.addEventListener("change", () => {
+      if (!r.checked) return;
+      try { localStorage.setItem(key, r.value); } catch (_) {}
+      renderMeetings();
+    }),
+  );
+}
+
+bindFormatRadios(settingsDateOrderRadios, DATE_ORDER_KEY);
+bindFormatRadios(settingsTimeFormatRadios, TIME_FORMAT_KEY);
+
 settingsPresetBtns.forEach((btn) =>
   btn.addEventListener("click", () => {
     settingsOaiUrl.value = btn.dataset.url || "";
@@ -4165,6 +4350,14 @@ async function openSettingsModal() {
   const theme = localStorage.getItem("uds-theme") || "dark";
   settingsThemeRadios.forEach((r) => {
     r.checked = r.value === theme;
+  });
+  const dateOrder = dateOrderPref();
+  settingsDateOrderRadios.forEach((r) => {
+    r.checked = r.value === dateOrder;
+  });
+  const timeFormat = timeFormatPref();
+  settingsTimeFormatRadios.forEach((r) => {
+    r.checked = r.value === timeFormat;
   });
   settingsOrKey.value = cfg?.openrouter?.apiKey || "";
   settingsOrModel.value = cfg?.openrouter?.model || "";

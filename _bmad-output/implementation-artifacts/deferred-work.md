@@ -62,3 +62,23 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-universal-job-queue.md`
   summary: The Record tab's own recordings context menu (`renderer/record/record.js`'s `openRecordingMenu`) still has no Enhance action — only the library's meeting menu (`renderer/app.js`'s `openMeetingMenu`) does, exactly as CLAUDE.md's own "Known pitfalls" note already flags.
   evidence: Confirmed by code trace while implementing `spec-universal-job-queue.md` — both menus were touched (their transcribe/enhance-based item-disabling now reads the job queue instead of local booleans), but neither gained or lost any menu item. `openRecordingMenu`'s item list (Rename…, (Re-)Transcribe…, Delete audio/transcript/summary) still has no Enhance entry. Out of scope for this spec; still open.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-meeting-card-date-format.md`
+  summary: The Record and Live tabs still format timestamps with their own `toLocaleTimeString` calls and ignore the new date-order / clock preferences.
+  evidence: `desktop/renderer/record/record.js` and `desktop/renderer/live/live.js` both call `toLocaleTimeString` directly. Once a user picks 12-hour or month-first in Settings, the Transcripts sidebar follows it and those two tabs do not — a visible inconsistency inside one window. Deliberately out of scope for this spec ("Never: reformatting timestamps outside the Transcripts sidebar"), but worth a follow-up.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-transcript-meta-info-icon.md`
+  summary: `renderer/app.js` still hard-codes the header keys it treats specially (`Model`, `Status`, the `META_LABELS` relabel) with no link to the authoritative writer parser at `main.js:1738-1760`.
+  evidence: The date handling was moved to a value-shape test so it needs no sync, but a new header key added in main.js still lands in the meta panel with a raw label and no signal, and neither file points at the other.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-transcript-meta-info-icon.md`
+  summary: `desktop/app.js` is an untracked stale copy of `renderer/app.js` that still emits `<div class="tv-header">`, a class whose CSS no longer exists.
+  evidence: Nothing loads it (`renderer/index.html` loads `renderer/app.js`, and package.json build.files has no top-level app.js), so editing it by mistake produces silently dead markup.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-transcript-meta-info-icon.md`
+  summary: The project instructions (AGENTS.md, symlinked as CLAUDE.md) say `npm test` covers only glossary, summary-frontmatter, transcript-enhance and job-queue; the suite now has nine files.
+  evidence: Already stale before this change (renderer-globals, speaker-naming, meeting-date-format were missing too); left alone here because a concurrent session is editing the same tree.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-transcript-meta-info-icon.md`
+  summary: `main.js` writes `Generated:` as `new Date().toLocaleString()`, so the meta panel shows it verbatim next to a house-formatted `Recorded` — two date formats in one panel.
+  evidence: Confirmed by rendering a real header: `Recorded` reads `25.08.2026, 09:46:40` while `Generated` reads `8/25/2026, 10:15:53 AM`. The panel deliberately shows non-ISO values as written rather than misparsing them; the real fix is to write ISO at `main.js:2135`, `:2948`, `:3894` and `extenstion/background.js:157`, which is an on-disk format change the spec puts under "Ask First".
