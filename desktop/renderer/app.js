@@ -1446,7 +1446,7 @@ function buildMeetingCard(m) {
     </div>
     ${showSnippet ? `<div class="meeting-snippet">${highlightSnippet(snippet, searchQuery)}</div>` : ""}
     <div class="meeting-card-row2">
-      <span class="meeting-time tnum">${escapeHtml(formatMeetingTime(m.date))}</span>
+      <span class="meeting-time tnum">${escapeHtml(formatMeetingStamp(m.date))}</span>
       ${m.durationSec ? `<span class="dot">·</span><span class="meeting-duration tnum">${escapeHtml(formatMeetingDuration(m.durationSec))}</span>` : ""}
       ${m.participants?.length ? avatarStackHtml(m.participants, 3) : ""}
     </div>
@@ -1713,11 +1713,102 @@ async function handleMeetingClick(m) {
 }
 
 // ─── Sidebar formatters ──────────────────────────────────────────────────────
-function formatMeetingTime(date) {
+// Date order and clock are view preferences, stored and applied exactly like
+// the theme (see applyTheme): localStorage, live on change, outside the
+// summarizer's Save/Cancel flow.
+//
+// ── date-time formatting (extracted verbatim by test/meeting-date-format.test.js) ──
+// Everything between these markers stays free of localStorage and the DOM so the
+// test can eval the region under node. Keep the markers in place when editing.
+const DATE_ORDER_KEY = "uds-date-order";    // 'dmy' (day first) | 'mdy' (month first)
+const TIME_FORMAT_KEY = "uds-time-format";  // '24h' | '12h'
+
+// renderMeetings() reruns on every search keystroke and builds one card per
+// meeting, so the formatter pair for each preference combination is built once
+// and reused rather than twice per card per repaint.
+const meetingFormatterCache = new Map();
+
+function meetingFormatters(order, clock) {
+  const key = `${order}|${clock}`;
+  let pair = meetingFormatterCache.get(key);
+  if (!pair) {
+    pair = {
+      // The clock keeps its own locale rather than inheriting the date's: en-GB
+      // with hour12 renders "06:14 pm" and en-US without it renders "18:14", so
+      // mixing them would make AM/PM casing and zero-padding depend on the date
+      // preference.
+      day: new Intl.DateTimeFormat(order === "mdy" ? "en-US" : "en-GB", {
+        day: "2-digit", month: "2-digit", year: "2-digit",
+      }),
+      time: clock === "12h"
+        ? new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit", hour12: true })
+        : new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit", hour12: false }),
+    };
+    meetingFormatterCache.set(key, pair);
+  }
+  return pair;
+}
+
+function formatMeetingDateTime(date, order, clock) {
   if (!(date instanceof Date) || isNaN(date.getTime())) return "";
-  const hh = String(date.getHours()).padStart(2, "0");
-  const mm = String(date.getMinutes()).padStart(2, "0");
-  return `${hh}:${mm}`;
+  try {
+    const f = meetingFormatters(order, clock);
+    // ICU 72+ separates the meridiem with U+202F — normalised to a plain space
+    // so the card text stays copy-pasteable.
+    return `${f.day.format(date)}, ${f.time.format(date).replace(/\u202f/g, " ")}`;
+  } catch (_) {
+    // A build without usable ICU data would otherwise throw once per card and
+    // take the whole sidebar down with it; a bare clock is the better failure.
+    return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+  }
+}
+
+// Defaults follow the OS locale so an unconfigured machine already reads right.
+function systemDateOrder() {
+  try {
+    const parts = new Intl.DateTimeFormat(undefined, {
+      day: "2-digit", month: "2-digit", year: "2-digit",
+    }).formatToParts(new Date());
+    const month = parts.findIndex((p) => p.type === "month");
+    const day = parts.findIndex((p) => p.type === "day");
+    return month >= 0 && day >= 0 && month < day ? "mdy" : "dmy";
+  } catch (_) {
+    return "dmy";
+  }
+}
+
+function systemTimeFormat() {
+  try {
+    return new Intl.DateTimeFormat(undefined, { hour: "numeric" }).resolvedOptions().hour12
+      ? "12h"
+      : "24h";
+  } catch (_) {
+    return "24h";
+  }
+}
+// ── end date-time formatting ──
+
+// Storage access is guarded the same way as the summary-preset reads below: a
+// browsing context with site data blocked throws on access rather than
+// returning null, and that must not cost the user the sidebar.
+function readFormatPref(key, systemDefault) {
+  try {
+    return localStorage.getItem(key) || systemDefault();
+  } catch (_) {
+    return systemDefault();
+  }
+}
+
+function dateOrderPref() {
+  return readFormatPref(DATE_ORDER_KEY, systemDateOrder);
+}
+
+function timeFormatPref() {
+  return readFormatPref(TIME_FORMAT_KEY, systemTimeFormat);
+}
+
+function formatMeetingStamp(date) {
+  return formatMeetingDateTime(date, dateOrderPref(), timeFormatPref());
 }
 
 function formatMeetingDuration(seconds) {
@@ -4087,6 +4178,25 @@ lightThemeMQ.addEventListener("change", () => {
   if ((localStorage.getItem("uds-theme") || "dark") === "system") applyTheme("system");
 });
 
+// ─── Date & time format (view preferences) ──────────────────────────────────
+// Same contract as the theme: picking a radio takes effect immediately and
+// survives Cancel — these never travel through the summarizer's Save.
+const settingsDateOrderRadios = document.querySelectorAll('input[name="settings-date-order"]');
+const settingsTimeFormatRadios = document.querySelectorAll('input[name="settings-time-format"]');
+
+function bindFormatRadios(radios, key) {
+  radios.forEach((r) =>
+    r.addEventListener("change", () => {
+      if (!r.checked) return;
+      try { localStorage.setItem(key, r.value); } catch (_) {}
+      renderMeetings();
+    }),
+  );
+}
+
+bindFormatRadios(settingsDateOrderRadios, DATE_ORDER_KEY);
+bindFormatRadios(settingsTimeFormatRadios, TIME_FORMAT_KEY);
+
 settingsPresetBtns.forEach((btn) =>
   btn.addEventListener("click", () => {
     settingsOaiUrl.value = btn.dataset.url || "";
@@ -4164,6 +4274,14 @@ async function openSettingsModal() {
   const theme = localStorage.getItem("uds-theme") || "dark";
   settingsThemeRadios.forEach((r) => {
     r.checked = r.value === theme;
+  });
+  const dateOrder = dateOrderPref();
+  settingsDateOrderRadios.forEach((r) => {
+    r.checked = r.value === dateOrder;
+  });
+  const timeFormat = timeFormatPref();
+  settingsTimeFormatRadios.forEach((r) => {
+    r.checked = r.value === timeFormat;
   });
   settingsOrKey.value = cfg?.openrouter?.apiKey || "";
   settingsOrModel.value = cfg?.openrouter?.model || "";
