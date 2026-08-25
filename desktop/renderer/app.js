@@ -56,6 +56,10 @@ function deriveStatus(m) {
 // Without a filePath we have no stable id and the matching DOM selector would
 // fall back to the empty string, which matches any card without the attribute.
 // Skip such items entirely so they never enter `meetings[]`.
+// ── meeting record (extracted verbatim by test/transcript-meta.test.js) ──
+// Pure mapping from one `transcripts:list` row to the record the cards render
+// from. Keep it free of the DOM so the test can pin the key names against what
+// main.js actually emits — a renamed field here fails silently otherwise.
 function deriveMeetingFromTranscript(item) {
   if (!item || !item.filePath) return null;
   const rawDate = item.createdAt || item.generated || item.mtime;
@@ -85,12 +89,17 @@ function deriveMeetingFromTranscript(item) {
     // that as unknown rather than assuming anything.
     model: item.model || undefined,
     enhancedAt: item.enhancedAt || undefined,
+    // The header block verbatim, for the card's info panel. Not the typed
+    // fields above: `parseTranscriptHeaderMain` only knows eight keys, and
+    // older extension builds wrote `Started:`, which no whitelist covers.
+    header: item.header || "",
     progress: undefined,
     failedReason: undefined,
   };
   m.status = deriveStatus(m);
   return m;
 }
+// ── end meeting record ──
 
 function getMeetingById(id) {
   return meetings.find((m) => m.id === id) || null;
@@ -668,9 +677,6 @@ const btnSave = document.getElementById("btn-save");
 const btnSaveAs = document.getElementById("btn-save-as");
 const editorToolbar = document.getElementById("editor-toolbar");
 const btnLibrary = document.getElementById("btn-library");
-const statusPath = document.getElementById("status-path");
-const statusWords = document.getElementById("status-words");
-const statusLines = document.getElementById("status-lines");
 const saveChip = document.getElementById("save-chip");
 
 // Library DOM refs
@@ -936,6 +942,89 @@ function renameSpeakerInText(content, oldName, newName) {
   return lines.join("\n");
 }
 
+// ── transcript meta (extracted verbatim by test/transcript-meta.test.js) ──
+// The header block above the first turn is reference data nobody reads twice,
+// so view mode drops it entirely and the library card carries an info panel
+// instead. This region stays free of the DOM and localStorage — `modelLabel`,
+// `formatMeetingStamp` and `escHtml` resolve from the enclosing scope, which
+// is what lets the test eval it with stubs for them. Keep the markers in
+// place when editing.
+
+// Only ISO values are ours to reformat. `Recorded-At` and `Enhanced` are ISO,
+// but `Generated` is written with toLocaleString() (main.js and the extension's
+// background.js), and new Date() either rejects that shape outright or
+// mis-reparses a US-looking one into a different instant.
+const META_ISO = /^\d{4}-\d{2}-\d{2}T/;
+
+// Display labels for keys whose on-disk name is clumsier than it needs to be.
+// The parsed key is untouched — this is presentation only.
+const META_LABELS = { "Recorded-At": "Recorded" };
+
+// Display form of one header value: raw ids and ISO stamps are what the file
+// stores, the panel shows what the rest of the UI shows.
+function metaValue(key, value) {
+  if (key === "Model") return modelLabel(value);
+  if (META_ISO.test(value)) {
+    const d = new Date(value);
+    if (!isNaN(d.getTime())) return formatMeetingStamp(d);
+  }
+  return value;
+}
+
+// What view mode renders where the header block was. Normally just the
+// interruption warning — the rest is one click away on the card. But a file
+// opened from outside the transcripts folder (Open, drag-drop, deep link) has
+// no card at all, so for those the rows stay inline rather than becoming
+// reachable only by toggling to Edit.
+function transcriptMetaHtml(header, { inlineRows = false } = {}) {
+  const { rows, warn } = parseTranscriptMeta(header);
+  const showRows = inlineRows && rows.length;
+  if (!warn && !showRows) return "";
+  return `<div class="tv-meta">`
+    + (warn ? `<span class="tv-meta-warn">${escHtml(warn)}</span>` : "")
+    + (showRows ? `<div class="tv-meta-rows">${meetingMetaPanelHtml(rows)}</div>` : "")
+    + `</div>`;
+}
+
+// Header text → { rows: [{key, value}], warn }. Every line survives: one that
+// is not "Key: value" becomes a keyless row rather than being dropped. No
+// whitelist — `parseTranscriptHeaderMain` knows eight keys, but older extension
+// builds wrote `Started:` and nothing should make a line invisible just because
+// no one has typed its name into a table. `warn` is the interrupted-
+// transcription notice, pulled out to be rendered inline in the transcript
+// where a reader cannot miss it; it is the one line the card panel omits.
+function parseTranscriptMeta(header) {
+  const rows = [];
+  let warn = "";
+  for (const line of String(header || "").split("\n")) {
+    const text = line.trim();
+    if (!text) continue;
+    // Key chars only up to the colon, so free text ("draft notes: see below")
+    // stays a keyless row instead of being mangled into a labelled one — and a
+    // "//" value means the colon belonged to a URL scheme, not to a key.
+    const m = /^([A-Za-z][\w-]*):[ \t]*(.*)$/.exec(text);
+    if (!m || m[2].startsWith("//")) { rows.push({ key: "", value: text }); continue; }
+    const value = m[2].trim();
+    if (m[1] === "Status" && /^PARTIAL\b/.test(value)) { warn = value; continue; }
+    rows.push({ key: m[1], value: metaValue(m[1], value) });
+  }
+  return { rows, warn };
+}
+
+// The card's panel rows. Read off the header the library IPC already carried —
+// the render path has no file content and must not acquire one per card.
+function meetingMetaRows(m) {
+  return parseTranscriptMeta(m?.header).rows;
+}
+
+function meetingMetaPanelHtml(rows) {
+  return rows.map((r) =>
+    `<div class="meta-row">`
+    + (r.key ? `<span class="meta-key">${escHtml(META_LABELS[r.key] || r.key)}</span>` : "")
+    + `<span class="meta-val">${escHtml(r.value)}</span></div>`).join("");
+}
+// ── end transcript meta ──
+
 function renderTranscriptView(content) {
   const firstTcMatch = /^\[\d[^\]]*\]/m.exec(content);
   let html = "";
@@ -945,7 +1034,12 @@ function renderTranscriptView(content) {
     if (content.trim()) html = `<div class="tv-plain">${escHtml(content)}</div>`;
   } else {
     const header = content.slice(0, firstTcMatch.index).trim();
-    if (header) html += `<div class="tv-header">${escHtml(header)}</div>`;
+    // A transcript in the library carries its header on its card; one opened
+    // from elsewhere has no card, so it keeps the rows inline.
+    if (header) {
+      const carded = meetings.some((mm) => mm.id === state.filePath);
+      html += transcriptMetaHtml(header, { inlineRows: !carded });
+    }
     for (const seg of parseSegments(content)) {
       // "Note" is the reserved label the recording UIs write for the user's own
       // typed notes — it's not a speaker, so it gets a plain label instead of a
@@ -1089,8 +1183,6 @@ function loadContent(filePath, content) {
 
   editor.value = content;
   showEditor();
-  updateUI();
-  updateStats();
 
   // All meetings render through the transcript-view; Edit toggles to textarea.
   if (PLAYER_OK) {
@@ -1215,7 +1307,6 @@ async function saveAsFile() {
       setDirty(true);
       scheduleAutosave();
     }
-    updateUI();
     updateCancelBtn();
   }
   return !!result?.ok;
@@ -1232,7 +1323,6 @@ async function cancelChanges() {
     lastActiveSeg = null;
   }
   await saveFile();
-  updateStats();
   updateCancelBtn();
 }
 
@@ -1261,15 +1351,6 @@ function setSaveChip(status) {
 // differs from the snapshot taken when the file was opened.
 function updateCancelBtn() {
   btnSave.disabled = !state.filePath || editor.value === state.baselineContent;
-}
-
-// ─── Stats ────────────────────────────────────────────────────────────────────
-function updateStats() {
-  const text = editor.value;
-  const lines = text === "" ? 0 : text.split("\n").length;
-  const words = text.trim() === "" ? 0 : text.trim().split(/\s+/).length;
-  statusWords.textContent = `${words.toLocaleString()} words`;
-  statusLines.textContent = `${lines.toLocaleString()} lines`;
 }
 
 // ─── Library panel ────────────────────────────────────────────────────────────
@@ -1381,6 +1462,11 @@ function stripMeetPrefix(title) {
 
 // ─── Sidebar render ───────────────────────────────────────────────────────────
 function renderMeetings() {
+  // The panel is body-level and anchored to a card that is about to be
+  // replaced: left open it floats with rows for a card that no longer exists,
+  // and its overlay keeps swallowing clicks.
+  closeMeetingMeta();
+
   // Clear list contents (keep the #library-empty placeholder).
   Array.from(libraryList.children).forEach((el) => {
     if (el.id !== "library-empty") el.remove();
@@ -1437,6 +1523,9 @@ function buildMeetingCard(m) {
   const snippet = contentMatches.get(m.id);
   const metaHay = [m.title, ...(m.participants || [])].join(" ").toLowerCase();
   const showSnippet = searchQuery && snippet && !metaHay.includes(searchQuery);
+  // Only whether there is anything to show; the rows themselves are built when
+  // the panel opens, so they cannot go stale in this closure after an Enhance.
+  const hasMeta = Boolean(m.header && m.header.trim());
 
   card.innerHTML = `
     <span class="meeting-active-bar"></span>
@@ -1462,6 +1551,7 @@ function buildMeetingCard(m) {
         <span class="artifact-chip" data-kind="transcript" data-present="${m.hasTranscript ? "true" : "false"}" title="Transcript">${iconSvg("text", { size: 11 })}</span>
         <span class="artifact-chip" data-kind="enhance" data-present="${m.enhancedAt ? "true" : "false"}" title="${escapeHtml(enhancedChipTitle(m.enhancedAt))}">${iconSvg("check", { size: 11 })}</span>
         <span class="artifact-chip" data-kind="summary" data-present="${m.hasSummary ? "true" : "false"}" title="Summary">${iconSvg("sparkle", { size: 11 })}</span>
+        ${hasMeta ? `<button class="artifact-chip meta-chip" type="button" title="Transcript details" aria-expanded="false">${iconSvg("info", { size: 11 })}</button>` : ""}
       </div>
     </div>
   `;
@@ -1480,8 +1570,73 @@ function buildMeetingCard(m) {
     openMeetingMenu(r.right, r.bottom + 4, m);
   });
 
+  const metaBtn = card.querySelector(".meta-chip");
+  metaBtn?.addEventListener("click", (e) => {
+    // Without this the card's own handler opens the meeting underneath.
+    e.stopPropagation();
+    openMeetingMeta(metaBtn, meetingMetaRows(m));
+  });
+
   return card;
 }
+
+// ─── Meeting info panel ──────────────────────────────────────────────────────
+// A body-level popover rather than a panel inside the card: #library-list is
+// `overflow-y: auto`, so anything anchored inside a card is clipped at the
+// sidebar edge. Same shape as the ⋯ menu one row above — overlay for the
+// outside click, coordinates clamped to the viewport.
+function closeMeetingMeta() {
+  const root = document.getElementById("meeting-meta-root");
+  if (!root) return;
+  root.remove();
+  const btn = document.querySelector('.meta-chip[aria-expanded="true"]');
+  if (btn) {
+    btn.setAttribute("aria-expanded", "false");
+    // Escape and outside-click both land here; without this, focus is left on
+    // a removed subtree and tabbing restarts from the top of the document.
+    if (document.activeElement === document.body) btn.focus();
+  }
+}
+
+function openMeetingMeta(anchor, rows) {
+  closeMeetingMeta();
+  closeMeetingMenu();
+  if (!rows.length) return;
+
+  const root = document.createElement("div");
+  root.id = "meeting-meta-root";
+  root.innerHTML = `
+    <div class="meeting-menu-overlay"></div>
+    <div class="meta-panel" id="meeting-meta-panel" role="dialog" aria-label="Transcript details" tabindex="-1">
+      ${meetingMetaPanelHtml(rows)}
+    </div>
+  `;
+  document.body.appendChild(root);
+
+  // Measured, not estimated: `.meta-val` wraps long Source paths, so a row
+  // count says nothing about the real height, and the width and max-height
+  // belong to the stylesheet rather than to a constant that drifts from it.
+  const panel = root.querySelector(".meta-panel");
+  const a = anchor.getBoundingClientRect();
+  const box = panel.getBoundingClientRect();
+  panel.style.left = `${Math.max(8, Math.min(a.left, window.innerWidth - box.width - 8))}px`;
+  panel.style.top = `${Math.max(8, Math.min(a.bottom + 4, window.innerHeight - box.height - 8))}px`;
+
+  anchor.setAttribute("aria-expanded", "true");
+  panel.focus();
+  root.querySelector(".meeting-menu-overlay").addEventListener("click", closeMeetingMeta);
+}
+
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape" || !document.getElementById("meeting-meta-root")) return;
+  // stopImmediatePropagation, not just closing: the find bar's own Escape
+  // handler sits further down this same document listener chain and skips
+  // itself via anyOverlayOpen() — which is already false by the time it runs
+  // if this one has merely removed the panel. Without it, one Escape closes
+  // the panel and throws away the user's search with it.
+  e.stopImmediatePropagation();
+  closeMeetingMeta();
+});
 
 // ─── Meeting context menu (minimal — full set lands in a later phase) ────────
 function closeMeetingMenu() {
@@ -1492,6 +1647,7 @@ function closeMeetingMenu() {
 
 function openMeetingMenu(x, y, m) {
   closeMeetingMenu();
+  closeMeetingMeta();
   contextMenu = { x, y, meetingId: m.id };
 
   // Clamp so the popover stays on-screen.
@@ -1921,6 +2077,7 @@ const ICON_PATHS = {
   check:   '<polyline points="20 6 9 17 4 12"/>',
   trash:   '<polyline points="3 6 5 6 21 6"/><path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/>',
   pencil:  '<path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/>',
+  info:    '<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>',
 };
 
 function iconSvg(name, opts = {}) {
@@ -2822,18 +2979,12 @@ function showEditor() {
   btnExport.disabled = false;
 }
 
-function updateUI() {
-  if (!state.filePath) return;
-  statusPath.textContent = state.filePath;
-}
-
 // ─── Editor events ────────────────────────────────────────────────────────────
 editor.addEventListener("input", () => {
   if (!state.isDirty && editor.value !== state.savedContent) setDirty(true);
   else if (state.isDirty && editor.value === state.savedContent)
     setDirty(false);
   scheduleAutosave();
-  updateStats();
   updateCancelBtn();
 });
 
@@ -2871,7 +3022,6 @@ editor.addEventListener("keydown", (e) => {
     // chip keeps claiming "Saved".
     setDirty(true);
     scheduleAutosave();
-    updateStats();
   }
 });
 
@@ -2936,7 +3086,7 @@ dropOverlay.addEventListener("drop", async (e) => {
 // Anything layered over the editor: the six .modal-overlay modals plus the two
 // popovers built in JS (meeting rename, speaker rename).
 function anyOverlayOpen() {
-  return !!document.querySelector(".modal-overlay:not(.hidden), .rename-overlay, .spk-rename");
+  return !!document.querySelector(".modal-overlay:not(.hidden), .rename-overlay, .spk-rename, #meeting-meta-root");
 }
 
 document.addEventListener("keydown", (e) => {

@@ -66,3 +66,51 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-meeting-card-date-format.md`
   summary: The Record and Live tabs still format timestamps with their own `toLocaleTimeString` calls and ignore the new date-order / clock preferences.
   evidence: `desktop/renderer/record/record.js` and `desktop/renderer/live/live.js` both call `toLocaleTimeString` directly. Once a user picks 12-hour or month-first in Settings, the Transcripts sidebar follows it and those two tabs do not — a visible inconsistency inside one window. Deliberately out of scope for this spec ("Never: reformatting timestamps outside the Transcripts sidebar"), but worth a follow-up.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-transcript-meta-info-icon.md`
+  summary: `renderer/app.js` still hard-codes the header keys it treats specially (`Model`, `Status`, the `META_LABELS` relabel) with no link to the authoritative writer parser at `main.js:1738-1760`.
+  evidence: The date handling was moved to a value-shape test so it needs no sync, but a new header key added in main.js still lands in the meta panel with a raw label and no signal, and neither file points at the other.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-transcript-meta-info-icon.md`
+  summary: `desktop/app.js` is an untracked stale copy of `renderer/app.js` that still emits `<div class="tv-header">`, a class whose CSS no longer exists.
+  evidence: Nothing loads it (`renderer/index.html` loads `renderer/app.js`, and package.json build.files has no top-level app.js), so editing it by mistake produces silently dead markup.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-transcript-meta-info-icon.md`
+  summary: The project instructions (AGENTS.md, symlinked as CLAUDE.md) say `npm test` covers only glossary, summary-frontmatter, transcript-enhance and job-queue; the suite now has nine files.
+  evidence: Already stale before this change (renderer-globals, speaker-naming, meeting-date-format were missing too); left alone here because a concurrent session is editing the same tree.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-extension-autostart-setting.md`
+  summary: The `gmt-theme` read in `extenstion/content.js` has no try/catch, so an orphaned content script still loses every listener registered after it (theme, collapse, language, autostart, record, save, note).
+  evidence: Predates this change; the auto-start read now guards itself, which makes the remaining unguarded read the only path left to that failure. Verified by review: with a throwing `chrome.storage.local.get` the poll survives but `injectUI` still aborts partway.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-extension-autostart-setting.md`
+  summary: `clearInterval` runs before `startRecording()` resolves, so a captions failure disarms auto-start for the rest of the meeting with no retry and no notice.
+  evidence: Pre-existing ordering, unchanged by this story. `startRecording` has an abort path that leaves `isRecording === false` after the poll is already gone, freezing the button state for the whole call.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-extension-autostart-setting.md`
+  summary: No `chrome.storage.onChanged` listener, so a second Meet tab keeps a stale `gmt-autostart` and can auto-start against a preference just turned off in another tab.
+  evidence: The `gmt-theme` setting has the identical gap, so this is a consistent product-wide behaviour rather than a regression — but it is a real cross-tab desync.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-extension-autostart-setting.md`
+  summary: `CLAUDE.md` claims `npm test` covers only glossary, summary-frontmatter, transcript-enhance and job-queue; the suite is now nine files, and source-executing stubs are an established pattern worth naming there.
+  evidence: Observed directly — `npm test` reports 9 passing test files, including meeting-date-format, renderer-globals and speaker-naming, none of which the line mentions.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-extension-autostart-setting.md`
+  summary: Auto-start behaviour is undocumented for users — `README.md` still describes "pick a language, click record", and neither store listing mentions that recording starts by itself.
+  evidence: Predates this change (auto-start was already unconditional and undocumented), but adding a user-visible switch for it is the natural moment to document both.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-transcript-chrome-declutter.md`
+  summary: A modal opened by ⌘N/⌘O while the ⋯ meeting menu is up renders underneath it, with the menu's click overlay still swallowing pointer events.
+  evidence: `openMeetingMenu` (renderer/app.js) is body-level with a full-screen `.meeting-menu-overlay` and is closed only by that overlay, by Escape, or by picking an item — nothing in the ⌘-shortcut handlers closes it. Pre-existing; the new info panel was given the same treatment for consistency, and both would be fixed by one guard.
+- source_spec: `_bmad-output/implementation-artifacts/spec-transcript-chrome-declutter.md`
+  summary: `renderTranscriptView`'s wiring of the PARTIAL warning is untested — deleting the one line that calls `transcriptMetaHtml` leaves the whole suite green.
+  evidence: The tests eval the marked pure regions; the call site at `renderer/app.js` sits outside them and touches `transcriptView.innerHTML`, which needs a DOM. Verified by hand over CDP this round. Closing it properly means splitting the markup building out of `renderTranscriptView` into the region, leaving the function as the innerHTML assignment.
+- source_spec: `_bmad-output/implementation-artifacts/spec-transcript-chrome-declutter.md`
+  summary: The marked-region reader `region()` is copy-pasted into both `test/transcript-meta.test.js` and `test/meeting-date-format.test.js`.
+  evidence: Both files carry the same regex-and-assert helper. One shared two-line module under `desktop/test/` would cover both, and any third file that needs it.
+- source_spec: `_bmad-output/implementation-artifacts/spec-transcript-chrome-declutter.md`
+  summary: The root `CLAUDE.md` says `npm test` covers only `glossary`, `summary-frontmatter`, `transcript-enhance` and `job-queue`; `node --test` in fact discovers and runs all eight files in `desktop/test/`.
+  evidence: `npm test` output lists glossary, job-queue, meeting-date-format, renderer-globals, speaker-naming, summary-frontmatter, transcript-enhance and transcript-meta. The note understates what the suite protects, which invites redundant manual checking.
+- source_spec: `_bmad-output/implementation-artifacts/spec-transcript-chrome-declutter.md`
+  summary: `desktop/app.js` is an untracked, byte-identical pre-change copy of `HEAD:desktop/renderer/app.js` that nothing loads.
+  evidence: `index.html` loads `app.js` relative to `renderer/`, and electron-builder ships `renderer/**`. It still contains the deleted status-bar code, and is the only reason a repo-wide grep for those symbols finds anything. Safe to delete, but it is the user's untracked file.
