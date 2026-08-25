@@ -439,6 +439,15 @@ function spokenTargets(blocks, noteLabel) {
             && !TURN_LIKE.test(block.text));
 }
 
+/// Whole-file answer to "is there anything here for Enhance to do?", composed
+/// from the same three steps runEnhanceJob gates on — split off the header,
+/// parse the turns, keep the ones Enhance may touch. The sidebar's "To enhance"
+/// queue calls this so the filter and the job can never disagree; keep it a
+/// composition of the exported steps rather than a cheaper look-alike.
+function hasSpokenTurns(raw, noteLabel) {
+    return spokenTargets(parseBlocks(splitTranscript(raw).body), noteLabel).length > 0;
+}
+
 /// Line endings of the merged text follow the file's own: a CRLF transcript whose
 /// turns come back with LF would end up mixed.
 function matchLineEndings(text, sample) {
@@ -484,6 +493,7 @@ module.exports = {
     mergeEnhanced,
     assembleTranscript,
     spokenTargets,
+    hasSpokenTurns,
     stampHeaderLine,
     matchLineEndings,
     ENHANCE_PROMPT,

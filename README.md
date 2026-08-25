@@ -161,7 +161,10 @@ the follow-up, export or share it.
 
 **Library**
 - Grouped by date, full-text search with snippets, live folder watching.
-- Filter by state: audio only / transcribed / summarized / outdated.
+- Filter by work left to do: `All`, `To re-transcribe` (has audio and came from a model less
+  accurate than `large-v3` — a transcript with no `Model:` line is never queued),
+  `To enhance` (has spoken turns, never enhanced), `To summarize` (no summary on disk).
+  A transcript that cannot be read appears under `All` only.
 - Delete granularly — just the audio, just the transcript, just the summary, or everything.
 - Drag & drop, double-click in Finder via the `unlimeety://` handler, dark theme by default.
 
