@@ -2747,11 +2747,104 @@ body.mode-record #btn-ask-ai {
 }
 #transcript-view.hidden { display: none; }
 
-.tv-header {
-    color: var(--text-muted);
-    font-size: 12px;
+/* The transcript header lives behind this icon — reference data one hover away
+   instead of seven monospace lines above the first turn. It borrows the rail
+   tooltip's surface (--bg-elevated on --border-strong, --radius-sm, z-index
+   100) but not its 0.5s reveal delay or its 11px nowrap type: a tooltip
+   explains a button, this one *is* the content, so it opens instantly. */
+.tv-meta {
+    position: relative;
+    /* Shrink-wrapped so the row does not paint a full-pane-wide strip; what
+       opens the panel is the icon itself (see the reveal rule below), not this
+       box, which the PARTIAL warning can stretch most of the way across. */
+    display: flex;
+    width: max-content;
+    max-width: 100%;
+    align-items: center;
+    gap: 8px;
     margin-bottom: 24px;
-    white-space: pre-wrap;
+}
+
+.tv-meta-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 2px;
+    color: var(--text-muted);
+    background: transparent;
+    border: none;
+    border-radius: var(--radius-sm);
+    cursor: help;
+}
+.tv-meta-btn:hover,
+.tv-meta-btn:focus-visible {
+    color: var(--text-primary);
+    outline: none;
+}
+
+/* An interrupted transcription must never hide behind a hover. */
+.tv-meta-warn {
+    font-family: var(--font-ui);
+    font-size: 11.5px;
+    color: var(--dirty);
+}
+
+.tv-meta-panel {
+    position: absolute;
+    /* Flush against the container: a gap between icon and panel is a dead zone
+       the pointer crosses, and crossing it closes the panel mid-read. */
+    top: 100%;
+    left: 0;
+    z-index: 100;
+    min-width: 200px;
+    max-width: 380px;
+    padding: 8px 10px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    font-family: var(--font-ui);
+    font-size: 11.5px;
+    line-height: 1.6;
+    color: var(--text-primary);
+    /* #transcript-view is the scroll container and would clip a long header. */
+    max-height: 40vh;
+    overflow-y: auto;
+    /* visibility, not display: it keeps the fade, and a hidden panel is not
+       hit-tested — so it swallows no clicks on the turns underneath, and it
+       cannot open itself by being hovered. Transitioning visibility too is what
+       holds it on screen for the length of the fade-out. */
+    visibility: hidden;
+    opacity: 0;
+    transition: opacity 0.1s ease, visibility 0.1s ease;
+}
+/* Scoped to the icon and the panel, not to .tv-meta: with a PARTIAL warning
+   that row runs most of the pane's width, and hovering empty space beside the
+   warning must not open anything. `~`, not `+`: .tv-meta-warn can sit between
+   the button and the panel. The panel keeps itself open once it is visible —
+   while hidden it is not hit-testable, so it cannot open itself. */
+.tv-meta-btn:hover ~ .tv-meta-panel,
+.tv-meta-btn:focus-visible ~ .tv-meta-panel,
+.tv-meta-panel:hover {
+    visibility: visible;
+    opacity: 1;
+}
+
+.tv-meta-row {
+    display: flex;
+    gap: 10px;
+}
+.tv-meta-key {
+    /* min-width, not a fixed basis: a key longer than the column keeps its own
+       width instead of spilling into the value. */
+    flex: 0 0 auto;
+    min-width: 86px;
+    color: var(--text-muted);
+}
+.tv-meta-val {
+    flex: 1;
+    min-width: 0;
+    /* Source paths are long: wrap them instead of overflowing the panel. */
+    overflow-wrap: anywhere;
 }
 
 .tv-plain {

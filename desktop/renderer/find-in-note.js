@@ -144,9 +144,20 @@
     return out;
   }
 
+  // ── find skip predicate (extracted verbatim by test/transcript-meta.test.js) ──
+  // The transcript's meta panel is hidden until the info icon is hovered, so its
+  // text is not on screen: counting it would inflate the counter and send Enter
+  // scrolling to nothing. Only DOM access is the closest() call, so the test can
+  // hand this a stub node. Keep the markers in place when editing.
+  const skipInFind = (node) => !!node.parentElement?.closest(".tv-meta-panel");
+  const findNodeFilter = {
+    acceptNode: (n) => (skipInFind(n) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT),
+  };
+  // ── end find skip predicate ──
+
   function rangesIn(root, re) {
     const out = [];
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, findNodeFilter);
     for (let node = walker.nextNode(); node; node = walker.nextNode()) {
       for (const { start, len } of matches(node.nodeValue, re)) {
         const r = document.createRange();

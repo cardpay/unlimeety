@@ -936,6 +936,81 @@ function renameSpeakerInText(content, oldName, newName) {
   return lines.join("\n");
 }
 
+// ── transcript meta (extracted verbatim by test/transcript-meta.test.js) ──
+// The header block above the first turn is reference data nobody reads twice,
+// so view mode hides it behind an info icon. This region stays free of the DOM
+// and localStorage — `modelLabel`, `formatMeetingStamp`, `escHtml` and
+// `iconSvg` resolve from the enclosing scope, which is what lets the test eval
+// it with stubs for them. Keep the markers in place when editing.
+
+// Only ISO values are ours to reformat. `Recorded-At` and `Enhanced` are ISO,
+// but `Generated` is written with toLocaleString() (main.js and the extension's
+// background.js), and new Date() either rejects that shape outright or
+// mis-reparses a US-looking one into a different instant.
+const META_ISO = /^\d{4}-\d{2}-\d{2}T/;
+
+// Display labels for keys whose on-disk name is clumsier than it needs to be.
+// The parsed key is untouched — this is presentation only.
+const META_LABELS = { "Recorded-At": "Recorded" };
+
+// Header text → { rows: [{key, value}], warn }. A line that is not "Key: value"
+// becomes a keyless row rather than being dropped. `warn` is the interrupted-
+// transcription notice, which is the one header line that must not hide behind
+// a hover.
+function parseTranscriptMeta(header) {
+  const rows = [];
+  let warn = "";
+  for (const line of String(header || "").split("\n")) {
+    const text = line.trim();
+    if (!text) continue;
+    // Key chars only up to the colon, so free text ("draft notes: see below")
+    // stays a keyless row instead of being mangled into a labelled one — and a
+    // "//" value means the colon belonged to a URL scheme, not to a key.
+    const m = /^([A-Za-z][\w-]*):[ \t]*(.*)$/.exec(text);
+    if (!m || m[2].startsWith("//")) { rows.push({ key: "", value: text }); continue; }
+    const value = m[2].trim();
+    // Only PARTIAL escapes the panel. Live saves write "Status: live (still in
+    // progress)" on perfectly healthy transcripts (live.js), and rendering that
+    // amber beside the icon would cry wolf on every Live note.
+    if (m[1] === "Status" && /^PARTIAL\b/.test(value)) { warn = value; continue; }
+    rows.push({ key: m[1], value: metaValue(m[1], value) });
+  }
+  return { rows, warn };
+}
+
+// Display form of one header value: raw ids and ISO stamps are what the file
+// stores, the panel shows what the rest of the UI shows.
+function metaValue(key, value) {
+  if (key === "Model") return modelLabel(value);
+  if (META_ISO.test(value)) {
+    const d = new Date(value);
+    if (!isNaN(d.getTime())) return formatMeetingStamp(d);
+  }
+  return value;
+}
+
+function transcriptMetaHtml(header) {
+  const { rows, warn } = parseTranscriptMeta(header);
+  if (!rows.length && !warn) return "";
+  const btn = rows.length
+    ? `<button class="tv-meta-btn" type="button" aria-label="Transcript details"`
+      + ` aria-describedby="tv-meta-panel">${iconSvg("info")}</button>`
+    : "";
+  const panel = rows.length
+    ? `<div class="tv-meta-panel" id="tv-meta-panel" role="tooltip">` + rows.map((r) =>
+        `<div class="tv-meta-row">`
+        + (r.key ? `<span class="tv-meta-key">${escHtml(META_LABELS[r.key] || r.key)}</span>` : "")
+        + `<span class="tv-meta-val">${escHtml(r.value)}</span></div>`).join("")
+      + `</div>`
+    : "";
+  // The warning is a sibling of the panel, never a row inside it: it has to
+  // stay readable with no hover at all.
+  return `<div class="tv-meta">${btn}`
+    + (warn ? `<span class="tv-meta-warn">${escHtml(warn)}</span>` : "")
+    + `${panel}</div>`;
+}
+// ── end transcript meta ──
+
 function renderTranscriptView(content) {
   const firstTcMatch = /^\[\d[^\]]*\]/m.exec(content);
   let html = "";
@@ -945,7 +1020,7 @@ function renderTranscriptView(content) {
     if (content.trim()) html = `<div class="tv-plain">${escHtml(content)}</div>`;
   } else {
     const header = content.slice(0, firstTcMatch.index).trim();
-    if (header) html += `<div class="tv-header">${escHtml(header)}</div>`;
+    if (header) html += transcriptMetaHtml(header);
     for (const seg of parseSegments(content)) {
       // "Note" is the reserved label the recording UIs write for the user's own
       // typed notes — it's not a speaker, so it gets a plain label instead of a
@@ -1921,6 +1996,7 @@ const ICON_PATHS = {
   check:   '<polyline points="20 6 9 17 4 12"/>',
   trash:   '<polyline points="3 6 5 6 21 6"/><path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/>',
   pencil:  '<path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/>',
+  info:    '<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>',
 };
 
 function iconSvg(name, opts = {}) {
