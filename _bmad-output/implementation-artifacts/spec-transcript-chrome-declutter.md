@@ -246,6 +246,12 @@ view keeps only the inline `Status: PARTIAL …` warning.
   click / Escape, no icon in the transcript, no header leak into find-in-note,
   the inline PARTIAL warning).
 
+- **2026-08-25 (follow-up)** — the chip moved out of `.artifact-chips` and up
+  beside the meeting title (`.meeting-info`, styled off `.meeting-more`). In
+  that row it read as a fifth state indicator next to four chips that report
+  what a meeting *has*; the Code Map's `.artifact-chips` anchor is superseded.
+  Placement only — the panel, its rows and every decision below are unchanged.
+
 ## Design Notes
 
 **Why the panel is click-toggled, not hover-revealed.** The transcript

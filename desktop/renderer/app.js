@@ -1606,6 +1606,7 @@ function buildMeetingCard(m) {
     <span class="meeting-active-bar"></span>
     <div class="meeting-card-row1">
       <span class="meeting-title">${escapeHtml(m.title || "Untitled")}</span>
+      ${hasMeta ? `<button class="meeting-info" type="button" title="Transcript details" aria-expanded="false">${iconSvg("info", { size: 12 })}</button>` : ""}
       <button class="meeting-more" type="button" aria-label="More actions">${iconSvg("more", { size: 14 })}</button>
     </div>
     ${showSnippet ? `<div class="meeting-snippet">${highlightSnippet(snippet, searchQuery)}</div>` : ""}
@@ -1626,7 +1627,6 @@ function buildMeetingCard(m) {
         <span class="artifact-chip" data-kind="transcript" data-present="${m.hasTranscript ? "true" : "false"}" title="Transcript">${iconSvg("text", { size: 11 })}</span>
         <span class="artifact-chip" data-kind="enhance" data-present="${m.enhancedAt ? "true" : "false"}" title="${escapeHtml(enhancedChipTitle(m.enhancedAt))}">${iconSvg("check", { size: 11 })}</span>
         <span class="artifact-chip" data-kind="summary" data-present="${m.hasSummary ? "true" : "false"}" title="Summary">${iconSvg("sparkle", { size: 11 })}</span>
-        ${hasMeta ? `<button class="artifact-chip meta-chip" type="button" title="Transcript details" aria-expanded="false">${iconSvg("info", { size: 11 })}</button>` : ""}
       </div>
     </div>
   `;
@@ -1645,7 +1645,7 @@ function buildMeetingCard(m) {
     openMeetingMenu(r.right, r.bottom + 4, m);
   });
 
-  const metaBtn = card.querySelector(".meta-chip");
+  const metaBtn = card.querySelector(".meeting-info");
   metaBtn?.addEventListener("click", (e) => {
     // Without this the card's own handler opens the meeting underneath.
     e.stopPropagation();
@@ -1664,7 +1664,7 @@ function closeMeetingMeta() {
   const root = document.getElementById("meeting-meta-root");
   if (!root) return;
   root.remove();
-  const btn = document.querySelector('.meta-chip[aria-expanded="true"]');
+  const btn = document.querySelector('.meeting-info[aria-expanded="true"]');
   if (btn) {
     btn.setAttribute("aria-expanded", "false");
     // Escape and outside-click both land here; without this, focus is left on
