@@ -86,6 +86,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-library-workflow-filters.md`
   summary: The library still cannot show a recording that has audio but no transcript yet, so there is no `To transcribe` chip — the user asked for one and it was split out because it is a data-model change, not a filter.
   evidence: `transcripts:list` (main.js:1808) globs `TRANSCRIPTS_FOLDER` for `.txt` only, so an un-transcribed recording in `~/Downloads/Meet_Recordings` never enters `meetings[]`; `deriveMeetingFromTranscript` (renderer/app.js:59-60) additionally drops any item without a `filePath` because `filePath` is the meeting id. Surfacing those recordings means a new list source in main, an id scheme for transcript-less entries, a card whose click/menu cannot open a transcript, and finally makes the `audio_only` status and the already-wired-but-unrendered `audio` filter branch reachable — reviewable and shippable as its own PR. Split at the human's direction ([S] at step-01 multi-goal check, 2026-08-25).
+  resolved: `spec-recordings-in-meetings-list.md` shipped the list and the chip — `mergeMeetings` unions `record:list` into `meetings[]`, `deriveMeetingFromRecording` gives a transcript-less row an id (the wav path), the `To transcribe` chip renders the queue, and the Record tab's own recordings sidebar was deleted rather than left as a second list. The `audio_only` status is now reachable; the dormant `audio` filter branch is NOT — it still has no chip (see the entry below).
 
 - source_spec: `_bmad-output/implementation-artifacts/spec-library-workflow-filters.md`
   summary: A transcript that Enhance ran on but declined to change never leaves the `To enhance` queue, so the user re-runs it forever to the same non-result.
@@ -153,3 +154,31 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-summary-rail-all-presets.md`
   summary: `.rail-brief` in `desktop/renderer/style.css` has had no consumer for some time.
   evidence: The deleted `brief` branch emitted `rail-brief-md`, which never had a rule at all; `.rail-brief` was already dead before this change and was left untouched to keep the diff to the work at hand.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-recordings-in-meetings-list.md`
+  summary: The dedup that stops a wav getting a second card cannot see a transcript whose read failed, nor a transcript paired with more than one wav, so a legacy-stem recording can still be double-carded.
+  evidence: `mergeMeetings` (`renderer/app.js`) builds its `claimed` set from `m.audioPath`, which comes from `audioPaths[0]` in `transcripts:list` (`main.js:1808`). The catch branch of that handler (`main.js` fallback row) omits `audioPath` entirely, and `findRelatedAudioPaths` can return several wavs of which only the first survives the IPC. Both cases need a legacy `<base>-YYYYMMDD-HHMMSS.wav` name to bite, since a same-stem wav is already excluded by `hasTranscript`. Fixing it properly means exposing `audioPaths[]` (and pairing the readFailed row) from main rather than re-deriving the legacy regex in the renderer — an `Ask First` main-process change this spec did not open. Found by edge-case-hunter + verification-gap review, 2026-08-26.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-recordings-in-meetings-list.md`
+  summary: A recording currently being captured is an ordinary library row — selectable, batch-deletable — where the Record sidebar it replaces hid itself outright while recording.
+  evidence: `record:list` (`main.js:3323`) globs every `.wav` in the folder including the one the helper is still writing, and the deleted rule `body[data-record-phase="recording"] .record-sidebar { display: none }` was what kept it off screen. The library has no equivalent because the renderer's recording state lives in `record.js`'s IIFE and is not exposed to `app.js`; wiring it means a new cross-tab signal, not a review patch. `record:delete` still confirms destructively before unlinking, so the footgun needs a deliberate confirmation. Found by edge-case-hunter review, 2026-08-26.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-recordings-in-meetings-list.md`
+  summary: The batch selection survives a filter or search change, so Delete and Transcribe can act on recordings the user can no longer see.
+  evidence: `selectedRecordings` is pruned only against what left the disk (`loadLibrary`), never against what the active chip and search box currently show. The bar's count is the only feedback. Pruning on every render was rejected as the fix: it would silently drop a selection the moment the user typed in the search box. The honest fix is showing which off-screen rows are selected, which is a design decision. `Select all` is already scoped to the visible rows (`selectableVisible`). Found by edge-case-hunter + blind-hunter review, 2026-08-26.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-recordings-in-meetings-list.md`
+  summary: `record:deleteTranscript` and `record:deleteSummary`, plus both preload methods, now have zero renderer callers — the Record-tab card menu was their only one.
+  evidence: `grep -rn 'deleteTranscript\|deleteSummary' desktop/renderer/` returns only the library's `transcripts:*` equivalents. The handlers (`main.js:3543`, `main.js:3570`) still exist and are still reachable over IPC. Removing them is a main-process change, which this spec's `Ask First` list reserves. Found by blind-hunter review, 2026-08-26.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-recordings-in-meetings-list.md`
+  summary: `document.body.dataset.recordPhase` is still written by `record.js` and cleared by `live.js`, but no CSS rule reads it any more.
+  evidence: The only rule that ever did was `body[data-record-phase="recording"] .record-sidebar`, deleted with the sidebar. `grep -rn 'record-phase' desktop/renderer/` now finds the writes and the comments, no selector. Removing it touches three files for a harmless attribute, so it was left in place with its comment corrected rather than ripped out mid-review.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-recordings-in-meetings-list.md`
+  summary: The Record tab has no way to open the transcribe-settings screen with an empty batch, so model, language and diarization defaults are only editable once at least one recording is picked.
+  evidence: `#record-sb-settings` was the only such entry point and went out with the sidebar; the remaining callers of `enterTranscribeSettings` (the import button, and the library's `sendToTranscribeSettings`) always pass a non-empty batch. Listed under this spec's `Ask First`, and the human chose to delete the sidebar entirely with that consequence stated. Re-adding a `Settings…` link to the Record idle screen would close it.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-recordings-in-meetings-list.md`
+  summary: The `audio` branch in `meetingMatchesFilter` and its `counts.audio` are still computed for a chip that does not exist.
+  evidence: Pre-existing (`spec-library-workflow-filters.md` recorded the same shortcut), and untouched here: this change added `To transcribe`, which is `hasTranscript === false`, not `hasAudio === true`. The two are different queues — most rows with audio are already transcribed — so the dormant branch was not repurposed. It stays a trap for whoever adds an audio chip back.
