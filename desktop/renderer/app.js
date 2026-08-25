@@ -2188,8 +2188,62 @@ const btnRailResummarizeLabel = document.getElementById("btn-rail-resummarize-la
 // so a quick file-switch doesn't write the stale result into the rail.
 let railLoadToken = 0;
 
+// ── rail sections (extracted verbatim by test/rail-sections.test.js) ──
+// Everything down to the end marker is pure string work: the seven presets in
+// PROMPTS are the only spec for what a summary looks like, and this region turns
+// their `##` headings into rail markup. `escapeHtml`, `iconSvg` and `avatarHtml`
+// resolve from the enclosing scope — which is what lets the test eval the region
+// with stubs for them. Keep the markers in place when editing.
+
+// One heading → one slug, shared by the gate and the parser so the two can never
+// disagree about what "recognised" means. Non-letters collapse, digits included,
+// so "For next 1-1" is `for_next` and "TL;DR" is `tl_dr`.
+function railSlug(heading) {
+  return String(heading).toLowerCase().replace(/[^a-z]+/g, "_").replace(/^_|_$/g, "");
+}
+
+// Which render each preset section gets, keyed by slug. The five tone names are
+// bullet lists differing only in glyph and colour; the rest name a renderer.
+// A heading missing from here — a custom prompt's, or a translated one, since the
+// presets print this structure in English and translate only the prose — falls
+// through to a labelled plain-markdown section, exactly as it did before.
+// Null-prototype: these are looked up with model-written text, and a plain
+// object would answer `constructor` (and friends) with an inherited value.
+const RAIL_SECTIONS = Object.assign(Object.create(null), {
+  // prose. `brief` is no preset's heading — it is kept for summaries saved by
+  // an older prompt that emitted "## Brief".
+  summary: "plain", tl_dr: "plain", notes: "plain", brief: "plain",
+  hardest_problem_solved: "plain", career_growth: "plain", mood_well_being: "plain",
+  // dedicated renderers
+  speaker_mapping: "map", root_causes: "map", scorecard: "plain",
+  action_items: "actions", milestones_timeline: "dated",
+  status: "status", participants: "people",
+  recommendation: "recommendation",
+  // settled / positive
+  decisions: "good", agreed_terms: "good", progress: "good",
+  what_went_well: "good", strong_answers: "good", strengths: "good",
+  // problems
+  risks: "bad", red_flags: "bad", what_didn_t_go_well: "bad",
+  weak_concerning_answers: "bad", weaknesses_risks: "bad",
+  // needs attention, but not yet a problem
+  blockers_dependencies: "warn", open_unresolved_points: "warn", scope_changes: "warn",
+  // forward-looking
+  experiments_to_try: "idea", for_next: "idea",
+  open_questions_for_follow_up: "idea", concessions_movement: "idea",
+  // plain enumerations
+  topics: "neutral", discussion: "neutral", feedback: "neutral", motivation: "neutral",
+  candidate_preferences: "neutral", parties_positions: "neutral", asks_offers: "neutral",
+  leverage_batna_notes: "neutral",
+});
+
+// Structured as soon as one heading is one we know how to draw. Deliberately not
+// "has any ## heading": freeform output keeps the plain-markdown path, and a
+// preset that skipped Decisions and Action Items still qualifies on the rest.
 function shouldRenderStructured(md) {
-  return /^##\s+(decisions|action items|risks|recommendation|scorecard|tl;dr|participants)\b/im.test(md || "");
+  for (const m of String(md || "").matchAll(/^##[^\S\r\n]+(.+?)[^\S\r\n]*$/gm)) {
+    if (RAIL_SECTIONS[railSlug(m[1])]) return true;
+  }
+  return false;
 }
 
 // Inline markdown → HTML (bold / em / inline code).
@@ -2237,7 +2291,7 @@ function parseStructured(md) {
     }
     const h2 = l.match(/^##\s+(.+)/);
     if (h2) {
-      const slug = h2[1].toLowerCase().replace(/[^a-z]+/g, "_").replace(/^_|_$/g, "");
+      const slug = railSlug(h2[1]);
       current = { slug, heading: h2[1], lines: [] };
       sections.push(current);
       continue;
@@ -2260,6 +2314,7 @@ function renderMarkdown(md) {
   const out = [];
   let listBuf = null;
   let para = [];
+  let tableBuf = null;
 
   const flushList = () => {
     if (listBuf) {
@@ -2273,10 +2328,22 @@ function renderMarkdown(md) {
       para = [];
     }
   };
+  // Pipe tables reach the rail from more than the interview scorecard, so they
+  // belong to the base renderer rather than to one section's special case.
+  const flushTable = () => {
+    if (!tableBuf) return;
+    // A block of pipes that parses to nothing (a stray separator, a bare "|")
+    // is still text the model wrote — render it rather than discard it.
+    out.push(renderTableHtml(tableBuf) || `<p>${renderMarkdownInline(tableBuf.join(" "))}</p>`);
+    tableBuf = null;
+  };
 
   for (const raw of lines) {
     const l = raw.trimEnd();
-    if (!l) { flushList(); flushPara(); continue; }
+    if (!l) { flushList(); flushPara(); flushTable(); continue; }
+    const piped = l.trimStart();
+    if (piped.startsWith("|")) { flushList(); flushPara(); (tableBuf ||= []).push(piped); continue; }
+    flushTable();
     let m;
     if ((m = l.match(/^#\s+(.+)/))) {
       flushList(); flushPara();
@@ -2290,7 +2357,7 @@ function renderMarkdown(md) {
     } else if ((m = l.match(/^>\s*(.+)/))) {
       flushList(); flushPara();
       out.push(`<blockquote>${renderMarkdownInline(m[1])}</blockquote>`);
-    } else if ((m = l.match(/^- (.+)/))) {
+    } else if ((m = l.match(RAIL_BULLET_RE))) {
       flushPara();
       (listBuf ||= []).push(m[1]);
     } else {
@@ -2298,7 +2365,7 @@ function renderMarkdown(md) {
       para.push(l);
     }
   }
-  flushList(); flushPara();
+  flushList(); flushPara(); flushTable();
   return out.join("");
 }
 
@@ -2317,11 +2384,49 @@ function buildRailHeaderHtml(filePath, statusChip) {
   `;
 }
 
-function parseSimpleBullets(lines) {
-  return (lines || [])
-    .map((x) => x.match(/^- (.+)/))
-    .filter(Boolean)
-    .map((m) => m[1]);
+// The wrapper every section shares, so a new render kind cannot invent its own
+// heading treatment. `count` is omitted for prose sections.
+function railSection(label, body, count) {
+  if (!body) return "";
+  const badge = count ? ` <span class="rail-section-count">${count}</span>` : "";
+  return `
+    <div class="rail-section">
+      ${label ? `<div class="rail-section-label">${escapeHtml(label)}${badge}</div>` : ""}
+      ${body}
+    </div>
+  `;
+}
+
+// The one bullet shape the module recognises: "-", "*" or "1." / "1)", indented
+// or not. Models are not consistent about which they reach for, and a section
+// whose bullets go unrecognised loses its whole layout.
+const RAIL_BULLET_RE = /^[ \t]*(?:[-*]|\d+[.)])[ \t]+(.+)$/;
+
+// Bullets and the prose around them, kept apart and kept in place: a lead-in
+// sentence stays above the list, a closing note stays below it, and neither is
+// dropped or turned into a bullet of its own.
+function partitionBullets(lines) {
+  const bullets = [];
+  const before = [];
+  const after = [];
+  for (const raw of lines || []) {
+    const m = String(raw).match(RAIL_BULLET_RE);
+    if (m) { bullets.push(m[1].trim()); continue; }
+    (bullets.length ? after : before).push(raw);
+  }
+  return { bullets, before: before.join("\n").trim(), after: after.join("\n").trim() };
+}
+
+// A letter or a digit, in any script — used where a prefix match has to stop at
+// a word end. `\b` is defined by [A-Za-z0-9_] and so is blind to Cyrillic.
+const RAIL_WORDISH = /[\p{L}\p{N}]/u;
+
+// A trailing " — *Jun 30*". Shared by action items and milestones so a date
+// lands in the same pill wherever a preset appends one.
+function splitDue(body) {
+  const m = String(body).match(/\s+[—–-]\s+\*([^*]+)\*\s*$/);
+  if (!m) return { text: String(body).trim(), due: null };
+  return { text: String(body).slice(0, m.index).trim(), due: m[1].trim() };
 }
 
 // Parse "- [ ] **Owner** — task — *due*" where the checkbox, the **owner** and
@@ -2329,13 +2434,9 @@ function parseSimpleBullets(lines) {
 // (the model isn't perfectly consistent — e.g. a deadline with no owner).
 function parseActionItems(lines) {
   const out = [];
-  for (const raw of lines || []) {
-    const m = String(raw).trim().match(/^- (.+)$/);
-    if (!m) continue;
-    let body = m[1].trim().replace(/^\[[ xX]\]\s*/, ""); // strip optional checkbox
-    let due = null;
-    const dm = body.match(/\s+[—–-]\s+\*([^*]+)\*\s*$/);  // optional trailing " — *due*"
-    if (dm) { due = dm[1].trim(); body = body.slice(0, dm.index).trim(); }
+  for (const bullet of partitionBullets(lines).bullets) {
+    // checkbox, then the optional trailing " — *due*", then the optional owner
+    let { text: body, due } = splitDue(bullet.replace(/^\[[ xX]\]\s*/, ""));
     let who = null;
     const wm = body.match(/^\*\*([^*]+)\*\*\s+[—–-]\s+(.+)$/); // optional leading "**owner** — "
     if (wm) { who = wm[1].trim(); body = wm[2].trim(); }
@@ -2344,33 +2445,186 @@ function parseActionItems(lines) {
   return out;
 }
 
-function renderDecisionsSection(items) {
-  if (!items.length) return "";
-  const list = items
-    .map((d) => `<li><span class="rail-decision-bullet">${iconSvg("check", { size: 10 })}</span><span>${renderMarkdownInline(d)}</span></li>`)
-    .join("");
-  return `
-    <div class="rail-section">
-      <div class="rail-section-label">Decisions <span class="rail-section-count">${items.length}</span></div>
-      <ul class="rail-list">${list}</ul>
-    </div>
-  `;
+// Five tones, one glyph each, so a list of wins never reads like a list of
+// risks. `good` keeps the tinted circle the Decisions list has always had.
+const RAIL_BULLETS = {
+  good:    { cls: "rail-bullet--good", glyph: null },
+  bad:     { cls: "rail-bullet--bad", glyph: "◆" },
+  warn:    { cls: "rail-bullet--warn", glyph: "▲" },
+  idea:    { cls: "rail-bullet--idea", glyph: "→" },
+  neutral: { cls: "rail-bullet--neutral", glyph: "•" },
+};
+const RAIL_TONES = Object.keys(RAIL_BULLETS);
+
+function railBullet(tone) {
+  const b = RAIL_BULLETS[tone] || RAIL_BULLETS.neutral;
+  const inner = b.glyph ? escapeHtml(b.glyph) : iconSvg("check", { size: 10 });
+  return `<span class="rail-bullet ${b.cls}" aria-hidden="true">${inner}</span>`;
 }
 
-function renderRisksSection(items) {
-  if (!items.length) return "";
-  const list = items
-    .map((r) => `<li><span class="rail-risk-bullet" aria-hidden="true">◆</span><span>${renderMarkdownInline(r)}</span></li>`)
-    .join("");
-  return `
-    <div class="rail-section">
-      <div class="rail-section-label">Risks <span class="rail-section-count">${items.length}</span></div>
-      <ul class="rail-list">${list}</ul>
-    </div>
-  `;
+// Shared body of every list section: the prose the model wrote above the list,
+// the list, then the prose below it. Nothing in a section is silently discarded.
+function railListSection(heading, items, before, after) {
+  const md = (t) => (t ? `<div class="rail-md">${renderMarkdown(t)}</div>` : "");
+  return railSection(heading, md(before) + `<ul class="rail-list">${items.join("")}</ul>` + md(after), items.length);
 }
 
-function renderActionItemsSection(cards) {
+function renderBulletSection(heading, lines, tone) {
+  const { bullets, before, after } = partitionBullets(lines);
+  if (!bullets.length) return renderPlainSection(heading, lines);
+  const items = bullets.map((t) => `<li>${railBullet(tone)}<span class="rail-li-text">${renderMarkdownInline(t)}</span></li>`);
+  return railListSection(heading, items, before, after);
+}
+
+// "— *Jun 30*" on a milestone becomes the same due pill an action item gets.
+function renderDatedSection(heading, lines) {
+  const { bullets, before, after } = partitionBullets(lines);
+  if (!bullets.length) return renderPlainSection(heading, lines);
+  const items = bullets.map((b) => {
+    const { text, due } = splitDue(b);
+    return `<li>${railBullet("neutral")}<span class="rail-li-text">${renderMarkdownInline(text)}</span>`
+      + (due ? `<span class="rail-due-pill">${escapeHtml(due)}</span>` : "")
+      + `</li>`;
+  });
+  return railListSection(heading, items, before, after);
+}
+
+// "Alpha → Anna (introduced at 00:02)" and "slow deploys → CI runs everything".
+// The parenthesised tail is evidence, not part of the mapping.
+function parseMapRow(text) {
+  const parts = String(text).split(/\s*(?:→|->)\s*/);
+  if (parts.length < 2) return null;
+  let to = parts.slice(1).join(" → ").trim();
+  let note = null;
+  const nm = to.match(/\s*\(([^()]*)\)\s*$/);
+  if (nm) { note = nm[1].trim(); to = to.slice(0, nm.index).trim(); }
+  // "Alpha →" with nothing after it is not a mapping — an empty cell reads as a
+  // rendering bug, and the row would still be counted in the badge.
+  if (!parts[0].trim() || !to) return null;
+  return { from: parts[0].trim(), to, note };
+}
+
+function renderMapSection(heading, lines) {
+  const { bullets, before, after } = partitionBullets(lines);
+  if (!bullets.length) return renderPlainSection(heading, lines);
+  const items = bullets.map((b) => {
+    const row = parseMapRow(b);
+    // No arrow: the model wrote a plain observation, so let it be a plain row.
+    // No bullet glyph either — the mapped rows in this same list have none, and
+    // one marked row among unmarked ones renders ragged.
+    if (!row) return `<li><span class="rail-li-text">${renderMarkdownInline(b)}</span></li>`;
+    return `<li><span class="rail-map">`
+      + `<span class="rail-map-from">${renderMarkdownInline(row.from)}</span>`
+      + `<span class="rail-map-arrow" aria-hidden="true">→</span>`
+      + `<span class="rail-map-to">${renderMarkdownInline(row.to)}</span>`
+      + (row.note ? `<span class="rail-map-note">${renderMarkdownInline(row.note)}</span>` : "")
+      + `</span></li>`;
+  });
+  return railListSection(heading, items, before, after);
+}
+
+// Chip verdicts: match a leading phrase, but only when the line actually ends
+// the phrase there. Longest form first, so "заблокировано" wins over the
+// shorter stem. Returns null when nothing matches, and the caller falls back to
+// prose — which is also what happens to any wording not listed here.
+function matchChip(line, table) {
+  const head = String(line).trim();
+  const lower = head.toLowerCase();
+  for (const [word, cls] of table) {
+    if (!lower.startsWith(word.toLowerCase())) continue;
+    const after = head.slice(word.length);
+    // "On tracked to slip" is a sentence, not an on-track status.
+    if (after && RAIL_WORDISH.test(after[0])) continue;
+    // Strip the separator, then drop a remainder that is only punctuation —
+    // "On track." must not leave a paragraph containing just a full stop.
+    const rest = after.replace(/^\s*[—–:-]\s*/, "").trim();
+    return { label: head.slice(0, word.length), cls, rest: RAIL_WORDISH.test(rest) ? rest : "" };
+  }
+  return null;
+}
+
+// The project preset asks for "on track / at risk / blocked" plus a reason. The
+// Russian forms are a best guess at what the preset's "write it in Russian"
+// rule produces — a miss costs nothing, the section just stays prose.
+const RAIL_STATUS = [
+  ["on track", "status-on-track"], ["в графике", "status-on-track"], ["по плану", "status-on-track"],
+  ["at risk", "status-at-risk"], ["под угрозой", "status-at-risk"], ["есть риск", "status-at-risk"],
+  ["blocked", "status-blocked"], ["заблокировано", "status-blocked"], ["заблокирован", "status-blocked"],
+];
+
+function renderStatusSection(heading, lines) {
+  const text = (lines || []).join("\n").trim();
+  if (!text) return "";
+  const [first, ...tail] = text.split("\n");
+  const hit = matchChip(first, RAIL_STATUS);
+  if (!hit) return renderPlainSection(heading, lines);
+  const body = [hit.rest, ...tail].join("\n").trim();
+  return railSection(heading,
+    `<span class="rail-verdict ${hit.cls}">${escapeHtml(hit.label)}</span>`
+    + (body ? `<div class="rail-md rail-rec-body">${renderMarkdown(body)}</div>` : ""));
+}
+
+// Daily's Participants is "### Person" then labelled bullets. One card per
+// person beats one long blob when six people report in a row.
+function parsePeople(lines) {
+  const people = [];
+  const lead = [];
+  let current = null;
+  for (const raw of lines || []) {
+    const m = String(raw).match(/^###[ \t]+(.+?)[ \t]*$/);
+    if (m) { current = { name: m[1], lines: [] }; people.push(current); continue; }
+    if (current) current.lines.push(raw);
+    else lead.push(raw);
+  }
+  return { people, lead: lead.join("\n").trim() };
+}
+
+function renderPeopleSection(heading, lines) {
+  const { people, lead } = parsePeople(lines);
+  if (!people.length) return renderPlainSection(heading, lines);
+  const cards = people.map((p) => {
+    const body = p.lines.join("\n").trim();
+    return `<div class="rail-person">`
+      + `<div class="rail-person-name">${avatarHtml(p.name)}<span>${renderMarkdownInline(p.name)}</span></div>`
+      + (body ? `<div class="rail-md rail-person-body">${renderMarkdown(body)}</div>` : "")
+      + `</div>`;
+  }).join("");
+  const prose = lead ? `<div class="rail-md">${renderMarkdown(lead)}</div>` : "";
+  return railSection(heading, prose + cards, people.length);
+}
+
+// Any pipe table. The interview scorecard's Rating column is tinted; it is found
+// by name so reordering or renaming the column drops the tint instead of
+// colouring whichever column happens to sit second.
+const RAIL_RATINGS = Object.assign(Object.create(null),
+  { strong: "sc-strong", mixed: "sc-mixed", weak: "sc-weak", "not assessed": "sc-na" });
+
+function parseTableRows(lines) {
+  const rows = [];
+  for (const l of lines || []) {
+    const t = String(l).trim();
+    if (!t.startsWith("|")) continue;
+    if (/^\|[-:| ]+\|?$/.test(t)) continue; // the |---|---| separator
+    rows.push(t.replace(/^\||\|$/g, "").split("|").map((c) => c.trim()));
+  }
+  return rows;
+}
+
+function renderTableHtml(lines) {
+  const rows = parseTableRows(lines);
+  if (!rows.length) return "";
+  const [header, ...body] = rows;
+  const rateCol = header.findIndex((h) => /^rating$/i.test(h));
+  const ths = header.map((h) => `<th>${renderMarkdownInline(h)}</th>`).join("");
+  const trs = body.map((r) => `<tr>${r.map((c, i) => {
+    if (i !== rateCol) return `<td>${renderMarkdownInline(c)}</td>`;
+    return `<td class="sc-rating ${RAIL_RATINGS[c.toLowerCase()] || ""}">${renderMarkdownInline(c)}</td>`;
+  }).join("")}</tr>`).join("");
+  // The rail is 360px wide; a wide table has to be reachable, not clipped.
+  return `<div class="rail-table-wrap"><table class="rail-table"><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table></div>`;
+}
+
+function renderActionItemsSection(heading, cards) {
   if (!cards.length) return "";
   const items = cards.map((a) => `
     <div class="rail-action">
@@ -2386,82 +2640,39 @@ function renderActionItemsSection(cards) {
       ` : ""}
     </div>
   `).join("");
-  return `
-    <div class="rail-section">
-      <div class="rail-section-label">Action items <span class="rail-section-count">${cards.length}</span></div>
-      ${items}
-    </div>
-  `;
+  return railSection(heading, items, cards.length);
 }
 
+// A heading the model left empty renders nothing at all: the presets say "skip
+// this section if none", and an empty label is worse than a missing one.
 function renderPlainSection(heading, lines) {
   const text = (lines || []).join("\n").trim();
-  if (!text && !heading) return "";
-  return `
-    <div class="rail-section">
-      ${heading ? `<div class="rail-section-label">${escapeHtml(heading)}</div>` : ""}
-      <div class="rail-md">${renderMarkdown(text)}</div>
-    </div>
-  `;
-}
-
-function renderScorecardSection(lines) {
-  const rows = [];
-  for (const l of lines) {
-    const t = l.trim();
-    if (!t.startsWith("|")) continue;
-    if (/^\|[-:| ]+\|/.test(t)) continue;
-    const cells = t.replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
-    rows.push(cells);
-  }
-  if (!rows.length) return "";
-  const [header, ...body] = rows;
-  const RATING_CLS = { strong: "sc-strong", mixed: "sc-mixed", weak: "sc-weak", "not assessed": "sc-na" };
-  const ths = header.map((h) => `<th>${renderMarkdownInline(h)}</th>`).join("");
-  const trs = body.map((r) => {
-    const tds = r.map((c, i) => {
-      if (i === 1) {
-        const cls = RATING_CLS[c.toLowerCase()] || "";
-        return `<td class="sc-rating ${cls}">${renderMarkdownInline(c)}</td>`;
-      }
-      return `<td>${renderMarkdownInline(c)}</td>`;
-    }).join("");
-    return `<tr>${tds}</tr>`;
-  }).join("");
-  return `
-    <div class="rail-section">
-      <div class="rail-section-label">Scorecard</div>
-      <table class="rail-scorecard"><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>
-    </div>
-  `;
-}
-
-function renderRecommendationSection(lines) {
-  const text = lines.join("\n").trim();
   if (!text) return "";
-  const VERDICTS = [
-    ["Strong hire", "verdict-hire-strong"],
-    ["Hire", "verdict-hire"],
-    ["Lean no", "verdict-lean-no"],
-    ["No hire", "verdict-no-hire"],
-    ["Insufficient signal", "verdict-signal"],
-  ];
-  let badge = "";
-  let rest = text;
-  for (const [v, cls] of VERDICTS) {
-    if (text.startsWith(v)) {
-      badge = `<span class="rail-verdict ${cls}">${escapeHtml(v)}</span>`;
-      rest = text.slice(v.length).replace(/^\s*[—–-]\s*/, "");
-      break;
-    }
-  }
-  return `
-    <div class="rail-section">
-      <div class="rail-section-label">Recommendation</div>
-      ${badge}
-      ${rest ? `<div class="rail-md rail-rec-body">${renderMarkdown(rest)}</div>` : ""}
-    </div>
-  `;
+  return railSection(heading, `<div class="rail-md">${renderMarkdown(text)}</div>`);
+}
+
+// "No hire" before "Hire" and "Strong hire" before both — matchChip takes the
+// first entry that fits, so the longer verdict has to come first or "Hire"
+// would swallow "Hire — …" out of "Strong hire — …".
+const RAIL_VERDICTS = [
+  ["Strong hire", "verdict-hire-strong"],
+  ["No hire", "verdict-no-hire"],
+  ["Lean no", "verdict-lean-no"],
+  ["Insufficient signal", "verdict-signal"],
+  ["Hire", "verdict-hire"],
+];
+
+function renderRecommendationSection(heading, lines) {
+  const text = (lines || []).join("\n").trim();
+  if (!text) return "";
+  const [first, ...tail] = text.split("\n");
+  const hit = matchChip(first, RAIL_VERDICTS);
+  // No recognisable verdict: the paragraph is still the recommendation.
+  if (!hit) return renderPlainSection(heading, lines);
+  const body = [hit.rest, ...tail].join("\n").trim();
+  return railSection(heading,
+    `<span class="rail-verdict ${hit.cls}">${escapeHtml(hit.label)}</span>`
+    + (body ? `<div class="rail-md rail-rec-body">${renderMarkdown(body)}</div>` : ""));
 }
 
 function buildStructuredHtml(parsed) {
@@ -2476,8 +2687,9 @@ function buildStructuredHtml(parsed) {
   }
 
   // Display order: pinned sections first, then everything else in source order.
-  // Covers meeting / daily / interview presets without rewriting source files.
-  const RAIL_ORDER = ["speaker_mapping", "summary", "tl_dr", "participants", "scorecard", "action_items", "decisions", "recommendation"];
+  // The actionable block stays on top for every preset; `status` joins it because
+  // a project note is read for its state before anything else.
+  const RAIL_ORDER = ["speaker_mapping", "summary", "tl_dr", "status", "participants", "scorecard", "action_items", "decisions", "recommendation"];
   const orderedSections = [...parsed.sections].sort((a, b) => {
     const ai = RAIL_ORDER.indexOf(a.slug);
     const bi = RAIL_ORDER.indexOf(b.slug);
@@ -2487,33 +2699,32 @@ function buildStructuredHtml(parsed) {
     return ai - bi;
   });
 
-  for (const sec of orderedSections) {
-    if (sec.slug === "decisions") {
-      out.push(renderDecisionsSection(parseSimpleBullets(sec.lines)));
-    } else if (sec.slug === "action_items") {
-      out.push(renderActionItemsSection(parseActionItems(sec.lines)));
-    } else if (sec.slug === "risks") {
-      out.push(renderRisksSection(parseSimpleBullets(sec.lines)));
-    } else if (sec.slug === "scorecard") {
-      out.push(renderScorecardSection(sec.lines));
-    } else if (sec.slug === "recommendation") {
-      out.push(renderRecommendationSection(sec.lines));
-    } else if (sec.slug === "brief") {
-      const text = (sec.lines || []).join("\n").trim();
-      if (!text) continue;
-      out.push(`
-        <div class="rail-section">
-          <div class="rail-section-label">Brief</div>
-          <div class="rail-md rail-brief-md">${renderMarkdown(text)}</div>
-        </div>
-      `);
-    } else {
-      out.push(renderPlainSection(sec.heading, sec.lines));
-    }
-  }
+  for (const sec of orderedSections) out.push(renderRailSection(sec));
 
   return out.join("");
 }
+
+// One section → its markup. The registry decides; a slug it does not carry lands
+// on renderPlainSection, which is what keeps custom prompts rendering as before.
+function renderRailSection(sec) {
+  const kind = RAIL_SECTIONS[sec.slug];
+  if (RAIL_TONES.includes(kind)) return renderBulletSection(sec.heading, sec.lines, kind);
+  switch (kind) {
+    case "actions": {
+      // Every other kind degrades to plain markdown when its shape does not
+      // parse; without this the whole section would vanish from the rail.
+      const cards = parseActionItems(sec.lines);
+      return cards.length ? renderActionItemsSection(sec.heading, cards) : renderPlainSection(sec.heading, sec.lines);
+    }
+    case "map": return renderMapSection(sec.heading, sec.lines);
+    case "dated": return renderDatedSection(sec.heading, sec.lines);
+    case "status": return renderStatusSection(sec.heading, sec.lines);
+    case "people": return renderPeopleSection(sec.heading, sec.lines);
+    case "recommendation": return renderRecommendationSection(sec.heading, sec.lines);
+    default: return renderPlainSection(sec.heading, sec.lines);
+  }
+}
+// ── end rail sections ──
 
 function setSummaryWarning(filePath, warning) {
   if (warning) summaryWarnings.set(filePath, warning);
@@ -2597,11 +2808,14 @@ async function renderSummaryRail(filePath) {
 
   if (shouldRenderStructured(summaryText)) {
     const parsed = parseStructured(summaryText);
-    if (!parsed.fallback) {
+    // Empty sections render nothing, so a summary of nothing but headings comes
+    // back as an empty string — show the raw markdown rather than a blank rail.
+    const structured = parsed.fallback ? "" : buildStructuredHtml(parsed);
+    if (structured) {
       summaryRailBody.innerHTML =
         buildRailHeaderHtml(filePath, presetName ? { label: presetName } : { label: "Structured" }) +
         buildRailWarningHtml(filePath) +
-        buildStructuredHtml(parsed);
+        structured;
       if (btnRailResummarizeLabel) btnRailResummarizeLabel.textContent = "Re-summarize";
       return;
     }
@@ -2914,6 +3128,11 @@ function buildExportHtml(kind, text) {
     li { margin: 2px 0; }
     blockquote { margin: 0 0 10px; padding: 4px 12px; border-left: 3px solid #ccc; color: #555; }
     code { background: #f0f0f0; padding: 1px 4px; border-radius: 3px; font-size: 12px; }
+    /* renderMarkdown emits pipe tables, and this document does not load the
+       renderer stylesheet — without these a scorecard prints borderless. */
+    table { border-collapse: collapse; width: 100%; margin: 0 0 10px; font-size: 12px; }
+    th { text-align: left; padding: 4px 8px 4px 0; border-bottom: 1px solid #999; }
+    td { padding: 4px 8px 4px 0; border-bottom: 1px solid #e0e0e0; vertical-align: top; }
     pre.tr { white-space: pre-wrap; word-wrap: break-word;
       font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 12px; }
   </style></head><body>${bodyHtml}</body></html>`;
