@@ -38,6 +38,16 @@ const summaryWarnings = new Map();
 //   transcribed   — otherwise (a transcript file exists by definition)
 // recording / audio_only / outdated / failed need IPC support and will appear
 // once added.
+//
+// Fields that drive the sidebar's work-queue chips, all straight from
+// transcripts:list and never undefined:
+//   hasAudio        — re-transcribing is possible at all
+//   model           — which model produced it; absent on older/pasted ones
+//   enhancedAt      — Enhance has already run
+//   hasSummary      — a summary exists on disk
+//   hasSpokenTurns  — the body holds turns Enhance would act on
+//   readFailed      — the transcript could not be read, so every flag above is
+//                     a fabricated default rather than a finding
 
 let meetings = [];
 let activeMeetingId = null;
@@ -85,6 +95,13 @@ function deriveMeetingFromTranscript(item) {
     // that as unknown rather than assuming anything.
     model: item.model || undefined,
     enhancedAt: item.enhancedAt || undefined,
+    // Whether the transcript holds anything Enhance would act on, decided in
+    // main by the very predicate the Enhance job uses. False on an unreadable
+    // transcript, so the "To enhance" filter leaves it out.
+    hasSpokenTurns: Boolean(item.hasSpokenTurns),
+    // The read itself failed: hasSummary / hasAudio / model above are the
+    // fallback's fabricated defaults, so no queue may act on them.
+    readFailed: Boolean(item.readFailed),
     progress: undefined,
     failedReason: undefined,
   };
@@ -677,6 +694,7 @@ const saveChip = document.getElementById("save-chip");
 const libraryPanel = document.getElementById("library-panel");
 const libraryList = document.getElementById("library-list");
 const libraryEmpty = document.getElementById("library-empty");
+const libraryEmptyText = document.getElementById("library-empty-text");
 const libraryCount = document.getElementById("library-count");
 
 // Audio player DOM refs
@@ -1297,19 +1315,45 @@ let chatHistory = [];  // { role: 'user'|'assistant', content: string }[]
 let chatTarget = null;
 
 // ─── Sidebar: filter + search state ───────────────────────────────────────────
-let activeFilter = "all";   // 'all' | 'audio' | 'transcribed' | 'summarized'
+let activeFilter = "all";   // 'all' | 'retranscribe' | 'enhance' | 'summarize' (+ dormant 'audio')
 let searchQuery = "";
 let searchDebounceTimer = null;
 let contentMatches = new Map(); // filePath -> snippet (from full-text content search)
 let searchToken = 0;            // guards against out-of-order async search responses
 
+// Worth re-transcribing means "not the most accurate model available", so this
+// is deliberately NOT modelIsStrong(): that one is `/large/i`, which counts the
+// app's own default `large-v3_turbo` as strong and would leave the queue empty
+// for everyone who never hand-picked a smaller model — while turbo → large-v3 is
+// the one upgrade users actually have. Kept separate because modelIsStrong also
+// colours the provenance chip, and that must not change here.
+function modelWorthRedoing(id) {
+  // modelLabel() already strips the vendor prefix for the provenance chip; its
+  // underscore-to-space pass does not change the comparison below.
+  const variant = modelLabel(id).trim().toLowerCase();
+  // Empty means unknown, not weak — absence of a model line is no evidence.
+  // Everything that is not large-v3 proper is: turbo, medium, small, base, tiny.
+  // WhisperKit also ships size-suffixed ids ("large-v3_947MB"); that IS the best
+  // model, and re-transcribing would only reproduce the same id, so the queue
+  // would never clear. Turbo keeps its own suffixed forms and stays in.
+  return variant !== "" && !/^large-v3( \d+mb)?$/.test(variant);
+}
+
+// The chips answer "what is still waiting", not "what did I already do", so
+// every branch below is a queue of work left to do on that meeting.
 function meetingMatchesFilter(m, filter) {
   if (filter === "all") return true;
   if (filter === "audio") return m.hasAudio === true;
-  if (filter === "transcribed") {
-    return m.status === "transcribed" || m.status === "summarized" || m.status === "outdated";
-  }
-  if (filter === "summarized") return m.status === "summarized" || m.status === "outdated";
+  // A queue never lists work whose action is known to fail. On a read failure
+  // every flag the queues read is the fallback's fabricated default — the
+  // summary and audio checks never even ran — so all three exclude the row. It
+  // still shows under All, which is the branch above.
+  if (m.readFailed === true) return false;
+  // Weak model AND re-transcribable: the Re-transcribe menu item is gated on
+  // hasAudio too, so without it the queue would list meetings you cannot act on.
+  if (filter === "retranscribe") return m.hasAudio === true && modelWorthRedoing(m.model);
+  if (filter === "enhance") return !m.enhancedAt && m.hasSpokenTurns === true;
+  if (filter === "summarize") return !m.hasSummary;
   return true;
 }
 
@@ -1334,12 +1378,38 @@ function highlightSnippet(snippet, q) {
   return out + escapeHtml(snippet.slice(from));
 }
 
+// What the placeholder says when nothing is visible. Read by renderMeetings only;
+// the three queue lines are the "you are done" case, not the "nothing here" one.
+const FILTER_EMPTY_TEXT = {
+  all: "No meetings yet",
+  retranscribe: "Nothing to re-transcribe",
+  enhance: "Nothing to enhance",
+  summarize: "Nothing to summarize",
+};
+
+function emptyStateText() {
+  if (!meetings.length) return "No meetings yet";
+  if (searchQuery) return "No matches";
+  return FILTER_EMPTY_TEXT[activeFilter] || "No matches";
+}
+
+// Exactly one chip is the selected one. The class is paint; aria-pressed is what
+// a screen reader reads, so both move together or the two disagree.
+function markActiveChip(filter) {
+  document.querySelectorAll(".filter-chip").forEach((c) => {
+    const on = c.dataset.filter === filter;
+    c.classList.toggle("active", on);
+    c.setAttribute("aria-pressed", on ? "true" : "false");
+  });
+}
+
 function computeFilterCounts(list) {
-  const counts = { all: list.length, audio: 0, transcribed: 0, summarized: 0 };
+  const counts = { all: list.length, audio: 0, retranscribe: 0, enhance: 0, summarize: 0 };
   for (const m of list) {
     if (m.hasAudio) counts.audio++;
-    if (meetingMatchesFilter(m, "transcribed")) counts.transcribed++;
-    if (meetingMatchesFilter(m, "summarized")) counts.summarized++;
+    if (meetingMatchesFilter(m, "retranscribe")) counts.retranscribe++;
+    if (meetingMatchesFilter(m, "enhance")) counts.enhance++;
+    if (meetingMatchesFilter(m, "summarize")) counts.summarize++;
   }
   return counts;
 }
@@ -1391,9 +1461,11 @@ function renderMeetings() {
 
   // Update filter chip counts (off the unfiltered/unsearched meeting list).
   const counts = computeFilterCounts(meetings);
-  for (const kind of ["all", "audio", "transcribed", "summarized"]) {
+  for (const kind of ["all", "retranscribe", "enhance", "summarize"]) {
     const el = document.querySelector(`.filter-count[data-count="${kind}"]`);
-    if (el) el.textContent = String(counts[kind]);
+    // `?? 0` so a kind/chip mismatch shows a wrong number rather than painting
+    // the literal string "undefined" into the chip.
+    if (el) el.textContent = String(counts[kind] ?? 0);
   }
 
   // Apply filter + search.
@@ -1402,6 +1474,9 @@ function renderMeetings() {
   );
 
   if (!visible.length) {
+    // "No meetings yet" is a lie over a full library whose active queue simply
+    // ran dry — and an exhausted queue is the good outcome, not an empty app.
+    libraryEmptyText.textContent = emptyStateText();
     libraryEmpty.classList.remove("hidden");
     return;
   }
@@ -1490,6 +1565,11 @@ function closeMeetingMenu() {
   contextMenu = null;
 }
 
+// A disabled menu item says why on hover; an enabled one gets no title at all.
+function reasonTitle(reason) {
+  return reason ? ` title="${escapeHtml(reason)}"` : "";
+}
+
 function openMeetingMenu(x, y, m) {
   closeMeetingMenu();
   contextMenu = { x, y, meetingId: m.id };
@@ -1506,17 +1586,28 @@ function openMeetingMenu(x, y, m) {
   // Every one of these changes the file or its name under a run that reads it
   // from disk, and the run would be thrown away at the end.
   const enhancing = Boolean(activeJobFor("enhance", m.id));
+  // The chips' invariant applies to the menu too: never offer an action whose
+  // failure is already known. On a read-failed row hasSummary/hasAudio are the
+  // fallback's fabricated defaults, so Summarize would fail on the same read —
+  // and each reason is spelled out, because a control that greys out without
+  // saying why just looks broken.
+  const summarizeReason = m.readFailed ? "Transcript could not be read" : "";
+  const enhanceReason = m.readFailed ? "Transcript could not be read"
+    : enhancing ? "Enhance is already running on this transcript"
+    : !m.hasSpokenTurns ? "No spoken turns to enhance"
+    : "";
+  const enhanceDisabled = Boolean(enhanceReason);
 
   const root = document.createElement("div");
   root.id = "meeting-menu-root";
   root.innerHTML = `
     <div class="meeting-menu-overlay"></div>
     <div class="meeting-menu" role="menu" style="left:${left}px;top:${top}px;">
-      <button class="meeting-menu-item" data-action="summarize" type="button" role="menuitem">
+      <button class="meeting-menu-item" data-action="summarize" type="button" role="menuitem" ${summarizeReason ? "disabled" : ""}${reasonTitle(summarizeReason)}>
         <span class="meeting-menu-icon" style="color:var(--accent-lime)">${iconSvg("sparkle", { size: 13 })}</span>
         <span>${escapeHtml(summarizeLabel)}</span>
       </button>
-      <button class="meeting-menu-item" data-action="enhance" type="button" role="menuitem" ${enhancing ? "disabled" : ""}>
+      <button class="meeting-menu-item" data-action="enhance" type="button" role="menuitem" ${enhanceDisabled ? "disabled" : ""}${reasonTitle(enhanceReason)}>
         <span class="meeting-menu-icon">${iconSvg("text", { size: 13 })}</span>
         <span>Enhance</span>
       </button>
@@ -2710,9 +2801,7 @@ document.querySelectorAll(".filter-chip").forEach((chip) => {
     const filter = chip.dataset.filter;
     if (!filter || filter === activeFilter) return;
     activeFilter = filter;
-    document.querySelectorAll(".filter-chip").forEach((c) => {
-      c.classList.toggle("active", c.dataset.filter === filter);
-    });
+    markActiveChip(filter);
     renderMeetings();
   });
 });
