@@ -126,3 +126,19 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-library-workflow-filters.md`
   summary: Acting on a work queue makes the open meeting's card vanish from under the user — finishing Enhance on the meeting you are reading removes it from the active `To enhance` queue mid-session.
   evidence: `renderMeetings` filters purely on `meetingMatchesFilter` (`renderer/app.js:1456-1459`), with no exemption for `activeMeetingId`. Leaving the queue is the correct outcome for the item; the card disappearing while its transcript is open in the editor is the jarring part. Keeping the active meeting pinned regardless of the filter would fix it, at the cost of a row that does not match the chip.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-transcript-chrome-declutter.md`
+  summary: A modal opened by ⌘N/⌘O while the ⋯ meeting menu is up renders underneath it, with the menu's click overlay still swallowing pointer events.
+  evidence: `openMeetingMenu` (renderer/app.js) is body-level with a full-screen `.meeting-menu-overlay` and is closed only by that overlay, by Escape, or by picking an item — nothing in the ⌘-shortcut handlers closes it. Pre-existing; the new info panel was given the same treatment for consistency, and both would be fixed by one guard.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-transcript-chrome-declutter.md`
+  summary: `renderTranscriptView`'s wiring of the PARTIAL warning is untested — deleting the one line that calls `transcriptMetaHtml` leaves the whole suite green.
+  evidence: The tests eval the marked pure regions; the call site sits outside them and touches `transcriptView.innerHTML`, which needs a DOM. Verified by hand over CDP. Closing it properly means splitting the markup building out of `renderTranscriptView` into the region, leaving the function as the innerHTML assignment.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-transcript-chrome-declutter.md`
+  summary: The marked-region reader `region()` is copy-pasted into both `test/transcript-meta.test.js` and `test/meeting-date-format.test.js`.
+  evidence: Both files carry the same regex-and-assert helper. One shared two-line module under `desktop/test/` would cover both, and any third file that needs it.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-transcript-chrome-declutter.md`
+  summary: `desktop/app.js` is an untracked, byte-identical pre-change copy of `renderer/app.js` that nothing loads.
+  evidence: `index.html` loads `app.js` relative to `renderer/`, and electron-builder ships `renderer/**`. It still contains the deleted status-bar code, and is the only reason a repo-wide grep for those symbols finds anything. Safe to delete, but it is the user's untracked file.

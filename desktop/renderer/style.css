@@ -62,7 +62,6 @@
     --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
 
     --toolbar-height: 52px;
-    --statusbar-height: 28px;
     --sidebar-width: 260px;
 }
 
@@ -188,7 +187,6 @@ body {
 body.mode-live #btn-summarize,
 body.mode-live #btn-ask-ai,
 body.mode-live #btn-library,
-body.mode-live #status-bar,
 body.mode-record #btn-ask-ai {
     display: none !important;
 }
@@ -314,7 +312,7 @@ body.mode-record #btn-ask-ai {
 #editor-container {
     position: fixed;
     top: var(--toolbar-height);
-    bottom: var(--statusbar-height);
+    bottom: 0;
     left: 0;
     right: 0;
     overflow: hidden;
@@ -460,42 +458,6 @@ body.mode-record #btn-ask-ai {
 
 #editor::-webkit-scrollbar-thumb:hover {
     background: var(--bg-hover);
-}
-
-/* ─── Status Bar ──────────────────────────────────────────────────────────────── */
-#status-bar {
-    position: fixed;
-    bottom: 0;
-    left: 0;
-    right: 0;
-    height: var(--statusbar-height);
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 0 16px;
-    background: var(--bg-surface);
-    border-top: 1px solid var(--border);
-    font-size: 11px;
-    color: var(--text-muted);
-    z-index: 100;
-}
-
-#status-right {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-}
-
-.status-divider {
-    color: var(--text-muted);
-    opacity: 0.4;
-}
-
-#status-path {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: 60%;
 }
 
 /* ─── Utility ─────────────────────────────────────────────────────────────────── */
@@ -2746,104 +2708,102 @@ body.mode-record #btn-ask-ai {
 }
 #transcript-view.hidden { display: none; }
 
-/* The transcript header lives behind this icon — reference data one hover away
-   instead of seven monospace lines above the first turn. It borrows the rail
-   tooltip's surface (--bg-elevated on --border-strong, --radius-sm, z-index
-   100) but not its 0.5s reveal delay or its 11px nowrap type: a tooltip
-   explains a button, this one *is* the content, so it opens instantly. */
+/* What view mode still shows of the header: the interrupted-transcription
+   warning, plus — only for a file with no library card to carry them — the
+   rows themselves. Everything else lives on the card's info panel below. */
 .tv-meta {
-    position: relative;
-    /* Shrink-wrapped so the row does not paint a full-pane-wide strip; what
-       opens the panel is the icon itself (see the reveal rule below), not this
-       box, which the PARTIAL warning can stretch most of the way across. */
-    display: flex;
     width: max-content;
     max-width: 100%;
-    align-items: center;
-    gap: 8px;
     margin-bottom: 24px;
 }
 
-.tv-meta-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 2px;
-    color: var(--text-muted);
-    background: transparent;
-    border: none;
-    border-radius: var(--radius-sm);
-    cursor: help;
-}
-.tv-meta-btn:hover,
-.tv-meta-btn:focus-visible {
-    color: var(--text-primary);
-    outline: none;
-}
-
-/* An interrupted transcription must never hide behind a hover. */
+/* An interrupted transcription must never hide behind a click. Marked by an
+   icon as well as colour, so it does not depend on seeing the amber. */
 .tv-meta-warn {
+    display: block;
     font-family: var(--font-ui);
     font-size: 11.5px;
     color: var(--dirty);
 }
+.tv-meta-warn::before {
+    content: "⚠ ";
+}
 
-.tv-meta-panel {
-    position: absolute;
-    /* Flush against the container: a gap between icon and panel is a dead zone
-       the pointer crosses, and crossing it closes the panel mid-read. */
-    top: 100%;
-    left: 0;
-    z-index: 100;
+/* Inline fallback: same rows as the card panel, no surface of their own. */
+.tv-meta-rows {
+    margin-top: 6px;
+    max-width: 520px;
+    font-family: var(--font-ui);
+    font-size: 11.5px;
+    line-height: 1.6;
+    color: var(--text-muted);
+}
+
+/* The transcript header, one click away on the meeting card. Fixed, not
+   absolute: #library-list scrolls, so a card-anchored panel would be clipped
+   at the sidebar edge. Surface borrows the rail tooltip's tokens
+   (--bg-elevated on --border-strong, --radius-sm) so it reads as native, and
+   sits above .meeting-menu-overlay's z-index 400 the way .meeting-menu does. */
+.meta-panel {
+    position: fixed;
+    z-index: 401;
     min-width: 200px;
-    max-width: 380px;
+    max-width: 320px;
     padding: 8px 10px;
     background: var(--bg-elevated);
     border: 1px solid var(--border-strong);
     border-radius: var(--radius-sm);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
     font-family: var(--font-ui);
     font-size: 11.5px;
     line-height: 1.6;
     color: var(--text-primary);
-    /* #transcript-view is the scroll container and would clip a long header. */
+    /* A seven-row header on a short window still has to be readable. */
     max-height: 40vh;
     overflow-y: auto;
-    /* visibility, not display: it keeps the fade, and a hidden panel is not
-       hit-tested — so it swallows no clicks on the turns underneath, and it
-       cannot open itself by being hovered. Transitioning visibility too is what
-       holds it on screen for the length of the fade-out. */
-    visibility: hidden;
-    opacity: 0;
-    transition: opacity 0.1s ease, visibility 0.1s ease;
-}
-/* Scoped to the icon and the panel, not to .tv-meta: with a PARTIAL warning
-   that row runs most of the pane's width, and hovering empty space beside the
-   warning must not open anything. `~`, not `+`: .tv-meta-warn can sit between
-   the button and the panel. The panel keeps itself open once it is visible —
-   while hidden it is not hit-testable, so it cannot open itself. */
-.tv-meta-btn:hover ~ .tv-meta-panel,
-.tv-meta-btn:focus-visible ~ .tv-meta-panel,
-.tv-meta-panel:hover {
-    visibility: visible;
-    opacity: 1;
 }
 
-.tv-meta-row {
+.meta-row {
     display: flex;
     gap: 10px;
 }
-.tv-meta-key {
+.meta-key {
     /* min-width, not a fixed basis: a key longer than the column keeps its own
        width instead of spilling into the value. */
     flex: 0 0 auto;
     min-width: 86px;
     color: var(--text-muted);
 }
-.tv-meta-val {
+.meta-val {
     flex: 1;
     min-width: 0;
     /* Source paths are long: wrap them instead of overflowing the panel. */
     overflow-wrap: anywhere;
+}
+
+/* The chip is a real <button> so the panel is reachable from the keyboard;
+   everything else about it matches its four <span> siblings. */
+.meta-chip {
+    padding: 0;
+    font: inherit;
+    cursor: pointer;
+    opacity: 1;
+    color: var(--text-muted);
+}
+.meta-chip:hover,
+.meta-chip[aria-expanded="true"] {
+    color: var(--text-primary);
+    border-color: var(--border-strong);
+}
+/* The shared .artifact-chip rules do not cover focus, and without this the
+   keyboard reach the <button> exists for is invisible. */
+.meta-chip:focus-visible {
+    outline: 2px solid var(--accent-2);
+    outline-offset: 1px;
+}
+
+.meta-panel:focus-visible {
+    outline: none;
 }
 
 .tv-plain {
