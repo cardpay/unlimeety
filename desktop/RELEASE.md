@@ -68,15 +68,19 @@ DMGs are published through stable GitHub Release URLs on [github.com/cardpay/unl
 
 ### Step 1. Bump version
 
-In `desktop/package.json` change `"version"` to the new value, e.g. `1.0.1`. `desktop/package-lock.json` carries the same version in two places — `npm version` keeps them in step, editing by hand does not:
+In `desktop/package.json` change `"version"` to the new value, e.g. `1.0.1`. `desktop/package-lock.json` carries the same version in two places — `npm version` keeps them in step, editing by hand does not.
+
+`main` takes no direct pushes, so the bump travels as a PR like any other change, and GitHub is driven through `gh`:
 
 ```bash
 cd unlimeety/desktop
 npm version 1.0.1 --no-git-tag-version    # updates package.json + package-lock.json
 cd ..
+git checkout -b release/v1.0.1
 git add desktop/package.json desktop/package-lock.json
 git commit -m "desktop: bump version to 1.0.1"
-git push origin main
+gh pr create --base main --fill
+gh pr merge --merge --delete-branch        # after review
 ```
 
 ### Step 2. Build the DMG
@@ -142,12 +146,14 @@ spctl -a -t open --context context:primary-signature -v dist/Unlimeety-arm64.dmg
 
 Final smoke test: copy the DMG onto a Mac that has never seen this app (or locally run `xattr -cr ~/Downloads/Unlimeety-arm64.dmg` to drop the Gatekeeper cache), mount it, and launch. There must be no "unidentified developer" dialog.
 
-### Step 5. Tag and push
+### Step 5. Bring main to the release commit
+
+The version-bump PR from step 1 must be merged before the release is cut. No tag is pushed by hand — `gh release create` in step 6 creates it on the target commit.
 
 ```bash
 cd unlimeety
-git tag vX.Y.Z
-git push origin main --tags
+git checkout main && git pull
+git rev-parse --short HEAD    # the commit step 6 will tag
 ```
 
 ### Step 6. Publish to GitHub Releases
@@ -156,6 +162,7 @@ git push origin main --tags
 cd unlimeety
 gh release create vX.Y.Z \
   --repo cardpay/unlimeety \
+  --target main \
   --title "Unlimeety X.Y.Z" \
   --notes "Release notes here." \
   desktop/dist/Unlimeety-arm64.dmg
