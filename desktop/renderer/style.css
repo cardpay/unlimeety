@@ -806,6 +806,39 @@ body.mode-record #btn-ask-ai {
 
 .meeting-card.active .meeting-more { display: inline-flex; }
 
+/* Sits against the title rather than at the row's far edge — `margin-right:
+   auto` keeps it there, so it does not shift sideways when the ⋯ button
+   appears on the active card. Unlike ⋯ it is always shown: ⋯ is reachable by
+   right-click anywhere on the card, this is the only way to the panel. */
+.meeting-info {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    margin-right: auto;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    color: var(--text-muted);
+    opacity: 0.55;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, opacity 0.15s;
+}
+.meeting-info:hover,
+.meeting-info[aria-expanded="true"] {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+    opacity: 1;
+}
+.meeting-info:focus-visible {
+    outline: 2px solid var(--accent-2);
+    outline-offset: 1px;
+    opacity: 1;
+}
+
 .meeting-more:hover { background: var(--bg-hover); color: var(--text-primary); }
 
 .meeting-card-row2 {
@@ -2833,27 +2866,6 @@ body.mode-record #btn-ask-ai {
     min-width: 0;
     /* Source paths are long: wrap them instead of overflowing the panel. */
     overflow-wrap: anywhere;
-}
-
-/* The chip is a real <button> so the panel is reachable from the keyboard;
-   everything else about it matches its four <span> siblings. */
-.meta-chip {
-    padding: 0;
-    font: inherit;
-    cursor: pointer;
-    opacity: 1;
-    color: var(--text-muted);
-}
-.meta-chip:hover,
-.meta-chip[aria-expanded="true"] {
-    color: var(--text-primary);
-    border-color: var(--border-strong);
-}
-/* The shared .artifact-chip rules do not cover focus, and without this the
-   keyboard reach the <button> exists for is invisible. */
-.meta-chip:focus-visible {
-    outline: 2px solid var(--accent-2);
-    outline-offset: 1px;
 }
 
 .meta-panel:focus-visible {
