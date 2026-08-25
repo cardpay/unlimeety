@@ -6,6 +6,39 @@ let observer = null;
 let currentLanguage = 'ru'; // Default option
 let currentTheme = 'auto';  // 'auto' (follow OS) | 'light' | 'dark'
 
+// Auto-start: whether a meeting going active starts recording by itself.
+// Persisted as `gmt-autostart`.
+let autoStartEnabled = true;    // the stored preference; on by default
+let autoStartLoaded = false;    // stored value landed, or known unreachable
+let autoStartSkipPath = null;   // location.pathname of the meeting opted out of
+
+// After an extension reload or update, a Meet tab left open becomes an orphaned
+// content script and every chrome.* call throws "Extension context invalidated"
+// synchronously. injectUI() reads storage twice and writes it twice, all inline
+// among its addEventListener calls, so one unguarded throw silently strips every
+// listener below it — leaving a widget whose record button looks enabled and
+// ignores clicks. Guarding only one of the four call sites just moves which line
+// throws, so all four go through here.
+function storageGet(key, cb) {
+    try {
+        chrome.storage.local.get(key, (res) => {
+            // Reading lastError is also what suppresses Chrome's "Unchecked
+            // runtime.lastError" console noise on every Meet tab.
+            cb(chrome.runtime.lastError ? null : res);
+        });
+    } catch (e) {
+        cb(null); // caller applies its own default
+    }
+}
+
+function storageSet(obj) {
+    try {
+        chrome.storage.local.set(obj, () => void chrome.runtime.lastError);
+    } catch (e) {
+        // Orphaned content script: the preference stays in memory for this page.
+    }
+}
+
 // Collect unique speaker names from the live transcript
 const knownSpeakers = new Set();
 
@@ -72,6 +105,10 @@ function injectUI() {
                         <svg viewBox="0 0 24 24"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z"/></svg>
                     </button>
                 </div>
+                <label class="gmt-check" title="Start recording by itself when a meeting begins. Switching this on during a meeting applies from the next one.">
+                    <input id="gmt-autostart" type="checkbox" checked />
+                    Auto-start recording
+                </label>
                 <div>
                     <label class="gmt-field-label" for="gmt-notes-input">Note</label>
                     <input id="gmt-notes-input" type="text" placeholder="Type and press Enter…" disabled />
@@ -90,18 +127,53 @@ function injectUI() {
     recordBtn.disabled = true;
     recordBtn.title = currentLanguage === 'ru' ? 'Сначала присоединитесь к встрече' : 'Join the meeting first';
 
-    // Poll meeting status and auto-start recording when meeting becomes active
+    // Poll meeting status and auto-start recording when the meeting becomes
+    // active. Armed here, before any chrome.* call, and never conditional on
+    // one: `btn.disabled = !active` below is the ONLY thing that ever clears the
+    // disabled flag set just above — updateRecordButtonUI never touches it. So a
+    // storage read that throws or never calls back must not be able to stop this
+    // interval from existing, or the widget renders and cannot record at all.
+    //
+    // With auto-start off the poll keeps running rather than being cleared: it
+    // is what unlocks the record button once the meeting goes live.
+    //
+    // Cleared first because injectUI can run more than once — the resize handler
+    // below guards against exactly that — and an orphaned interval would go on
+    // flipping `disabled` and could fire a second startRecording().
+    clearInterval(window.meetingStatusInterval);
     window.meetingStatusInterval = setInterval(() => {
         const btn = document.getElementById('gmt-record-btn');
         if (!btn || isRecording) return;
         const active = isMeetingActive();
         btn.disabled = !active;
         btn.title = active ? 'Start Recording' : (currentLanguage === 'ru' ? 'Сначала присоединитесь к встрече' : 'Join the meeting first');
-        if (active) {
+        if (active && autoStartLoaded && autoStartEnabled && location.pathname !== autoStartSkipPath) {
             clearInterval(window.meetingStatusInterval);
-            startRecording();
+            // startRecording sets isRecording synchronously before its first
+            // await, so a throw after that point (chrome.* in an orphaned tab)
+            // would latch it true: the poll's `if (isRecording) return` then
+            // short-circuits forever and the button sticks on "Stop". Called
+            // fire-and-forget, so nothing else would catch it.
+            startRecording().catch(() => {
+                isRecording = false;
+                updateRecordButtonUI(false);
+            });
         }
     }, 2000);
+
+    // `!== false` makes an absent key, an undefined value and a read that
+    // reported an error all mean "on", i.e. the behaviour before this setting
+    // existed; only an explicitly stored `false` turns auto-start off. The
+    // `!autoStartLoaded` guard means a user who ticks the box before this read
+    // lands wins — the callback must not silently revert them.
+    storageGet('gmt-autostart', (res) => {
+        if (!autoStartLoaded) {
+            autoStartEnabled = res?.['gmt-autostart'] !== false;
+            const box = document.getElementById('gmt-autostart');
+            if (box) box.checked = autoStartEnabled;
+        }
+        autoStartLoaded = true;
+    });
 
     // Theme toggle: cycle auto (follow OS) → light → dark. 'auto' removes the
     // data-theme attr so content-light.css's prefers-color-scheme block decides.
@@ -121,11 +193,11 @@ function injectUI() {
         const btn = document.getElementById('gmt-theme-toggle');
         if (btn) btn.title = `Theme: ${currentTheme} (click to change)`;
     }
-    chrome.storage.local.get('gmt-theme', (res) => applyWidgetTheme(res && res['gmt-theme']));
+    storageGet('gmt-theme', (res) => applyWidgetTheme(res && res['gmt-theme']));
     document.getElementById('gmt-theme-toggle').addEventListener('click', () => {
         const next = THEME_CYCLE[(THEME_CYCLE.indexOf(currentTheme) + 1) % THEME_CYCLE.length];
         applyWidgetTheme(next);
-        chrome.storage.local.set({ 'gmt-theme': next });
+        storageSet({ 'gmt-theme': next });
     });
 
     // Event Listeners
@@ -173,6 +245,32 @@ function injectUI() {
         if (isRecording) {
             setCaptionLanguage();
         }
+    });
+
+    // Switching this on while a meeting is already live saves the preference for
+    // the NEXT meeting and leaves this one alone: the poll is deliberately still
+    // running with auto-start off, so without the skip it would pick the flag up
+    // on its next tick and start recording a live call within 2 s — the exact
+    // surprise this setting exists to prevent.
+    //
+    // The skip records WHICH meeting, not just "skip once": Meet moves between
+    // calls by changing the URL without a document load, so a boolean latch
+    // would never re-arm and would kill auto-start for the tab's whole life.
+    //
+    // "Live" is read from the button's disabled state — what the poll last
+    // observed, debounced over 2 s — as well as a fresh probe, because a single
+    // point-in-time DOM check can miss while Meet's controls are momentarily
+    // unmounted, and missing it records a call the user just opted out of.
+    //
+    // Never stops a recording already in flight.
+    const autoStartBox = document.getElementById('gmt-autostart');
+    if (autoStartBox) autoStartBox.addEventListener('change', (e) => {
+        autoStartEnabled = e.target.checked;
+        autoStartLoaded = true; // an explicit click outranks a slow storage read
+        const recBtn = document.getElementById('gmt-record-btn');
+        const live = (recBtn && !recBtn.disabled) || isMeetingActive();
+        if (autoStartEnabled && live) autoStartSkipPath = location.pathname;
+        storageSet({ 'gmt-autostart': autoStartEnabled });
     });
 
     document.getElementById('gmt-record-btn').addEventListener('click', () => {
