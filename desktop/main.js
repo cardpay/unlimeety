@@ -498,6 +498,9 @@ function writeFileAtomic(target, content) {
     // The watcher keys suppression off a single filename, and the temp file's
     // creation is an event of its own; stamp its name first, the target's after.
     lastSelfWrite = { name: path.basename(tmp), at: Date.now() };
+    // The rename below replaces the target's content without the watcher ever
+    // telling the renderer, so the cached spoken-turn flag has to go with it.
+    spokenTurnsIndex.delete(target);
     let fd;
     try {
         fd = fs.openSync(tmp, 'wx', mode);
@@ -529,7 +532,7 @@ function writeTranscriptFile(filePath, content) {
         // data is out, and the watcher event can only arrive afterwards. Timing
         // it from before would spend the suppression window on the write itself
         // — worst on exactly the large notes where the re-read hurts most.
-        lastSelfWrite = { name: path.basename(target), at: Date.now() };
+        stampSelfWrite(target);
         currentFilePath = target;
         isDirty = false;
         updateTitle();
@@ -1805,10 +1808,44 @@ function mergeParticipants(...lists) {
 
 ipcMain.handle('transcripts:getFolder', () => TRANSCRIPTS_FOLDER);
 
+// Spoken-turn index: filePath -> { mtime, length, hasSpokenTurns }. Same shape
+// and same self-invalidation as contentIndex below. `loadLibrary` re-runs on
+// every watcher event — every finished job, every external edit, every rename —
+// and scanning each body per call costs 854 ms over 633 real transcripts against
+// 98 ms warm, so the answer is remembered per file. Keyed on mtime AND byte
+// length: two writes inside the same millisecond, or a restore that puts back an
+// old mtime, would otherwise serve a stale flag.
+const spokenTurnsIndex = new Map();
+
+// `raw` is handed in — this reads nothing from disk. transcripts:list has the
+// bytes already, and avoiding a second readFileSync is the point of caching.
+function cachedHasSpokenTurns(filePath, mtime, raw) {
+    const hit = spokenTurnsIndex.get(filePath);
+    if (hit && hit.mtime === mtime && hit.length === raw.length) return hit.hasSpokenTurns;
+    try {
+        const hasSpokenTurns = enhance.hasSpokenTurns(raw, NOTE_LABEL);
+        spokenTurnsIndex.set(filePath, { mtime, length: raw.length, hasSpokenTurns });
+        return hasSpokenTurns;
+    } catch (err) {
+        // Its own try: one odd body costs this flag alone. Inside the caller's
+        // try it would have dropped the whole row into the catch fallback,
+        // losing the title, model, enhancedAt, hasAudio and recordedAt-derived
+        // date that survived before this field existed. Nothing is cached here —
+        // a stored `false` is indistinguishable from a real "no turns" and would
+        // stick until the file changed. `err` is passed, not interpolated: a
+        // non-Error throw has no `.message`, and reading one would throw again,
+        // out of this try and into the caller's, which is the exact collapse
+        // this try exists to prevent.
+        console.warn('transcripts:list: spoken-turn scan failed for', filePath, err);
+        return false;
+    }
+}
+
 ipcMain.handle('transcripts:list', () => {
     try {
         if (!fs.existsSync(TRANSCRIPTS_FOLDER)) return [];
-        return fs.readdirSync(TRANSCRIPTS_FOLDER)
+        const listed = new Set();
+        const items = fs.readdirSync(TRANSCRIPTS_FOLDER)
             .filter(f => {
                 if (!f.endsWith('.txt')) return false;
                 try { return fs.statSync(path.join(TRANSCRIPTS_FOLDER, f)).isFile(); } catch { return false; }
@@ -1816,6 +1853,7 @@ ipcMain.handle('transcripts:list', () => {
             .map(f => {
                 const filePath = path.join(TRANSCRIPTS_FOLDER, f);
                 const stat = fs.statSync(filePath);
+                listed.add(filePath);
                 try {
                     const raw = fs.readFileSync(filePath, 'utf-8');
                     const blankIdx = raw.indexOf('\n\n');
@@ -1828,18 +1866,35 @@ ipcMain.handle('transcripts:list', () => {
                     const hasSummary = findExistingSummaryPath(filePath) !== null;
                     const audioPaths = findRelatedAudioPaths(filePath);
                     const hasAudio = audioPaths.length > 0;
-                    return { filename: f, filePath, createdAt, mtime: stat.mtimeMs, hasSummary, hasAudio, audioPath: audioPaths[0] || null, ...info };
-                } catch {
+                    // Computed here because the renderer never holds the body of
+                    // a meeting it has not opened. Cached, own try.
+                    const hasSpokenTurns = cachedHasSpokenTurns(filePath, stat.mtimeMs, raw);
+                    return { filename: f, filePath, createdAt, mtime: stat.mtimeMs, hasSummary, hasAudio, hasSpokenTurns, readFailed: false, audioPath: audioPaths[0] || null, ...info };
+                } catch (err) {
+                    // Everything below is a fabricated default, not a finding —
+                    // the read, or the summary/audio lookup after it, never
+                    // completed. `readFailed` says so, and the sidebar's queues
+                    // exclude the row rather than offering an action that is
+                    // known to fail. Logged because the flag says only that
+                    // something failed, never what.
+                    console.warn('transcripts:list: could not describe', filePath, err);
                     return {
                         filename: f, filePath,
                         createdAt: stat.birthtimeMs || stat.mtimeMs,
                         mtime: stat.mtimeMs,
-                        hasSummary: false, hasAudio: false,
+                        hasSummary: false, hasAudio: false, hasSpokenTurns: false, readFailed: true,
                         title: f, generated: null, participants: [],
                     };
                 }
             })
             .sort((a, b) => b.createdAt - a.createdAt);
+        // Deleted, renamed and moved-away files leave the index otherwise: a long
+        // session would grow it forever, and a path that comes back reused could
+        // be served the previous file's flag.
+        for (const key of spokenTurnsIndex.keys()) {
+            if (!listed.has(key)) spokenTurnsIndex.delete(key);
+        }
+        return items;
     } catch {
         return [];
     }
@@ -1895,6 +1950,17 @@ let libraryChangeTimer = null;
 // transcript in the folder and rebuild the sidebar mid-edit.
 let lastSelfWrite = { name: null, at: 0 };
 const SELF_WRITE_WINDOW_MS = 500; // covers the watcher's own 200ms coalescing
+
+// Suppressing the watcher means the renderer is not told this file changed, so
+// nothing else will invalidate what we cached about its content. mtime and byte
+// length normally do that on the next list by themselves; dropping the entry
+// here means a write that somehow preserved both cannot serve a stale flag —
+// which for hasSpokenTurns would grey out Enhance on a transcript the user just
+// pasted turns into.
+function stampSelfWrite(filePath) {
+    lastSelfWrite = { name: path.basename(filePath), at: Date.now() };
+    spokenTurnsIndex.delete(filePath);
+}
 
 ipcMain.handle('transcripts:watch', () => {
     if (libraryWatcher) return;
@@ -2376,7 +2442,7 @@ async function runEnhanceJob(filePath, sender) {
         // can only arrive once the data is out. Not routed through that helper —
         // it also moves currentFilePath/isDirty, and Enhance runs on transcripts
         // that are not open in the editor.
-        lastSelfWrite = { name: path.basename(filePath), at: Date.now() };
+        stampSelfWrite(filePath);
         // Cancelling keeps the parts already proofread: they each passed the same
         // gate as any other part, and discarding an hour of model time because the
         // user stopped the rest would be its own kind of loss.

@@ -145,21 +145,31 @@
         <span class="library-search-kbd">⌘K</span>
       </div>
 
-      <!-- Filter chips — "Audio" chip lands once IPC reports audio artifacts (Phase 4). -->
-      <div class="library-filters" role="tablist">
-        <button class="filter-chip active" data-filter="all" role="tab">All <span class="filter-count" data-count="all">0</span></button>
-        <button class="filter-chip" data-filter="transcribed" role="tab">Transcribed <span class="filter-count" data-count="transcribed">0</span></button>
-        <button class="filter-chip" data-filter="summarized" role="tab">Summarized <span class="filter-count" data-count="summarized">0</span></button>
+      <!-- Filter chips — work left to do, not work already done. A "To transcribe"
+           chip needs audio-without-transcript entries in the library first.
+           No tablist/tab roles: these toggle what the list below holds, they do
+           not switch panels — selection is exposed with aria-pressed instead, and
+           role=group + aria-label give the row the name the tablist used to.
+           Each criterion is in title AND aria-label: title is mouse-only, and
+           aria-label repeats the visible text first so the accessible name still
+           starts with what the chip says. -->
+      <div class="library-filters" role="group" aria-label="Filter meetings by work left to do">
+        <button class="filter-chip active" data-filter="all" aria-pressed="true" title="Every meeting in the library" aria-label="All — every meeting in the library">All <span class="filter-count" data-count="all">0</span></button>
+        <button class="filter-chip" data-filter="retranscribe" aria-pressed="false" title="Has audio and was transcribed with something less accurate than large-v3" aria-label="To re-transcribe — has audio and was transcribed with something less accurate than large-v3">To re-transcribe <span class="filter-count" data-count="retranscribe">0</span></button>
+        <button class="filter-chip" data-filter="enhance" aria-pressed="false" title="Has spoken turns and Enhance has never run on it" aria-label="To enhance — has spoken turns and Enhance has never run on it">To enhance <span class="filter-count" data-count="enhance">0</span></button>
+        <button class="filter-chip" data-filter="summarize" aria-pressed="false" title="Has no summary on disk" aria-label="To summarize — has no summary on disk">To summarize <span class="filter-count" data-count="summarize">0</span></button>
       </div>
 
       <!-- Meetings list -->
       <div id="library-list">
-        <div id="library-empty" class="library-empty hidden">
+        <!-- Live region: the text changes with the active chip, and a silent
+             swap would leave a screen reader on the previous sentence. -->
+        <div id="library-empty" class="library-empty hidden" role="status" aria-live="polite">
           <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
             <polyline points="14 2 14 8 20 8"/>
           </svg>
-          <p>No meetings yet</p>
+          <p id="library-empty-text">No meetings yet</p>
         </div>
       </div>
 
