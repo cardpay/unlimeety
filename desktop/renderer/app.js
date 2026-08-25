@@ -8,6 +8,10 @@ const api = window.transcriber;
 // classic script is a SyntaxError that kills this entire file. Same reason
 // `api` above is not called `transcriber`.
 const jobsApi = window.queueApi;
+// Same rule again: `recordApi` is a non-configurable window property, so the
+// binding has to be named something else. The library reads recordings through
+// it — every un-transcribed wav is a meeting card now.
+const recApi = window.recordApi;
 
 // ─── State ────────────────────────────────────────────────────────────────────
 let state = {
@@ -33,14 +37,16 @@ const summaryWarnings = new Map();
 // recording/failed states) are left undefined until main.js is extended.
 //
 // Status derivation, given today's IPC surface:
-//   transcribing  — id is in transcribeRunning
 //   summarized    — hasSummary === true
-//   transcribed   — otherwise (a transcript file exists by definition)
-// recording / audio_only / outdated / failed need IPC support and will appear
-// once added.
+//   transcribed   — a transcript file exists
+//   audio_only    — a recording with no transcript yet (deriveMeetingFromRecording)
+// `transcribing` is painted by buildMeetingCard off the job queue, not derived
+// here: whether a run is in flight is queue state, not disk state. recording /
+// outdated / failed still need IPC support and will appear once added.
 //
-// Fields that drive the sidebar's work-queue chips, all straight from
-// transcripts:list and never undefined:
+// Fields that drive the sidebar's work-queue chips, never undefined — from
+// transcripts:list for a transcript row, and pinned to false by
+// deriveMeetingFromRecording for a recording, where their absence is a finding:
 //   hasAudio        — re-transcribing is possible at all
 //   model           — which model produced it; absent on older/pasted ones
 //   enhancedAt      — Enhance has already run
@@ -53,11 +59,10 @@ let meetings = [];
 let activeMeetingId = null;
 let summaryRenderMode = "auto";       // 'auto' | 'structured' | 'markdown'
 let contextMenu = null;               // { x, y, meetingId } | null
-const summarizeRunning = new Set();   // meetingIds with a summarize job in flight
-const transcribeRunning = new Set();  // meetingIds with a transcribe job in flight
-
+// No `transcribeRunning` / `summarizeRunning` sets: job state lives in the
+// queue (jobsApi), and the cards read it through activeJobFor. The two Sets
+// that used to sit here were declared, checked, and never added to.
 function deriveStatus(m) {
-  if (transcribeRunning.has(m.id)) return "transcribing";
   if (m.hasSummary) return "summarized";
   if (m.hasTranscript) return "transcribed";
   return "audio_only";
@@ -115,6 +120,66 @@ function deriveMeetingFromTranscript(item) {
   };
   m.status = deriveStatus(m);
   return m;
+}
+// Pure mapping from one `record:list` row to a meeting record. A recording that
+// has not been transcribed has no `.txt` to open, so the wav path is its id —
+// which is also what every `record:*` handler takes. Kept next to its transcript
+// twin so the two field lists stay visibly in sync.
+function deriveMeetingFromRecording(item) {
+  if (!item || !item.filePath) return null;
+  const rawDate = item.createdAt || item.mtime;
+  const date = rawDate ? new Date(rawDate) : new Date();
+  const m = {
+    id: item.filePath,
+    // The on-disk stem verbatim — NOT through stripMeetPrefix like the
+    // transcript twin. This title is what the rename popup pre-fills, and
+    // `record:rename` writes the submitted text straight to the filename: a
+    // stripped prefix would silently rename the wav and break its pairing.
+    title: (item.filename || "").replace(/\.wav$/i, ""),
+    project: undefined,
+    date: isNaN(date.getTime()) ? new Date() : date,
+    durationSec: undefined,
+    // record:list knows the byte size but not the duration — the card shows it
+    // so an audio-only row is not left with nothing but a timestamp.
+    sizeBytes: Number(item.size) || 0,
+    audioPath: item.filePath,
+    transcriptPath: null,
+    summaryPath: undefined,
+    participants: [],
+    hasAudio: true,
+    // The three flags every work queue reads. False here is a finding, not a
+    // default: there is no transcript, so there is nothing to enhance,
+    // summarize or re-transcribe from.
+    hasTranscript: false,
+    hasSummary: false,
+    hasSpokenTurns: false,
+    language: undefined,
+    model: undefined,
+    enhancedAt: undefined,
+    readFailed: false,
+    header: "",
+    progress: undefined,
+    failedReason: undefined,
+  };
+  m.status = deriveStatus(m);
+  return m;
+}
+
+// The union the library renders: every transcript, plus every recording that
+// does not have one. Pure, so the dedup rule below is testable without IPC.
+function mergeMeetings(transcriptRows, recordingRows) {
+  const fromTranscripts = (transcriptRows || []).map(deriveMeetingFromTranscript).filter(Boolean);
+  // A legacy recording is "<base>-YYYYMMDD-HHMMSS.wav" while its transcript is
+  // "<base>.txt", so `record:list` reports hasTranscript false for a wav that
+  // `transcripts:list` already claims as its audio. Without this check that
+  // recording gets a second, transcript-less card.
+  const claimed = new Set(fromTranscripts.map((m) => m.audioPath).filter(Boolean));
+  const fromRecordings = (recordingRows || [])
+    .filter((r) => r && !r.hasTranscript && !claimed.has(r.filePath))
+    .map(deriveMeetingFromRecording)
+    .filter(Boolean);
+  // No global sort: groupMeetingsByDate already orders every bucket by newest.
+  return [...fromTranscripts, ...fromRecordings];
 }
 // ── end meeting record ──
 
@@ -702,6 +767,11 @@ const libraryList = document.getElementById("library-list");
 const libraryEmpty = document.getElementById("library-empty");
 const libraryEmptyText = document.getElementById("library-empty-text");
 const libraryCount = document.getElementById("library-count");
+const librarySelection = document.getElementById("library-selection");
+const librarySelectionLabel = document.getElementById("library-selection-label");
+const librarySelectionAll = document.getElementById("library-selection-all");
+const audioOnlyState = document.getElementById("audio-only-state");
+const audioOnlyTitle = document.getElementById("audio-only-title");
 
 // Audio player DOM refs
 const audioPlayer    = document.getElementById("audio-player");
@@ -813,7 +883,13 @@ function playerSetPlaying(playing) {
 
 async function playerShow(filePath) {
   if (!PLAYER_OK) return;
-  const audioPath = await api.getAudioPath(filePath);
+  playerShowPath(await api.getAudioPath(filePath));
+}
+
+// An audio-only meeting IS its wav — its id is the path — so there is no
+// transcript to resolve the audio from and nothing to await.
+function playerShowPath(audioPath) {
+  if (!PLAYER_OK) return;
   if (!audioPath) { audioPlayer.classList.add("hidden"); return; }
   audioEl.src = `file://${encodeURI(audioPath)}`;
   audioEl.load();
@@ -1381,9 +1457,50 @@ btnLibrary.addEventListener("click", () => {
   btnLibrary.classList.toggle("active", libraryOpen);
 });
 
-async function loadLibrary() {
-  const items = await api.listTranscripts();
-  meetings = (items || []).map(deriveMeetingFromTranscript).filter(Boolean);
+// What the library actually cares about in a recordings list: which files exist
+// and whether each has a transcript. Deliberately not size or mtime — a wav
+// being recorded into changes both several times a second.
+function recordingsSignature(recs) {
+  return (recs || []).map((r) => `${r?.filePath}|${r?.hasTranscript ? 1 : 0}`).join("\n");
+}
+let lastRecordingsSig = null;
+
+async function loadLibrary(prefetchedRecs) {
+  // Two sources, one list. `record:list` already returns every field a card
+  // needs, so the union happens here rather than inside `transcripts:list` —
+  // which would mean a second wav scan and a changed contract for its four
+  // other callers.
+  const [items, recs] = await Promise.all([
+    api.listTranscripts(),
+    // A failing recordings scan must cost the recordings, not the whole library.
+    prefetchedRecs || (recApi ? recApi.list().catch(() => []) : []),
+  ]);
+  lastRecordingsSig = recordingsSignature(recs);
+  meetings = mergeMeetings(items, recs);
+  // Drop selections for recordings that left the disk, so the batch CTA never
+  // counts a row nobody can see.
+  const present = new Set(meetings.map((m) => m.id));
+  for (const id of Array.from(selectedRecordings)) {
+    if (!present.has(id)) selectedRecordings.delete(id);
+  }
+  // The recording on screen is gone from the list. Two very different reasons:
+  // its transcription finished (a transcript row now claims that wav), or the
+  // file left the disk. Nothing else notices either.
+  if (audioOnlyState && !audioOnlyState.classList.contains("hidden")
+      && !meetings.some((m) => m.id === activeMeetingId)) {
+    const transcribed = meetings.find((m) => m.audioPath === activeMeetingId);
+    if (transcribed) {
+      // Exactly what the user asked for when they hit Transcribe — open it
+      // rather than making them find it again in the list.
+      api.openFromLibrary(transcribed.id);
+    } else {
+      audioOnlyState.classList.add("hidden");
+      emptyState.classList.remove("hidden");
+      if (PLAYER_OK) playerHide();
+      activeMeetingId = null;
+      activeLibraryPath = null;
+    }
+  }
   renderMeetings();
 }
 
@@ -1396,7 +1513,10 @@ let chatHistory = [];  // { role: 'user'|'assistant', content: string }[]
 let chatTarget = null;
 
 // ─── Sidebar: filter + search state ───────────────────────────────────────────
-let activeFilter = "all";   // 'all' | 'retranscribe' | 'enhance' | 'summarize' (+ dormant 'audio')
+let activeFilter = "all";   // 'all' | 'transcribe' | 'retranscribe' | 'enhance' | 'summarize' (+ dormant 'audio')
+// Meeting ids checked for the batch transcribe CTA. Only audio-only rows can be
+// checked, so every id in here is a wav path — exactly what `record:*` takes.
+const selectedRecordings = new Set();
 let searchQuery = "";
 let searchDebounceTimer = null;
 let contentMatches = new Map(); // filePath -> snippet (from full-text content search)
@@ -1430,11 +1550,17 @@ function meetingMatchesFilter(m, filter) {
   // summary and audio checks never even ran — so all three exclude the row. It
   // still shows under All, which is the branch above.
   if (m.readFailed === true) return false;
+  // The one queue an audio-only row belongs to, and the only queue that is not
+  // about improving a transcript that already exists.
+  if (filter === "transcribe") return m.hasTranscript === false;
   // Weak model AND re-transcribable: the Re-transcribe menu item is gated on
   // hasAudio too, so without it the queue would list meetings you cannot act on.
   if (filter === "retranscribe") return m.hasAudio === true && modelWorthRedoing(m.model);
   if (filter === "enhance") return !m.enhancedAt && m.hasSpokenTurns === true;
-  if (filter === "summarize") return !m.hasSummary;
+  // The hasTranscript gate is what keeps un-transcribed recordings out: they
+  // have no summary either, so `!m.hasSummary` alone would sweep every one of
+  // them into a queue whose action they cannot run.
+  if (filter === "summarize") return m.hasTranscript === true && !m.hasSummary;
   return true;
 }
 
@@ -1463,6 +1589,7 @@ function highlightSnippet(snippet, q) {
 // the three queue lines are the "you are done" case, not the "nothing here" one.
 const FILTER_EMPTY_TEXT = {
   all: "No meetings yet",
+  transcribe: "Nothing to transcribe",
   retranscribe: "Nothing to re-transcribe",
   enhance: "Nothing to enhance",
   summarize: "Nothing to summarize",
@@ -1485,9 +1612,10 @@ function markActiveChip(filter) {
 }
 
 function computeFilterCounts(list) {
-  const counts = { all: list.length, audio: 0, retranscribe: 0, enhance: 0, summarize: 0 };
+  const counts = { all: list.length, audio: 0, transcribe: 0, retranscribe: 0, enhance: 0, summarize: 0 };
   for (const m of list) {
     if (m.hasAudio) counts.audio++;
+    if (meetingMatchesFilter(m, "transcribe")) counts.transcribe++;
     if (meetingMatchesFilter(m, "retranscribe")) counts.retranscribe++;
     if (meetingMatchesFilter(m, "enhance")) counts.enhance++;
     if (meetingMatchesFilter(m, "summarize")) counts.summarize++;
@@ -1547,12 +1675,14 @@ function renderMeetings() {
 
   // Update filter chip counts (off the unfiltered/unsearched meeting list).
   const counts = computeFilterCounts(meetings);
-  for (const kind of ["all", "retranscribe", "enhance", "summarize"]) {
+  for (const kind of ["all", "transcribe", "retranscribe", "enhance", "summarize"]) {
     const el = document.querySelector(`.filter-count[data-count="${kind}"]`);
     // `?? 0` so a kind/chip mismatch shows a wrong number rather than painting
     // the literal string "undefined" into the chip.
     if (el) el.textContent = String(counts[kind] ?? 0);
   }
+
+  renderSelectionBar();
 
   // Apply filter + search.
   const visible = meetings.filter(
@@ -1586,12 +1716,98 @@ function renderMeetings() {
   }
 }
 
+// ─── Batch selection ─────────────────────────────────────────────────────────
+// The bar is the whole UI for the selection, so it hides at zero rather than
+// sitting there saying "0 selected" above a library nobody is batching.
+function renderSelectionBar() {
+  if (!librarySelection) return;
+  const n = selectedRecordings.size;
+  librarySelection.classList.toggle("hidden", n === 0);
+  if (librarySelectionLabel) {
+    librarySelectionLabel.textContent = n === 1 ? "1 recording selected" : `${n} recordings selected`;
+  }
+  // Hidden once everything selectable on screen is already picked, so the link
+  // never sits there doing nothing.
+  const all = selectableVisible();
+  librarySelectionAll?.classList.toggle("hidden", all.length === 0 || all.every((m) => selectedRecordings.has(m.id)));
+}
+
+// The rows a user could tick right now: transcript-less, and past both the
+// active chip and the search box. Select all must not reach beyond what is on
+// screen — the bar's count is the only feedback there is.
+function selectableVisible() {
+  return meetings.filter(
+    (m) => m.hasTranscript === false
+      && meetingMatchesFilter(m, activeFilter)
+      && meetingMatchesSearch(m, searchQuery),
+  );
+}
+
+// Hand the paths to the Record tab's transcribe-settings screen — the same
+// entry point the ⋯ menu's Transcribe… uses, and the same one the removed
+// Record sidebar used for its batch CTA. N ≥ 1 is all one case there.
+function sendToTranscribeSettings(paths) {
+  if (!paths.length) return;
+  document.querySelector('.tab-btn[data-tab="record"]')?.click();
+  window.recordTab?.enterTranscribeSettings?.(paths);
+}
+
+document.getElementById("library-selection-transcribe")?.addEventListener("click", () => {
+  const paths = Array.from(selectedRecordings);
+  // Cleared before the hand-off, not after: the settings screen owns the batch
+  // from here, and a selection left behind would re-send on the next click.
+  selectedRecordings.clear();
+  renderMeetings();
+  sendToTranscribeSettings(paths);
+});
+
+document.getElementById("library-selection-delete")?.addEventListener("click", async () => {
+  const paths = Array.from(selectedRecordings);
+  if (!paths.length) return;
+  if (!recApi) return;
+  const result = await recApi.deleteMany(paths);
+  // Cancelling the confirmation is not a failure and keeps the selection.
+  if (result?.canceled) return;
+  if (!result?.ok) {
+    window.alert(`Couldn't delete the recordings: ${result?.error || "unknown error"}`);
+  } else if (result.errors?.length) {
+    // ok:true only means *something* was deleted. Reporting the whole batch as
+    // gone would leave files on disk the user believes they removed.
+    window.alert(`${result.errors.length} of ${paths.length} recordings could not be deleted: ${result.errors[0].error}`);
+  }
+  // Reload either way: a partial failure still removed some of them.
+  selectedRecordings.clear();
+  loadLibrary();
+});
+
+document.getElementById("library-selection-all")?.addEventListener("click", () => {
+  for (const m of selectableVisible()) selectedRecordings.add(m.id);
+  renderMeetings();
+});
+
+document.getElementById("library-selection-clear")?.addEventListener("click", () => {
+  selectedRecordings.clear();
+  renderMeetings();
+});
+
 function buildMeetingCard(m) {
   const isActive = m.id === activeMeetingId;
+  // The transcribe lane keys its jobs on the wav path, which is exactly a
+  // recording's id.
+  const transcribing = m.hasTranscript === false && Boolean(activeJobFor("transcribe", m.id));
+  // Only a recording without a transcript is batch-transcribable, so only those
+  // rows get a checkbox — a library-wide multi-select with one applicable
+  // action would just be a trap. One already in the transcribe lane is out too:
+  // re-submitting it queues the same wav twice, and deleting it kills the run.
+  const selectable = m.hasTranscript === false && !transcribing;
+  const selected = selectable && selectedRecordings.has(m.id);
   const card = document.createElement("div");
   card.className = "meeting-card" + (isActive ? " active" : "");
   card.dataset.meetingId = m.id;
-  card.dataset.status = m.status;
+  // The status a card paints is not always the one derived from disk: a
+  // transcribe job in flight is queue state, which deriveStatus cannot see.
+  const status = transcribing ? "transcribing" : m.status;
+  card.dataset.status = status;
 
   // Show a content-match snippet only when the query hit the body but not the
   // title/participants (otherwise the match is already obvious from the card).
@@ -1605,6 +1821,7 @@ function buildMeetingCard(m) {
   card.innerHTML = `
     <span class="meeting-active-bar"></span>
     <div class="meeting-card-row1">
+      ${selectable ? `<label class="meeting-pick"><input type="checkbox" ${selected ? "checked" : ""} aria-label="Select ${escapeHtml(m.title || "recording")} for batch transcription" /><span class="meeting-pick-box" aria-hidden="true"></span></label>` : ""}
       <span class="meeting-title">${escapeHtml(m.title || "Untitled")}</span>
       ${hasMeta ? `<button class="meeting-info" type="button" title="Transcript details" aria-expanded="false">${iconSvg("info", { size: 12 })}</button>` : ""}
       <button class="meeting-more" type="button" aria-label="More actions">${iconSvg("more", { size: 14 })}</button>
@@ -1613,14 +1830,15 @@ function buildMeetingCard(m) {
     <div class="meeting-card-row2">
       <span class="meeting-time tnum">${escapeHtml(formatMeetingStamp(m.date))}</span>
       ${m.durationSec ? `<span class="dot">·</span><span class="meeting-duration tnum">${escapeHtml(formatMeetingDuration(m.durationSec))}</span>` : ""}
+      ${!m.durationSec && m.sizeBytes ? `<span class="dot">·</span><span class="meeting-duration tnum">${escapeHtml(formatMeetingSize(m.sizeBytes))}</span>` : ""}
       ${m.participants?.length ? avatarStackHtml(m.participants, 3) : ""}
     </div>
-    ${m.status === "transcribing" ? `
+    ${status === "transcribing" ? `
       <div class="meeting-progress">
         <div class="meeting-progress-bar" style="width: ${Math.round((m.progress || 0.4) * 100)}%"></div>
       </div>` : ""}
     <div class="meeting-card-row3">
-      ${statusPillHtml(m.status)}
+      ${statusPillHtml(status)}
       <div class="artifact-chips">
         ${modelChipHtml(m)}
         <span class="artifact-chip" data-kind="audio" data-present="${m.hasAudio ? "true" : "false"}" title="Audio">${iconSvg("mic", { size: 11 })}</span>
@@ -1643,6 +1861,20 @@ function buildMeetingCard(m) {
     // Anchor the menu just below the ⋯ button.
     const r = moreBtn.getBoundingClientRect();
     openMeetingMenu(r.right, r.bottom + 4, m);
+  });
+
+  // On the label, not the input: the input is visually replaced by the box span,
+  // so the click the user makes never starts on the input. Stopping it only
+  // there caught the label's synthetic forward, while the real click had already
+  // bubbled to the card and opened the meeting.
+  card.querySelector(".meeting-pick")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+  });
+  const pick = card.querySelector(".meeting-pick input");
+  pick?.addEventListener("change", (e) => {
+    if (e.target.checked) selectedRecordings.add(m.id);
+    else selectedRecordings.delete(m.id);
+    renderSelectionBar();
   });
 
   const metaBtn = card.querySelector(".meeting-info");
@@ -1736,9 +1968,15 @@ function openMeetingMenu(x, y, m) {
   const left = Math.max(8, Math.min(x, window.innerWidth - W - 8));
   const top = Math.max(8, Math.min(y, window.innerHeight - H - 8));
 
+  // An audio-only row is a recording with no transcript on disk. Everything
+  // that reads or writes a `.txt` is unavailable on it, and every remaining
+  // action goes through `record:*` against the wav rather than `transcripts:*`.
+  const noTranscript = m.hasTranscript === false;
   const summarizeLabel = m.hasSummary ? "Re-summarize" : "Summarize";
-  const audioDisabled = !m.hasAudio;
-  const summaryDisabled = !m.hasSummary;
+  // Both of these greyed out silently before; a control that does that just
+  // looks broken. One string per cause, driving the gate and the tooltip.
+  const audioReason = m.hasAudio ? "" : "No audio file for this meeting";
+  const summaryReason = m.hasSummary ? "" : "No summary yet";
   // Every one of these changes the file or its name under a run that reads it
   // from disk, and the run would be thrown away at the end.
   const enhancing = Boolean(activeJobFor("enhance", m.id));
@@ -1747,12 +1985,20 @@ function openMeetingMenu(x, y, m) {
   // fallback's fabricated defaults, so Summarize would fail on the same read —
   // and each reason is spelled out, because a control that greys out without
   // saying why just looks broken.
-  const summarizeReason = m.readFailed ? "Transcript could not be read" : "";
-  const enhanceReason = m.readFailed ? "Transcript could not be read"
+  const summarizeReason = noTranscript ? "Not transcribed yet"
+    : m.readFailed ? "Transcript could not be read"
+    : "";
+  const enhanceReason = noTranscript ? "Not transcribed yet"
+    : m.readFailed ? "Transcript could not be read"
     : enhancing ? "Enhance is already running on this transcript"
     : !m.hasSpokenTurns ? "No spoken turns to enhance"
     : "";
   const enhanceDisabled = Boolean(enhanceReason);
+  // The same wav is the transcribe queue's job key, so a run already in flight
+  // is visible from here.
+  const transcribeReason = activeJobFor("transcribe", m.audioPath || m.id)
+    ? "A transcription is already running on this recording" : "";
+  const transcriptReason = noTranscript ? "Not transcribed yet" : "";
 
   const root = document.createElement("div");
   root.id = "meeting-menu-root";
@@ -1771,20 +2017,25 @@ function openMeetingMenu(x, y, m) {
         <span class="meeting-menu-icon">${iconSvg("pencil", { size: 13 })}</span>
         <span>Rename…</span>
       </button>
-      <button class="meeting-menu-item" data-action="retranscribe" type="button" role="menuitem" ${audioDisabled || enhancing ? "disabled" : ""}>
+      <button class="meeting-menu-item" data-action="retranscribe" type="button" role="menuitem" ${audioReason || enhancing || transcribeReason ? "disabled" : ""}${reasonTitle(transcribeReason || audioReason)}>
         <span class="meeting-menu-icon">${iconSvg("mic", { size: 13 })}</span>
-        <span>Re-transcribe…</span>
+        <span>${noTranscript ? "Transcribe…" : "Re-transcribe…"}</span>
       </button>
+      ${noTranscript ? `
+      <button class="meeting-menu-item" data-action="reveal" type="button" role="menuitem">
+        <span class="meeting-menu-icon">${iconSvg("folder", { size: 13 })}</span>
+        <span>Show in Finder</span>
+      </button>` : ""}
       <div class="meeting-menu-divider"></div>
-      <button class="meeting-menu-item danger" data-action="delete-audio" type="button" role="menuitem" ${audioDisabled || enhancing ? "disabled" : ""}>
+      <button class="meeting-menu-item danger" data-action="delete-audio" type="button" role="menuitem" ${audioReason || enhancing ? "disabled" : ""}${reasonTitle(audioReason)}>
         <span class="meeting-menu-icon">${iconSvg("trash", { size: 13 })}</span>
         <span>Delete audio</span>
       </button>
-      <button class="meeting-menu-item danger" data-action="delete-transcript" type="button" role="menuitem" ${enhancing ? "disabled" : ""}>
+      <button class="meeting-menu-item danger" data-action="delete-transcript" type="button" role="menuitem" ${enhancing || transcriptReason ? "disabled" : ""}${reasonTitle(transcriptReason)}>
         <span class="meeting-menu-icon">${iconSvg("trash", { size: 13 })}</span>
         <span>Delete transcript</span>
       </button>
-      <button class="meeting-menu-item danger" data-action="delete-summary" type="button" role="menuitem" ${summaryDisabled || enhancing ? "disabled" : ""}>
+      <button class="meeting-menu-item danger" data-action="delete-summary" type="button" role="menuitem" ${summaryReason || enhancing ? "disabled" : ""}${reasonTitle(summaryReason)}>
         <span class="meeting-menu-icon">${iconSvg("trash", { size: 13 })}</span>
         <span>Delete summary</span>
       </button>
@@ -1807,7 +2058,13 @@ function openMeetingMenu(x, y, m) {
         const card = libraryList.querySelector(`[data-meeting-id="${CSS.escape(m.id)}"]`);
         const newTitle = await openRenamePopup(m.title, card?.getBoundingClientRect());
         if (!newTitle || newTitle === m.title) return;
-        const result = await api.renameTranscript(m.id, newTitle);
+        // Two renames, two handlers: `record:rename` moves the wav and its notes
+        // sidecar, `transcripts:rename` moves the .txt and everything paired
+        // with it. Both answer { ok, newFilePath }, so the id fixups below are
+        // shared.
+        const result = noTranscript
+          ? await recApi?.rename(m.id, newTitle)
+          : await api.renameTranscript(m.id, newTitle);
         if (!result?.ok) {
           window.alert(`Couldn't rename: ${result?.error || "unknown error"}`);
           return;
@@ -1815,17 +2072,27 @@ function openMeetingMenu(x, y, m) {
         if (state.filePath === m.id) state.filePath = result.newFilePath;
         if (activeMeetingId === m.id) activeMeetingId = result.newFilePath;
         if (activeLibraryPath === m.id) activeLibraryPath = result.newFilePath;
+        // The batch selection is keyed on the path too, and loadLibrary prunes
+        // ids that no longer exist — without this the row silently unticks.
+        if (selectedRecordings.delete(m.id)) selectedRecordings.add(result.newFilePath);
         summaryStore.delete(m.id);
-        loadLibrary();
-      } else if (action === "retranscribe") {
-        // Re-transcribe lives on the Record tab; hand it the source audio and
-        // jump there so the user lands on the transcribe-settings screen.
-        if (m.audioPath) {
-          document.querySelector('.tab-btn[data-tab="record"]')?.click();
-          window.recordTab?.enterTranscribeSettings?.([m.audioPath]);
+        await loadLibrary();
+        // The open pane kept the old name, and the player kept a src pointing at
+        // a file that has moved.
+        const renamed = getMeetingById(result.newFilePath);
+        if (noTranscript && renamed && activeMeetingId === renamed.id
+            && audioOnlyState && !audioOnlyState.classList.contains("hidden")) {
+          if (audioOnlyTitle) audioOnlyTitle.textContent = renamed.title || "Recording";
+          playerShowPath(renamed.audioPath);
         }
+      } else if (action === "retranscribe") {
+        // Transcription lives on the Record tab; hand it the source audio and
+        // jump there so the user lands on the transcribe-settings screen.
+        if (m.audioPath) sendToTranscribeSettings([m.audioPath]);
+      } else if (action === "reveal") {
+        recApi?.showInFinder(m.id);
       } else if (action === "delete-audio") {
-        await deleteMeetingArtifact(m, "audio");
+        await deleteMeetingArtifact(m, noTranscript ? "recording" : "audio");
       } else if (action === "delete-transcript") {
         await deleteMeetingArtifact(m, "transcript");
       } else if (action === "delete-summary") {
@@ -1842,7 +2109,13 @@ document.addEventListener("keydown", (e) => {
 
 async function deleteMeetingArtifact(m, kind) {
   let result;
-  if (kind === "audio") {
+  if (kind === "recording") {
+    // No transcript to resolve the audio from: the meeting id IS the wav.
+    result = await recApi?.delete(m.id);
+    // The pane and the player are reset by loadLibrary below, which is also
+    // what an external delete goes through.
+    if (result?.ok) selectedRecordings.delete(m.id);
+  } else if (kind === "audio") {
     result = await api.deleteAudioOnly(m.id);
   } else if (kind === "summary") {
     result = await api.deleteSummaryOnly(m.id);
@@ -1952,12 +2225,45 @@ function openRenamePopup(currentTitle, anchorRect) {
 
 async function handleMeetingClick(m) {
   if (m.id === activeMeetingId) return;
+  // No `.txt` to open: `transcripts:openFile` would fail on a wav path, and
+  // there is nothing for the editor to load. Play it instead.
+  if (m.hasTranscript === false) return showAudioOnly(m);
   // Flushing and moving the selection both belong to the file:opened path
   // (flushBeforeReplace, then loadContent → setActiveMeetingId): doing either
   // here as well prompted twice for one click, and left the sidebar pointing at
   // a note that was never opened when the user cancelled.
   await api.openFromLibrary(m.id);
 }
+
+// Selecting an audio-only recording replaces whatever the editor held, so it
+// owes the open transcript the same flush the file:opened path performs.
+async function showAudioOnly(m) {
+  if (!(await flushBeforeReplace())) return;
+  clearTimeout(autosaveTimer);
+  state.filePath = null;
+  state.savedContent = "";
+  state.baselineContent = "";
+  setDirty(false);
+  editor.value = "";
+  editor.classList.add("hidden");
+  editorToolbar.classList.add("hidden");
+  emptyState.classList.add("hidden");
+  summaryRail.classList.add("hidden");
+  if (PLAYER_OK) transcriptView.classList.add("hidden");
+  setActiveMeetingId(m.id);
+  // showEditor() is the only thing that enables these, and nothing turns them
+  // back off — they would act on an empty buffer with no path.
+  btnSaveAs.disabled = true;
+  btnExport.disabled = true;
+  if (audioOnlyTitle) audioOnlyTitle.textContent = m.title || "Recording";
+  audioOnlyState?.classList.remove("hidden");
+  playerShowPath(m.audioPath);
+}
+
+document.getElementById("audio-only-transcribe")?.addEventListener("click", () => {
+  const m = getMeetingById(activeMeetingId);
+  if (m?.audioPath) sendToTranscribeSettings([m.audioPath]);
+});
 
 // ─── Sidebar formatters ──────────────────────────────────────────────────────
 // Date order and clock are view preferences, stored and applied exactly like
@@ -2056,6 +2362,20 @@ function timeFormatPref() {
 
 function formatMeetingStamp(date) {
   return formatMeetingDateTime(date, dateOrderPref(), timeFormatPref());
+}
+
+// An audio-only row has no duration — `record:list` reports bytes, not seconds,
+// and deriving seconds from bytes would only be right for wavs this app wrote
+// itself. Bytes are a fact; a guessed runtime is not.
+function formatMeetingSize(bytes) {
+  if (!bytes) return "";
+  const kb = bytes / 1024;
+  // Below a megabyte the MB form rounds to "0.0 MB", which reads as an empty
+  // file — exactly the case (a truncated recording) worth telling apart.
+  if (kb < 1024) return `${Math.max(1, Math.round(kb))} KB`;
+  const mb = kb / 1024;
+  if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`;
+  return mb >= 10 ? `${Math.round(mb)} MB` : `${mb.toFixed(1)} MB`;
 }
 
 function formatMeetingDuration(seconds) {
@@ -2169,6 +2489,7 @@ const ICON_PATHS = {
   trash:   '<polyline points="3 6 5 6 21 6"/><path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/>',
   pencil:  '<path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/>',
   info:    '<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>',
+  folder:  '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>',
 };
 
 function iconSvg(name, opts = {}) {
@@ -3277,10 +3598,24 @@ document.querySelectorAll(".filter-chip").forEach((chip) => {
 api.watchTranscripts();
 loadLibrary();
 api.onTranscriptsChanged(loadLibrary);
+// Recordings are half the library now, so it has to watch their folder too.
+// `record:watch` is idempotent in main, so the Record tab starting the same
+// watcher costs nothing.
+recApi?.watch();
+recApi?.onListChanged(async () => {
+  // fs.watch fires for every write, so a recording in progress reports a change
+  // several times a second for as long as it runs. Only the file set matters
+  // here; reloading on a growing wav would re-read every transcript on disk and
+  // rebuild the whole list, over and over, for a card that did not change.
+  const recs = await recApi.list().catch(() => []);
+  if (recordingsSignature(recs) === lastRecordingsSig) return;
+  loadLibrary(recs);
+});
 
 // ─── UI helpers ───────────────────────────────────────────────────────────────
 function showEditor() {
   emptyState.classList.add("hidden");
+  audioOnlyState?.classList.add("hidden");
   editor.classList.remove("hidden");
   editorToolbar.classList.remove("hidden");
   btnSaveAs.disabled = false;

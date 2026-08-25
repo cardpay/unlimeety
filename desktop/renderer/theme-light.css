@@ -164,11 +164,6 @@
 
 /* record.css ---------------------------------------------------------------- */
 
-/* Selected recording row — lime wash → purple wash */
-[data-theme="light"] .record-sb-card.is-selected {
-    background: rgba(107, 69, 232, 0.07);
-}
-
 /* Source card "checked" border literal */
 [data-theme="light"] .record-source-card:has(input:checked) {
     border-color: rgba(107, 69, 232, 0.35);
@@ -176,11 +171,6 @@
 /* Toggle knob reads white once the track turns purple */
 [data-theme="light"] .record-source-card:has(input:checked) .record-source-switch::after {
     background: #fff;
-}
-
-/* Big batch CTA glow */
-[data-theme="light"] .record-sb-cta-btn {
-    box-shadow: 0 2px 12px rgba(107, 69, 232, 0.22);
 }
 
 /* Active model card lime literals → purple */
