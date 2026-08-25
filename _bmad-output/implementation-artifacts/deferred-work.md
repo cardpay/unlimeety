@@ -126,3 +126,15 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-library-workflow-filters.md`
   summary: Acting on a work queue makes the open meeting's card vanish from under the user — finishing Enhance on the meeting you are reading removes it from the active `To enhance` queue mid-session.
   evidence: `renderMeetings` filters purely on `meetingMatchesFilter` (`renderer/app.js:1456-1459`), with no exemption for `activeMeetingId`. Leaving the queue is the correct outcome for the item; the card disappearing while its transcript is open in the editor is the jarring part. Keeping the active meeting pinned regardless of the filter would fix it, at the cost of a row that does not match the chip.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-summary-rail-all-presets.md`
+  summary: The post-generation result modal still renders every section flat — it has its own two-branch `renderModalSection` (`desktop/renderer/app.js:3752`) that only knows Action Items and pipe tables.
+  evidence: The rail now draws 41 section kinds through `RAIL_SECTIONS`, so the same summary reads richly sectioned in the rail and flat in the modal the user sees first. The modal also duplicates `parseTableRows`/`renderTableHtml` with a looser separator regex, and discards prose around a table. Left alone because this spec scopes the work to the right-hand rail.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-summary-rail-all-presets.md`
+  summary: Nested bullets are flattened into siblings by `partitionBullets`, which also inflates the section count badge.
+  evidence: `- Roadmap` / `  - Q3 slip` renders as two rows counted as 2. No preset asks for nesting, so this only bites if a model volunteers it.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-summary-rail-all-presets.md`
+  summary: `.rail-brief` in `desktop/renderer/style.css` has had no consumer for some time.
+  evidence: The deleted `brief` branch emitted `rail-brief-md`, which never had a rule at all; `.rail-brief` was already dead before this change and was left untouched to keep the diff to the work at hand.
