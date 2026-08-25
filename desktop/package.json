@@ -1,6 +1,6 @@
 {
     "name": "unlimeety-desktop",
-    "version": "1.4.0",
+    "version": "1.5.0-beta",
     "description": "Companion desktop app for Unlimeety",
     "main": "main.js",
     "scripts": {
@@ -27,7 +27,7 @@
             "summary-frontmatter.js",
             "glossary.js",
             "transcript-enhance.js",
-    "job-queue.js",
+            "job-queue.js",
             "renderer/**",
             "build/**"
         ],
