@@ -1,13 +1,13 @@
 'use strict';
 // node test/language-pickers.test.js
 //
-// Three segmented controls let the user pick a transcription language: the Live
-// tab's setup form, the Record tab's batch settings screen, and the Record tab's
-// recording screen. They are three copies of one vocabulary, which is exactly
-// the shape that rots — add Italian to one and the other two silently offer a
-// different app. The Record pair is worse than cosmetic: both write the same
+// Four segmented controls let the user pick a transcription language: the Live
+// tab's setup form, the batch settings screen, and the Record tab's setup and
+// recording screens. They are four copies of one vocabulary, which is exactly
+// the shape that rots — add Italian to one and the other three silently offer a
+// different app. The Record ones are worse than cosmetic: they all write the same
 // `batchSettings.language`, so a code only one of them lists is a value the
-// other cannot display as selected.
+// others cannot display as selected.
 //
 // Source-text assertions are the only reachable kind here: the markup is static
 // and the values live in index.html, not in any module a test can require.
@@ -24,7 +24,10 @@ const src = fs.readFileSync(HTML, 'utf-8');
 // change to index.html has to be a deliberate change here too.
 const EXPECTED = ['ru', 'en', 'sr', 'es', 'de', 'fr', 'auto'];
 
-const PICKERS = ['live-language', 'ts-lang-seg', 'record-rec-lang-seg'];
+// Four now: Live's setup, the batch settings screen, and the Record tab's two
+// (setup and recording screen). The Record pair writes one setting, so a code
+// only one of them lists is a value the other cannot show as selected.
+const PICKERS = ['live-language', 'ts-lang-seg', 'record-setup-lang-seg', 'record-rec-lang-seg'];
 
 /// The markup of one `id="…"` container, brace-free so a nested element cannot
 /// truncate it: everything from the id up to the matching close of that div.
