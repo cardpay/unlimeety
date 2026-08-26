@@ -182,3 +182,23 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-recordings-in-meetings-list.md`
   summary: The `audio` branch in `meetingMatchesFilter` and its `counts.audio` are still computed for a chip that does not exist.
   evidence: Pre-existing (`spec-library-workflow-filters.md` recorded the same shortcut), and untouched here: this change added `To transcribe`, which is `hasTranscript === false`, not `hasAudio === true`. The two are different queues — most rows with audio are already transcribed — so the dormant branch was not repurposed. It stays a trap for whoever adds an audio chip back.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-record-live-parity.md`
+  summary: `live:saveTranscript`'s own chained re-transcription overwrites the transcript it just wrote and drops that session's calendar participants.
+  evidence: `main.js:3064` calls `queueAutoTranscribe(wavPath, language)` two lines below where `participants` (calendar ∪ speakers) was computed at `main.js:2999-3002` and written into the header at `main.js:3028`. The queued job writes `recordingTranscriptPath(wavPath)` — byte-for-byte the path `live:saveTranscript` wrote at `main.js:3043` — and rebuilds the header from `mergeParticipants([], speakerParticipants)`, so a Live session's attendee names vanish minutes after being saved. Pre-existing: this spec added the optional third parameter but deliberately left the Live caller at two arguments (`Never`: do not touch the Live tab). The fix is that one call site, `queueAutoTranscribe(wavPath, language, calendarParticipants)`.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-record-live-parity.md`
+  summary: Recordings that end without a live Record renderer — a quit during Stop & save, or a helper-crash salvage — are never auto-queued, because the submit lives in the renderer.
+  evidence: `record:stop` (`main.js:3352`), the `proc.on('exit')` salvage (`main.js:3329`) and the `before-quit` SIGTERM all produce a transcribable wav, but the queueing decision is taken in `record.js`'s `recordSaved` handler, which needs the renderer alive and the language it holds. Live does the equivalent in main (`main.js:3064`) because main already knows its language. Degrades gracefully — the wav still appears under "To transcribe" in the Meetings list — so it is a gap, not a loss. Closing it means main owning the language (a persisted setting or a renderer-pushed value), which is a design change beyond this story.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-record-live-parity.md`
+  summary: Neither setup screen ever shows real permission state, though main can read it.
+  evidence: The deleted `.record-perm-strip` hard-coded "Permissions granted · Microphone ✓ · Screen Recording ✓ · Calendar ✓" with no JS behind it, so removing it retired a lie rather than a feature — but its replacement, Live's `.live-perm-hint`, is equally static and always narrates first launch. `main.js:2630` already calls `systemPreferences.getMediaAccessStatus`; one IPC handler would let both tabs say "Microphone: not granted" when that is the truth.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-record-live-parity.md`
+  summary: A transcript produced with auto-detect records `Language: auto` in its header instead of the language actually detected.
+  evidence: `main.js:3966` writes the requested language verbatim and `main.js:1752` parses it back into `info.language`, which the UI shows as the transcript's language. Already reachable through the Live tab's Auto-detect before this change; now reachable from the batch picker too, since `auto` was added there. WhisperKit returns the detected language, so the header could carry the answer rather than the request.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-record-live-parity.md`
+  summary: `record:getFolder` and its `recordApi.getFolder` bridge have no callers.
+  evidence: `main.js:3281` and `preload.js:131` exist; `grep -rn 'getFolder' desktop/renderer/` finds no call. Pre-existing — the deleted "SAVE TO" row displayed a hard-coded `~/Downloads/Meet_Transcripts` string (itself wrong: recordings go to `RECORDINGS_FOLDER`, `~/Downloads/Meet_Recordings`, `main.js:12`) and never called the handler. Either wire it or drop both ends.
