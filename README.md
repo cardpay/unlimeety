@@ -126,9 +126,9 @@ the follow-up, export or share it.
 
 **Calendar-aware**
 - Reads the current event's title and participants to fill in the transcript header.
-- Suggests the right capture mode from the event's conferencing link: Meet → extension,
-  Zoom/Teams/Webex/Jitsi/Whereby → Live tab, no link at all → Record tab for an in-person meeting.
-  It suggests; it never starts recording on its own.
+- Suggests the right capture mode from the event's conferencing link: Meet/Zoom/Teams/Webex/Jitsi/
+  Whereby → Live tab, no link at all → Record tab for an in-person meeting. For Meet it also mentions
+  the Chrome extension as an alternative. It suggests; it never starts recording on its own.
 
 **Improving a transcript after the fact**
 - Re-transcribe any recording with a larger model straight from the library.

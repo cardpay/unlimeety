@@ -1,8 +1,7 @@
 // "Smart" calendar router: looks at the conferencing links on the nearest
 // calendar event and recommends a recording mode —
-//   • Google Meet  → nothing (the browser extension records Meet)
-//   • Zoom/Teams/…  → Live (system-audio capture)
-//   • no such links → Record (likely an in-person meeting)
+//   • Meet/Zoom/Teams/… → Live (system-audio capture)
+//   • no such links      → Record (likely an in-person meeting)
 // Triggered automatically on launch (if a meeting is ongoing/imminent) and
 // manually via the header button. The action switches to the right tab and
 // pre-fills title + participants; it never auto-starts recording.
@@ -16,7 +15,7 @@
     : Promise.resolve(false);
 
   // Conferencing host allowlist. Editable here without rebuilding the Swift
-  // helper. Google Meet is handled specially (see recommendMode).
+  // helper. Google Meet wins over the others when an event links both.
   const PLATFORMS = [
     { key: 'google-meet', label: 'Google Meet',     hosts: ['meet.google.com'] },
     { key: 'zoom',        label: 'Zoom',            hosts: ['zoom.us'] },
@@ -88,12 +87,14 @@
     return meet || other || null;
   }
 
-  // → { mode: 'extension' | 'live' | 'record', platform, url }
+  // → { mode: 'live' | 'record', key, platform, url }
+  // Google Meet is no longer a special case: Live captures system audio for it like
+  // for any other app. The Chrome extension stays an option, mentioned in the
+  // banner rather than recommended.
   function recommendMode(event) {
     const p = detectPlatform(event && event.urls);
-    if (!p) return { mode: 'record', platform: null, url: null };
-    if (p.key === 'google-meet') return { mode: 'extension', platform: p.label, url: p.url };
-    return { mode: 'live', platform: p.label, url: p.url };
+    if (!p) return { mode: 'record', key: null, platform: null, url: null };
+    return { mode: 'live', key: p.key, platform: p.label, url: p.url };
   }
 
   // Ongoing event (now within [start,end]); otherwise the next upcoming one.
@@ -159,26 +160,17 @@
     document.querySelector(`#tab-switch .tab-btn[data-tab="${tab}"]`)?.click();
   }
 
-  // Build + show the recommendation for one event. On auto-launch we stay silent
-  // for Google Meet (the extension handles it); the manual button shows the info.
-  function present(ev, { showExtensionInfo }) {
+  // Build + show the recommendation for one event.
+  function present(ev) {
     const rec = recommendMode(ev);
     const time = `${fmtTime(ev.start)}–${fmtTime(ev.end)}`;
 
-    if (rec.mode === 'extension') {
-      if (!showExtensionInfo) return;
-      showBanner({
-        title: ev.title, time,
-        message: `${rec.platform} — the browser extension records this, no desktop app needed.`,
-      });
-      return;
-    }
-
     const target = rec.mode === 'live' ? 'live' : 'record';
     const actionLabel = rec.mode === 'live' ? 'Go to Live' : 'Go to Record';
-    const message = rec.mode === 'live'
+    let message = rec.mode === 'live'
       ? `looks like ${rec.platform} — we recommend Live (system-audio capture).`
       : 'no online-meeting links — looks in-person, we recommend Record.';
+    if (rec.key === 'google-meet') message += ' The browser extension can record it too.';
 
     showBanner({
       title: ev.title, time, message, actionLabel,
@@ -203,7 +195,7 @@
       showBanner({ title: 'Calendar', time: '', message: 'no suitable meeting nearby.' });
       return;
     }
-    present(ev, { showExtensionInfo: true });
+    present(ev);
   }
 
   // Auto-detect on launch: only nag when there's an actionable recommendation.
@@ -213,7 +205,7 @@
     try { res = await api.list(); } catch { return; }
     if (!res || !res.ok) return; // stay quiet about permissions on launch
     const ev = pickEvent(res.events, 15);
-    if (ev) present(ev, { showExtensionInfo: false });
+    if (ev) present(ev);
   }
 
   // Wire the header button (hidden on unsupported platforms) and run autoCheck.
