@@ -196,6 +196,16 @@ pass over its result.
   exists. KEEP: no per-call options override, and `record:transcribe` / `startTranscription` left
   untouched for the manual batch flow.
 
+- **Human reversal after shipping.** The frozen `Never` block said "No Language row on the Record
+  *start* screen; the picker lives on the recording screen" and `Ask First` listed adding one as a
+  product decision. The human made it: "вдруг я заранее знаю, на каком языке будем говорить". The
+  start screen now carries a fourth picker, `#record-setup-lang-seg`, in the row position Live gives
+  Language. No new state and no new logic — `record.js` gained a `langSegs` list that the init paint,
+  `applyBatchSettingsToScreen()` and the shared click handler all spread, so a fifth picker would be
+  one edit rather than four. That frozen sentence is now historical; this entry, not the block, is the
+  current answer. KEEP: `batchSettings.language` as the single language state, and one handler for
+  every picker.
+
 ## Design Notes
 
 Why the recording screen and not the start screen: at start you often don't know which language the

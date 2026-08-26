@@ -593,7 +593,24 @@
                things this used to spell out are said where they apply: the wav
                path on the recording screen's file card, and what happens after
                Stop & save in that screen's footer. -->
-          <p class="live-muted">Record your microphone and the call's system audio to disk — no live transcription, so it costs almost nothing while the call runs. On <strong>Stop &amp; save</strong> a large-v3 transcription starts on its own, in the language you pick while recording.</p>
+          <p class="live-muted">Record your microphone and the call's system audio to disk — no live transcription, so it costs almost nothing while the call runs. On <strong>Stop &amp; save</strong> a large-v3 transcription starts on its own, in the language set below.</p>
+
+          <!-- Same row Live puts under its Model block. Set it here when you
+               already know the language; the recording screen carries the same
+               control for when you find out thirty seconds into the call. Both
+               write `batchSettings.language`, so neither is the master. -->
+          <div class="live-row">
+            <span class="live-label">Language</span>
+            <div id="record-setup-lang-seg" class="ts-seg-wrap" role="radiogroup" aria-label="Transcription language">
+              <button type="button" class="ts-seg is-active" role="radio" aria-checked="true" data-lang="ru">Russian</button>
+              <button type="button" class="ts-seg" role="radio" aria-checked="false" data-lang="en">English</button>
+              <button type="button" class="ts-seg" role="radio" aria-checked="false" data-lang="sr">Serbian</button>
+              <button type="button" class="ts-seg" role="radio" aria-checked="false" data-lang="es">Spanish</button>
+              <button type="button" class="ts-seg" role="radio" aria-checked="false" data-lang="de">German</button>
+              <button type="button" class="ts-seg" role="radio" aria-checked="false" data-lang="fr">French</button>
+              <button type="button" class="ts-seg" role="radio" aria-checked="false" data-lang="auto">Auto-detect</button>
+            </div>
+          </div>
 
           <div class="live-row">
             <span class="live-label">Sources</span>
