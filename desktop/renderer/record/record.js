@@ -44,10 +44,15 @@
     const timerEl     = $('record-timer');
     const outputPathEl = $('record-output-path');
     const stopBtn     = $('record-btn-stop');
-    // Language for the transcription that fires on Stop & save. Not a third
-    // piece of state: it reads and writes `batchSettings.language`, the same
-    // value #ts-lang-seg edits.
-    const recLangSeg  = $('record-rec-lang-seg');
+    // Language for the transcription that fires on Stop & save, offered twice:
+    // on the setup screen for when you already know it, and on the recording
+    // screen for when you find out mid-call. Not extra state — both read and
+    // write `batchSettings.language`, the same value #ts-lang-seg edits.
+    const setupLangSeg = $('record-setup-lang-seg');
+    const recLangSeg   = $('record-rec-lang-seg');
+    // Every language picker this tab owns. One list, so adding another one is a
+    // single edit and cannot half-wire itself.
+    const langSegs = [setupLangSeg, recLangSeg];
 
     const notesListEl  = $('record-notes-list');
     const notesEmptyEl = $('record-notes-empty');
@@ -313,9 +318,9 @@
     // ── end auto-transcribe ──
 
     // The settings screen paints itself when it opens (renderTsScreen), but the
-    // recording screen's picker would otherwise show the markup default until
+    // Record tab's own two pickers would otherwise show the markup default until
     // then — wrong for anyone whose persisted language is not Russian.
-    paintLangSegs([tsLangSeg, recLangSeg], state.batchSettings.language);
+    paintLangSegs([tsLangSeg, ...langSegs], state.batchSettings.language);
 
     // Phase marker on <body>, for phase-specific styling. live.js clears it
     // when the user leaves this tab.
@@ -1216,7 +1221,7 @@
             }
         }
         // Language segmented — both pickers, one value.
-        paintLangSegs([tsLangSeg, recLangSeg], bs.language);
+        paintLangSegs([tsLangSeg, ...langSegs], bs.language);
         // Diarize switch + inner state
         if (tsDiarizeToggle) tsDiarizeToggle.checked = !!bs.diarize;
         if (tsDiaInner) tsDiaInner.classList.toggle('is-disabled', !bs.diarize);
@@ -1294,7 +1299,7 @@
     }
     // One handler for both pickers: they write the same setting, so a second
     // copy of this could only ever drift from the first.
-    for (const box of [tsLangSeg, recLangSeg]) {
+    for (const box of [tsLangSeg, ...langSegs]) {
         box?.addEventListener('click', (ev) => {
             const lang = ev.target.closest('.ts-seg')?.dataset.lang;
             if (!lang) return;
