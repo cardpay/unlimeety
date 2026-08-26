@@ -13,6 +13,7 @@
   injectStyles();
 
   let popover = null; // the single open popover, if any
+  let anchored = null; // the button currently carrying --cal-anchor
 
   function injectStyles() {
     const css = `
@@ -22,8 +23,38 @@
         border: 1px solid var(--border); border-radius: 7px;
       }
       .cal-pick-btn:hover { color: var(--text-primary); border-color: var(--border-strong); }
+      /* Placement is the browser's job (CSS anchor positioning, Chromium 146 in
+         Electron 41). position-area 'block-end span-inline-end' puts the
+         popover under the button with their left edges aligned; the fallbacks
+         flip it above / to the left when that overflows the viewport. Fixed
+         positioning plus an anchor inside a scrolling form also means the
+         browser keeps it glued to the button while the form scrolls — which the
+         old top/left arithmetic could not do, and got wrong anyway (it added
+         window.scrollY, always 0 here, and clamped to nothing).
+
+         No @position-try rule clamping max-height to the space left over: the
+         320px cap always fits the window, whose minHeight is 600, and when the
+         flips both overflow, box alignment's safe fallback slides the popover
+         back inside the viewport on its own. Measured identical with and
+         without one — see npm run check:layout.
+
+         position-visibility 'anchors-visible' is not decoration: an anchor that
+         stops being rendered — tab switch, the New Meeting modal closing,
+         record.js swapping phase sections — stops resolving, and an anchored
+         element with an unresolvable anchor falls back to its STATIC position,
+         i.e. jumps somewhere unrelated. The old absolute + top/left at least
+         stayed put. It also hides the popover when the button scrolls out of
+         the form's pane instead of leaving it floating over the toolbar.
+
+         NB: no backticks in here — this whole block is a template literal, and
+         a stray one silently kills the file at parse time. */
       .cal-pop {
-        position: absolute; z-index: 1000; min-width: 280px; max-width: 420px;
+        position: fixed; z-index: 1000; min-width: 280px; max-width: 420px;
+        position-anchor: --cal-anchor;
+        position-area: block-end span-inline-end;
+        position-try-fallbacks: flip-block, flip-inline, flip-block flip-inline;
+        position-visibility: anchors-visible;
+        margin: 4px 0;
         max-height: 320px; overflow-y: auto; padding: 4px;
         background: var(--bg-elevated); border: 1px solid var(--border-strong);
         border-radius: 10px; box-shadow: 0 12px 32px rgba(0,0,0,0.5);
@@ -74,21 +105,22 @@
     if (!popover) return;
     popover.remove();
     popover = null;
+    // One anchor name for all three buttons: whichever one is open owns it.
+    if (anchored) { anchored.style.anchorName = ''; anchored = null; }
     document.removeEventListener('mousedown', onOutside, true);
     document.removeEventListener('keydown', onKey, true);
   }
 
   function onOutside(e) {
-    if (popover && !popover.contains(e.target)) closePopover();
+    if (!popover || popover.contains(e.target)) return;
+    // The anchor button is not "outside": a real second click on it fires
+    // mousedown before click, so closing here would let openPopover's toggle
+    // immediately reopen — the button would look dead. Leave it to the toggle.
+    if (anchored && anchored.contains(e.target)) return;
+    closePopover();
   }
   function onKey(e) {
     if (e.key === 'Escape') closePopover();
-  }
-
-  function positionUnder(button) {
-    const r = button.getBoundingClientRect();
-    popover.style.top = `${window.scrollY + r.bottom + 4}px`;
-    popover.style.left = `${window.scrollX + r.left}px`;
   }
 
   function showMessage(text, withSettings) {
@@ -139,8 +171,9 @@
     if (popover) { closePopover(); return; }
     popover = document.createElement('div');
     popover.className = 'cal-pop';
+    anchored = button;
+    button.style.anchorName = '--cal-anchor';
     document.body.appendChild(popover);
-    positionUnder(button);
     showMessage('Loading…', false);
     document.addEventListener('mousedown', onOutside, true);
     document.addEventListener('keydown', onKey, true);
