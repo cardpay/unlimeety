@@ -96,22 +96,6 @@
     const transActiveBanner      = $('record-trans-active-banner');
     const viewQueueBtn           = $('record-btn-view-queue');
 
-    const sbList    = $('record-sb-list');
-    const sbEmpty   = $('record-sb-empty');
-    const sbCount   = $('record-sb-count');
-
-    // Inline audio player (sidebar). Lets the user listen to a recording —
-    // transcribed or not — without leaving the Record tab. Renderer is a
-    // file:// document, so the WAV path loads directly into <audio>.
-    const apBar       = $('record-ap');
-    const apAudioEl   = $('record-audio-el');
-    const apPlayBtn   = $('record-ap-play');
-    const apIconPlay  = $('record-ap-icon-play');
-    const apIconPause = $('record-ap-icon-pause');
-    const apWaveform  = $('record-ap-waveform');
-    const apTime      = $('record-ap-time');
-    const apSpeed     = $('record-ap-speed');
-
     document.getElementById('recording-indicator')
         ?.addEventListener('click', () => {
             document.querySelector('[data-tab="record"]')?.click();
@@ -144,12 +128,6 @@
         timerInterval: null,
         outputPath: null,
         activeSources: [],
-        // Variant A — batch transcribe via sidebar checkbox flow.
-        selectedRecordings: new Set(),
-        // Tracks recordings that this renderer has already auto-selected. New
-        // pending entries are pre-checked once; if the user clears them, they
-        // stay cleared across refreshes because we never re-add them.
-        seenRecordings: new Set(),
         // Attendee names from a calendar event picked on the setup screen. Used
         // for the transcript's "Participants:" line when transcribing in the
         // same session (no participants field exists in the Record UI).
@@ -170,17 +148,17 @@
         // True only for the short window where runBatchTranscribe is still
         // firing off its submit calls — guards against a double-click queuing
         // the same batch twice. Not a transcribing indicator any more (the
-        // queue is): see activeTranscribeJob/anyTranscribeActive below.
+        // queue is): see anyTranscribeActive below.
         batchRunning: false,
         // Set when the user enters the settings screen: holds the file paths
         // queued for the eventual batch run. Cleared when the batch finishes
         // or the user backs out via Cancel.
         pendingBatchTargets: null,
-        // Path of the recording currently loaded into the inline player (null
-        // when the player is hidden). Drives the per-card play/pause icon.
-        playingPath: null,
     };
 
+    // The recordings the transcribe-settings screen renders its batch rows
+    // from. The list itself lives in the Meetings sidebar (app.js) now; this
+    // tab keeps a copy only to label the batch it is about to run.
     let currentItems = [];
 
     // ─── Job queue ───────────────────────────────────────────────────────
@@ -194,11 +172,6 @@
     // currently watching — what the Cancel button on that screen targets.
     let currentTranscribeJobId = null;
 
-    function activeTranscribeJob(filePath) {
-        return queueJobs.find(
-            (j) => j.type === 'transcribe' && j.filePath === filePath
-                && (j.status === 'queued' || j.status === 'running'));
-    }
     function anyTranscribeActive() {
         return queueJobs.some((j) => j.type === 'transcribe' && (j.status === 'queued' || j.status === 'running'));
     }
@@ -285,11 +258,11 @@
         persistBatchSettings();
         applyBatchSettingsToScreen();
         recomputeTsEta();
-        recomputeCta();
         renderPresetSelect();
     }
 
-    // Initial phase marker (used by CSS to hide the sidebar while recording).
+    // Phase marker on <body>, for phase-specific styling. live.js clears it
+    // when the user leaves this tab.
     document.body.dataset.recordPhase = state.phase;
 
     // ─── Platform gating ─────────────────────────────────────────────────
@@ -310,16 +283,14 @@
 
     api.onListChanged(() => refreshHistory());
 
-    // Sidebar spinners, the CTA's busy count, and the idle-screen banner all
-    // read `queueJobs` — refresh them on every broadcast, not just when this
+    // The idle-screen "transcription in progress" banner reads `queueJobs` —
+    // refresh it on every broadcast, not just when this
     // tab itself submitted the job (an auto-chained re-transcription from
     // Live is just as much "transcribing" as one this tab started). Hydrated
     // once up front too, or a reload leaves them stale until the next
     // unrelated broadcast happens to arrive.
     function onQueueJobsChanged(jobs) {
         queueJobs = jobs;
-        renderSidebarList(currentItems);
-        recomputeCta();
         updateTransActiveBanner();
     }
     queueApi?.onChanged(onQueueJobsChanged);
@@ -359,9 +330,9 @@
     openScreenSettingsBtn?.addEventListener('click', () => api.openScreenSettings());
 
     // ─── Import an existing audio file ───────────────────────────────────
-    // Skips the sidebar checkbox flow: the imported file is not in the
-    // library; we treat it as a one-element batch and go straight to the
-    // transcription-settings screen.
+    // Skips the selection flow: the imported file is not in the recordings
+    // folder, so no card exists for it; we treat it as a one-element batch and
+    // go straight to the transcription-settings screen.
     importBtn?.addEventListener('click', async () => {
         setupError.classList.add('hidden');
         setupError.textContent = '';
@@ -560,8 +531,8 @@
         if (targets.length === 1) {
             const fp = targets[0];
             state.pendingBatchTargets = null;
-            // Sidebar spinner / CTA lock / banner all follow the queue now
-            // (see queueApi.onChanged below) — no local bookkeeping needed.
+            // The banner follows the queue now (see queueApi.onChanged
+            // below) — no local bookkeeping needed.
             await startTranscription(fp);
         } else {
             await runBatchTranscribe(targets);
@@ -731,8 +702,8 @@
                 stopTimer();
                 state.outputPath = event.path || state.outputPath;
                 // Return to the idle screen — the new recording shows up in
-                // the sidebar (pre-checked, courtesy of refreshHistory) and
-                // the user transcribes via the lime CTA. Only from the
+                // the Meetings sidebar, which watches the recordings folder
+                // and lists it under "To transcribe". Only from the
                 // recording section: a stop that lands while a parallel
                 // transcription is on screen must not yank the user off it.
                 if (state.phase === 'recording') showSection('idle');
@@ -916,7 +887,7 @@
         return res.transcriptPath;
     }
 
-    // ─── Sidebar library: render + batch CTA ─────────────────────────────
+    // ─── Recordings, for the transcribe-settings screen only ─────────────
     function formatRelativeDay(epochMs) {
         const d = new Date(epochMs);
         const now = new Date();
@@ -927,464 +898,37 @@
         return 'older';
     }
 
-    function groupRecordings(items) {
-        const today = [], earlier = [], older = [];
-        for (const it of items) {
-            const bucket = formatRelativeDay(it.createdAt || it.mtime || 0);
-            (bucket === 'today' ? today : bucket === 'earlier' ? earlier : older).push(it);
-        }
-        return { today, earlier, older };
-    }
-
-    function cardEl(item, opts) {
-        const isPending = !item.hasTranscript;
-        const isSelected = state.selectedRecordings.has(item.filePath);
-        const isTranscribing = Boolean(activeTranscribeJob(item.filePath));
-        const card = document.createElement('div');
-        card.className = 'record-sb-card'
-            + (isPending ? '' : ' is-transcribed')
-            + (isSelected ? ' is-selected' : '')
-            + (isTranscribing ? ' is-transcribing' : '');
-        card.dataset.path = item.filePath;
-        const baseTitle = (item.filename || item.filePath?.split('/').pop() || 'Recording').replace(/\.wav$/i, '');
-        // New format on disk: "HH-mm dd-mm-yy" or "HH-mm dd-mm-yy <user title>",
-        // optionally followed by " (N)" collision suffix. Render with a colon
-        // between hours and minutes for readability. Legacy filenames (anything
-        // that doesn't match) are shown as-is.
-        const newFmt = /^(\d{2})-(\d{2}) (\d{2}-\d{2}-\d{2})(?: (.+?))?( \(\d+\))?$/;
-        const m = baseTitle.match(newFmt);
-        const title = m
-            ? `${m[1]}:${m[2]} ${m[3]}` + (m[4] ? ` — ${m[4]}` : '') + (m[5] || '')
-            : baseTitle;
-        const dur = item.durationSec
-            ? `${Math.floor(item.durationSec / 60)}m ${String(item.durationSec % 60).padStart(2, '0')}s`
-            : (item.size ? formatBytes(item.size) : '—');
-        const whenMs = item.createdAt || item.mtime;
-        const when = whenMs
-            ? new Date(whenMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-            : '';
-
-        const titleRow = document.createElement('div');
-        titleRow.className = 'record-sb-card-title-row';
-        // Play/pause affordance — available on every card (pending & transcribed).
-        const playBtn = document.createElement('button');
-        playBtn.type = 'button';
-        const isPlaying = state.playingPath === item.filePath;
-        playBtn.className = 'record-sb-card-play' + (isPlaying ? ' is-playing' : '');
-        playBtn.title = isPlaying ? 'Pause' : 'Play';
-        playBtn.setAttribute('aria-label', playBtn.title);
-        playBtn.textContent = isPlaying && !apAudioEl?.paused ? '⏸' : '▶';
-        playBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            togglePlay(item.filePath);
-        });
-        titleRow.appendChild(playBtn);
-        const cb = document.createElement('span');
-        cb.className = 'record-sb-card-checkbox';
-        titleRow.appendChild(cb);
-        const titleSpan = document.createElement('span');
-        titleSpan.className = 'record-sb-card-title';
-        titleSpan.textContent = title;
-        titleRow.appendChild(titleSpan);
-        if (opts?.isNew) {
-            const badge = document.createElement('span');
-            badge.className = 'record-sb-badge-new';
-            badge.textContent = 'NEW';
-            titleRow.appendChild(badge);
-        }
-        const moreBtn = document.createElement('button');
-        moreBtn.type = 'button';
-        moreBtn.className = 'record-sb-card-more';
-        moreBtn.title = 'More actions';
-        moreBtn.setAttribute('aria-label', 'More actions');
-        moreBtn.textContent = '⋯';
-        moreBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            openRecordingMenu(item, moreBtn);
-        });
-        titleRow.appendChild(moreBtn);
-
-        const meta = document.createElement('div');
-        meta.className = 'record-sb-card-meta';
-        meta.textContent = when ? `${dur} · ${when}` : dur;
-        if (!isPending) {
-            const tick = document.createElement('span');
-            tick.className = 'record-sb-card-check-mark';
-            tick.textContent = '✓';
-            meta.appendChild(tick);
-        }
-
-        card.appendChild(titleRow);
-        card.appendChild(meta);
-
-        if (!isTranscribing) {
-            card.addEventListener('click', () => {
-                if (state.selectedRecordings.has(item.filePath)) {
-                    state.selectedRecordings.delete(item.filePath);
-                } else {
-                    state.selectedRecordings.add(item.filePath);
-                }
-                renderSidebarList(currentItems);
-                recomputeCta();
-            });
-        }
-        if (!isPending) {
-            card.addEventListener('dblclick', () => {
-                api.showInFinder(item.filePath);
-            });
-        }
-        card.addEventListener('contextmenu', (e) => {
-            e.preventDefault();
-            openRecordingMenu(item, moreBtn, { x: e.clientX, y: e.clientY });
-        });
-        return card;
-    }
-
-    function renderSidebarList(items) {
-        currentItems = items;
-        if (sbCount) sbCount.textContent = String(items.length);
-        if (!sbList) return;
-        sbList.innerHTML = '';
-        if (sbEmpty) sbEmpty.classList.toggle('hidden', items.length > 0);
-        const groups = groupRecordings(items);
-        const groupSpecs = [
-            { key: 'today', label: 'Today', items: groups.today },
-            { key: 'earlier', label: 'Earlier this week', items: groups.earlier },
-            { key: 'older', label: 'Older', items: groups.older },
-        ];
-        const newestPending = items.find(it => !it.hasTranscript)?.filePath;
-        for (const g of groupSpecs) {
-            if (!g.items.length) continue;
-            const wrap = document.createElement('div');
-            wrap.className = 'record-sb-group';
-            const header = document.createElement('div');
-            header.className = 'record-sb-group-header';
-            header.textContent = g.label;
-            wrap.appendChild(header);
-            for (const it of g.items) {
-                wrap.appendChild(cardEl(it, { isNew: it.filePath === newestPending }));
-            }
-            sbList.appendChild(wrap);
-        }
-    }
-
-    function recomputeCta() {
-        const items = currentItems;
-        const selected = items.filter(it => state.selectedRecordings.has(it.filePath));
-        const n = selected.length;
-        const total = items.length;
-        // Only this tab's own "still firing off submit calls" window gates
-        // the CTA — an unrelated (or even a same-file) background transcribe
-        // job must never block submitting a new batch; that would reintroduce
-        // exactly the refusal this feature exists to remove. Per-card
-        // spinners still come from the queue (see cardEl's activeTranscribeJob).
-        const busy = state.batchRunning;
-
-        const summaryLabel = $('record-sb-summary-label');
-        const ctaLabel = $('record-sb-cta-label');
-        const ctaBtn = $('record-btn-transcribe-all');
-        const etaEl = $('record-sb-cta-eta');
-        const selectAll = $('record-sb-select-all');
-        const clearLink = $('record-sb-clear');
-        const deleteLink = $('record-sb-delete');
-        const masterCb = $('record-sb-master-cb');
-
-        if (summaryLabel) {
-            // `n` still reflects the submitted selection here: runBatchTranscribe
-            // only clears it once every submit call has fired (see its `finally`).
-            if (busy) summaryLabel.textContent = `Queuing ${n}…`;
-            else if (total === 0) summaryLabel.textContent = 'No recordings';
-            else if (n === total) summaryLabel.textContent = `${total} recordings — all selected`;
-            else if (n === 0) summaryLabel.textContent = `0 of ${total} selected`;
-            else summaryLabel.textContent = `${n} of ${total} selected`;
-        }
-        if (ctaLabel) {
-            if (busy) ctaLabel.textContent = `Queuing ${n} recordings…`;
-            else if (n === 0) ctaLabel.textContent = 'Select recordings to transcribe';
-            else if (n === total) ctaLabel.textContent = `Send all ${n} to transcription`;
-            else ctaLabel.textContent = `Send ${n} selected to transcription`;
-        }
-        if (ctaBtn) {
-            const disabled = busy || n === 0;
-            ctaBtn.disabled = disabled;
-            ctaBtn.classList.toggle('is-disabled', disabled);
-        }
-        if (masterCb) masterCb.disabled = busy;
-        if (etaEl) {
-            if (n === 0) {
-                etaEl.textContent = total > 0 ? `${total} recordings — none selected` : '—';
-            } else {
-                const totalSec = selected.reduce((sum, it) => sum + (it.durationSec || 0), 0);
-                const etaSec = Math.round(totalSec * 0.073);
-                const m = Math.floor(etaSec / 60);
-                const s = etaSec % 60;
-                const etaStr = m ? `~${m}m ${String(s).padStart(2, '0')}s` : `~${etaSec}s`;
-                const modelLabel = MODEL_INFO[state.batchSettings.model]?.label || state.batchSettings.model;
-                etaEl.textContent = `${etaStr} · ${modelLabel} · ${state.batchSettings.language}`;
-            }
-        }
-        if (selectAll) selectAll.classList.toggle('hidden', busy || n === total || total === 0);
-        if (clearLink) clearLink.classList.toggle('hidden', busy || n === 0);
-        if (deleteLink) deleteLink.classList.toggle('hidden', busy || n === 0);
-        if (masterCb) {
-            masterCb.checked = total > 0 && n === total;
-        }
-    }
-
     let _refreshToken = 0;
+    // The recordings list is the Meetings sidebar's job now (app.js). This
+    // refresh exists only so the transcribe-settings screen can label its batch
+    // rows with a title, size and timestamp.
     async function refreshHistory() {
+        // Nothing on this tab reads `currentItems` unless the settings screen is
+        // up, and app.js runs its own record:list on every folder event — a
+        // third scan per event for a screen nobody is looking at is waste.
+        if (state.phase !== 'transcribeSettings') return;
         const token = ++_refreshToken;
         const items = await api.list();
         // Stale response — a newer refreshHistory() is in flight; drop this one
         // so we don't overwrite the latest view with older data.
         if (token !== _refreshToken) return;
-        // Drop selections for items that disappeared.
-        for (const p of Array.from(state.selectedRecordings)) {
-            if (!items.some(it => it.filePath === p)) {
-                state.selectedRecordings.delete(p);
-            }
-        }
-        // Drop seen entries for items removed from disk so the Set doesn't grow
-        // forever and so a re-imported file gets pre-checked again.
-        const present = new Set(items.map(it => it.filePath));
-        for (const p of Array.from(state.seenRecordings)) {
-            if (!present.has(p)) state.seenRecordings.delete(p);
-        }
-        // Stop the inline player if its recording was deleted/renamed away.
-        if (state.playingPath && !present.has(state.playingPath)) {
-            playerHide();
-        }
-        // Pre-check every pending recording on first appearance.
-        for (const it of items) {
-            if (!state.seenRecordings.has(it.filePath)) {
-                state.seenRecordings.add(it.filePath);
-                if (!it.hasTranscript) state.selectedRecordings.add(it.filePath);
-            }
-        }
-        renderSidebarList(items);
-        recomputeCta();
-        if (state.phase === 'transcribeSettings') {
-            renderTsScreen();
-        }
+        currentItems = items;
+        renderTsScreen();
     }
-
-    // ─── Inline audio player ─────────────────────────────────────────────
-    // Self-contained mirror of the Editor-tab player (app.js): waveform,
-    // click-to-seek, speed cycling. Loads the WAV straight from its file://
-    // path — no IPC, since item.filePath is the absolute path on disk.
-    const PLAYER_OK = !!(apBar && apAudioEl && apPlayBtn && apIconPlay && apIconPause
-        && apWaveform && apTime && apSpeed);
-    const WAVEFORM_BARS = 80;
-    const SPEEDS = [1, 1.5, 2, 0.75];
-    let apSpeedIdx = 0;
-    let apWaveBars = [];
-    let apWavePlayedIdx = -1;
-    let apWaveToken = 0;  // race-protect decoder against rapid track switches
-
-    function apFmtTime(sec) {
-        if (!isFinite(sec)) return '0:00';
-        const m = Math.floor(sec / 60), s = Math.floor(sec % 60);
-        return `${m}:${String(s).padStart(2, '0')}`;
-    }
-
-    function apRenderWaveform(peaks) {
-        apWaveform.innerHTML = '';
-        apWaveBars = [];
-        for (const p of peaks) {
-            const bar = document.createElement('div');
-            bar.className = 'ap-bar';
-            bar.style.height = `${Math.max(8, Math.round(p * 100))}%`;
-            apWaveform.appendChild(bar);
-            apWaveBars.push(bar);
-        }
-        apWavePlayedIdx = -1;
-    }
-
-    function apRenderPlaceholder() {
-        apRenderWaveform(new Array(WAVEFORM_BARS).fill(0.25));
-    }
-
-    function apUpdateProgress(pct) {
-        if (!apWaveBars.length) return;
-        const targetIdx = Math.floor(pct * apWaveBars.length);
-        if (targetIdx === apWavePlayedIdx) return;
-        if (targetIdx > apWavePlayedIdx) {
-            for (let i = Math.max(0, apWavePlayedIdx + 1); i <= targetIdx && i < apWaveBars.length; i++) {
-                apWaveBars[i].classList.add('played');
-            }
-        } else {
-            for (let i = apWavePlayedIdx; i > targetIdx && i >= 0; i--) {
-                apWaveBars[i].classList.remove('played');
-            }
-        }
-        apWavePlayedIdx = targetIdx;
-    }
-
-    async function apBuildWaveform(audioPath, numBars) {
-        const buf = await fetch(`file://${encodeURI(audioPath)}`).then(r => r.arrayBuffer());
-        const ctx = new (window.AudioContext || window.webkitAudioContext)();
-        try {
-            const audio = await ctx.decodeAudioData(buf);
-            const data = audio.getChannelData(0);
-            const bucket = Math.floor(data.length / numBars);
-            const peaks = new Array(numBars);
-            for (let i = 0; i < numBars; i++) {
-                let max = 0;
-                const start = i * bucket, end = start + bucket;
-                for (let j = start; j < end; j++) {
-                    const v = Math.abs(data[j]);
-                    if (v > max) max = v;
-                }
-                peaks[i] = max;
-            }
-            const peak = Math.max(...peaks, 0.01);
-            return peaks.map(p => p / peak);
-        } finally {
-            ctx.close();
-        }
-    }
-
-    function apSetPlayingIcon(playing) {
-        apIconPlay.classList.toggle('hidden', playing);
-        apIconPause.classList.toggle('hidden', !playing);
-    }
-
-    // Reflect play/pause state on the matching sidebar card button.
-    function apSyncCardButtons() {
-        if (!sbList) return;
-        const playing = state.playingPath && !apAudioEl.paused;
-        sbList.querySelectorAll('.record-sb-card-play').forEach((btn) => {
-            const card = btn.closest('.record-sb-card');
-            const isThis = card?.dataset.path === state.playingPath;
-            btn.classList.toggle('is-playing', !!isThis);
-            btn.textContent = isThis && playing ? '⏸' : '▶';
-            btn.title = isThis && playing ? 'Pause' : 'Play';
-            btn.setAttribute('aria-label', btn.title);
-        });
-    }
-
-    function apUpdateTime() {
-        const cur = apAudioEl.currentTime, dur = apAudioEl.duration;
-        apTime.textContent = `${apFmtTime(cur)} / ${apFmtTime(dur)}`;
-        apUpdateProgress(dur ? cur / dur : 0);
-    }
-
-    function playFile(filePath) {
-        if (!PLAYER_OK) return;
-        state.playingPath = filePath;
-        apAudioEl.src = `file://${encodeURI(filePath)}`;
-        apAudioEl.load();
-        apSetPlayingIcon(false);
-        apRenderPlaceholder();
-        apTime.textContent = '0:00 / 0:00';
-        apBar.classList.remove('hidden');
-        apSyncCardButtons();
-
-        const myToken = ++apWaveToken;
-        apBuildWaveform(filePath, WAVEFORM_BARS).then((peaks) => {
-            if (myToken !== apWaveToken) return;  // stale — another track loaded
-            apRenderWaveform(peaks);
-        }).catch((err) => {
-            console.warn('[record] waveform decode failed:', err);
-        });
-        apAudioEl.play().catch(() => {});
-    }
-
-    function playerHide() {
-        if (!PLAYER_OK) return;
-        apAudioEl.pause();
-        apAudioEl.src = '';
-        state.playingPath = null;
-        apSetPlayingIcon(false);
-        apBar.classList.add('hidden');
-        apWaveToken++;  // invalidate any in-flight decode
-        apSyncCardButtons();
-    }
-
-    function togglePlay(filePath) {
-        if (!PLAYER_OK) return;
-        if (state.playingPath === filePath) {
-            apAudioEl.paused ? apAudioEl.play().catch(() => {}) : apAudioEl.pause();
-        } else {
-            playFile(filePath);
-        }
-    }
-
-    if (PLAYER_OK) {
-        apPlayBtn.addEventListener('click', () => {
-            if (!state.playingPath) return;
-            apAudioEl.paused ? apAudioEl.play().catch(() => {}) : apAudioEl.pause();
-        });
-        apAudioEl.addEventListener('play',  () => { apAudioEl.playbackRate = SPEEDS[apSpeedIdx]; apSetPlayingIcon(true);  apSyncCardButtons(); });
-        apAudioEl.addEventListener('pause', () => { apSetPlayingIcon(false); apSyncCardButtons(); });
-        apAudioEl.addEventListener('ended', () => {
-            apSetPlayingIcon(false);
-            apUpdateProgress(0);
-            apSyncCardButtons();
-        });
-        apAudioEl.addEventListener('timeupdate', apUpdateTime);
-        apAudioEl.addEventListener('loadedmetadata', apUpdateTime);
-        apWaveform.addEventListener('click', (e) => {
-            const rect = apWaveform.getBoundingClientRect();
-            const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-            apAudioEl.currentTime = pct * (apAudioEl.duration || 0);
-            apUpdateProgress(pct);
-        });
-        apSpeed.addEventListener('click', () => {
-            apSpeedIdx = (apSpeedIdx + 1) % SPEEDS.length;
-            apAudioEl.playbackRate = SPEEDS[apSpeedIdx];
-            apSpeed.textContent = `${SPEEDS[apSpeedIdx]}×`;
-        });
-    }
-
-    // ─── Sidebar bindings ────────────────────────────────────────────────
-    $('record-sb-master-cb')?.addEventListener('change', (e) => {
-        if (e.target.checked) {
-            for (const it of currentItems) state.selectedRecordings.add(it.filePath);
-        } else {
-            state.selectedRecordings.clear();
-        }
-        renderSidebarList(currentItems);
-        recomputeCta();
-    });
-    $('record-sb-select-all')?.addEventListener('click', () => {
-        for (const it of currentItems) state.selectedRecordings.add(it.filePath);
-        renderSidebarList(currentItems);
-        recomputeCta();
-    });
-    $('record-sb-clear')?.addEventListener('click', () => {
-        state.selectedRecordings.clear();
-        renderSidebarList(currentItems);
-        recomputeCta();
-    });
-    $('record-sb-delete')?.addEventListener('click', async () => {
-        if (state.batchRunning) return;
-        const targets = currentItems
-            .filter(it => state.selectedRecordings.has(it.filePath))
-            .map(it => it.filePath);
-        if (!targets.length) return;
-        const res = await api.deleteMany(targets);
-        if (res?.ok) {
-            state.selectedRecordings.clear();
-            await refreshHistory();
-            recomputeCta();
-        }
-    });
-    $('record-btn-transcribe-all')?.addEventListener('click', () => {
-        if (state.batchRunning) return;
-        const targets = currentItems.filter(it => state.selectedRecordings.has(it.filePath));
-        if (!targets.length) return;
-        enterTranscribeSettings(targets.map(it => it.filePath));
-    });
 
     // Switch into the transcribe-settings screen pre-filled with the queued
-    // recordings (sidebar selection or a single imported file). The same
-    // screen handles N≥1 — single is the degenerate case of a 1-element batch.
+    // recordings — a Meetings-sidebar selection, one row's Transcribe… , or a
+    // single imported file. The same screen handles N≥1; single is the
+    // degenerate case of a 1-element batch.
     function enterTranscribeSettings(filePaths, opts = {}) {
         state.pendingBatchTargets = filePaths.slice();
         state.outputPath = filePaths[0] || null;
         renderTsScreen({ importedSize: opts.size });
         showSection('transcribeSettings');
+        // Only now is the phase right for refreshHistory to run: the rows above
+        // are labelled from whatever `currentItems` still held, and this fills
+        // in size and timestamp for anything it did not know.
+        refreshHistory();
     }
 
     // One submit per file — every one is accepted immediately and drained in
@@ -1405,24 +949,11 @@
         } finally {
             state.batchRunning = false;
             state.pendingBatchTargets = null;
-            state.selectedRecordings.clear();
-            renderSidebarList(currentItems);
-            recomputeCta();
             updateTransActiveBanner();
             showSection('idle');
             refreshHistory();
         }
     }
-    $('record-sb-settings')?.addEventListener('click', () => {
-        // Sidebar `Settings…` now leads to the full transcription-settings
-        // screen with whatever pending recordings are currently selected
-        // (or an empty batch when nothing is checked).
-        const targets = currentItems
-            .filter(it => state.selectedRecordings.has(it.filePath))
-            .map(it => it.filePath);
-        enterTranscribeSettings(targets);
-    });
-
     // ─── Transcribe-settings screen wiring ──────────────────────────────
     function renderTsScreen({ importedSize } = {}) {
         const targets = state.pendingBatchTargets || [];
@@ -1447,7 +978,7 @@
             if (!n) {
                 const empty = document.createElement('div');
                 empty.className = 'ts-batch-empty';
-                empty.textContent = 'No recordings selected. Use the sidebar to pick recordings.';
+                empty.textContent = 'No recordings selected. Pick them in the Meetings list.';
                 tsBatchList.appendChild(empty);
             }
             for (const fp of targets) {
@@ -1654,7 +1185,6 @@
             onBatchSettingsChanged();
             applyBatchSettingsToScreen();
             recomputeTsEta();
-            recomputeCta();
         });
     }
     if (tsLangSeg) {
@@ -1667,7 +1197,6 @@
             onBatchSettingsChanged();
             applyBatchSettingsToScreen();
             recomputeTsEta();
-            recomputeCta();
         });
     }
     if (tsDiarizeToggle) {
@@ -1723,198 +1252,6 @@
         if (h > 0) return `${h}h ${m}m`;
         if (m > 0) return `${m}m ${String(r).padStart(2, '0')}s`;
         return `${r}s`;
-    }
-
-    // ─── Per-card context menu ───────────────────────────────────────────
-    let _recordingMenu = null;
-    function openRenamePopup(currentTitle, anchorRect) {
-        return new Promise((resolve) => {
-            const overlay = document.createElement('div');
-            overlay.className = 'rename-overlay';
-
-            const popup = document.createElement('div');
-            popup.className = 'rename-popup';
-
-            const input = document.createElement('input');
-            input.className = 'rename-popup-input';
-            input.type = 'text';
-            input.value = currentTitle;
-
-            const actions = document.createElement('div');
-            actions.className = 'rename-popup-actions';
-
-            const cancelBtn = document.createElement('button');
-            cancelBtn.className = 'rename-popup-btn';
-            cancelBtn.type = 'button';
-            cancelBtn.textContent = 'Cancel';
-
-            const okBtn = document.createElement('button');
-            okBtn.className = 'rename-popup-btn primary';
-            okBtn.type = 'button';
-            okBtn.textContent = 'Rename';
-
-            actions.appendChild(cancelBtn);
-            actions.appendChild(okBtn);
-            popup.appendChild(input);
-            popup.appendChild(actions);
-
-            function cleanup() { overlay.remove(); popup.remove(); }
-            function confirm() { const v = input.value.trim(); cleanup(); resolve(v); }
-            function cancel() { cleanup(); resolve(null); }
-
-            cancelBtn.addEventListener('click', cancel);
-            okBtn.addEventListener('click', confirm);
-            overlay.addEventListener('click', cancel);
-            input.addEventListener('keydown', (e) => {
-                if (e.key === 'Enter') { e.preventDefault(); confirm(); }
-                else if (e.key === 'Escape') { e.preventDefault(); cancel(); }
-            });
-
-            document.body.appendChild(overlay);
-            document.body.appendChild(popup);
-
-            if (anchorRect) {
-                const left = Math.max(8, Math.min(anchorRect.right + 8, window.innerWidth - 296));
-                const top = Math.max(8, Math.min(anchorRect.top, window.innerHeight - 80));
-                popup.style.left = `${left}px`;
-                popup.style.top = `${top}px`;
-            } else {
-                popup.style.left = `${Math.round((window.innerWidth - 280) / 2)}px`;
-                popup.style.top = `${Math.round((window.innerHeight - 80) / 2)}px`;
-            }
-
-            input.focus();
-            input.select();
-        });
-    }
-
-    // Local SVG icons for the card context menu. Kept self-contained (paths
-    // mirror app.js's ICON_PATHS) so the Record tab stays isolated from app.js.
-    const REC_ICON_PATHS = {
-        pencil: '<path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/>',
-        mic: '<path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/>',
-        trash: '<polyline points="3 6 5 6 21 6"/><path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/>',
-    };
-    function recIcon(name) {
-        const path = REC_ICON_PATHS[name] || '';
-        return `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${path}</svg>`;
-    }
-
-    function openRecordingMenu(item, anchorBtn, mousePos) {
-        if (_recordingMenu) {
-            _recordingMenu.remove();
-            _recordingMenu = null;
-        }
-
-        // Pre-fill the rename popup with the recording's current full name (the
-        // on-disk stem, minus the .wav extension) so the old name is editable —
-        // mirrors how transcript rename works.
-        const baseTitle = (item.filename || item.filePath?.split('/').pop() || 'Recording').replace(/\.wav$/i, '');
-
-        const menu = document.createElement('div');
-        menu.className = 'meeting-menu';
-        menu.setAttribute('role', 'menu');
-        const isTranscribingNow = Boolean(activeTranscribeJob(item.filePath));
-        const items = [
-            { label: 'Rename…', icon: 'pencil', enabled: true, action: async () => {
-                const rect = anchorBtn.getBoundingClientRect();
-                const newTitle = await openRenamePopup(baseTitle, rect);
-                if (newTitle === null || newTitle === baseTitle) return;
-                const res = await api.rename(item.filePath, newTitle);
-                if (res?.ok) refreshHistory();
-                else if (res?.error) console.error('rename recording:', res.error);
-            } },
-            // (Re-)Transcribe routes through the same settings screen as the
-            // sidebar's batch CTA — pre-fills it with this one recording so
-            // the user can tweak model / language / diarization before kicking
-            // off. For items that already have a transcript, the new run will
-            // overwrite the .txt on disk (same stem ⇒ same path); any summary
-            // is left alone since it lives in a different file.
-            {
-                label: item.hasTranscript ? 'Re-transcribe…' : 'Transcribe…',
-                icon: 'mic',
-                enabled: !isTranscribingNow && !state.batchRunning,
-                action: () => enterTranscribeSettings([item.filePath]),
-            },
-            { divider: true },
-            { label: 'Delete audio', icon: 'trash', danger: true, enabled: true, action: async () => {
-                const res = await api.delete(item.filePath);
-                if (res?.ok) refreshHistory();
-                else if (res?.error) console.error('delete recording:', res.error);
-            } },
-            { label: 'Delete transcript', icon: 'trash', danger: true, enabled: !!item.hasTranscript, action: async () => {
-                const res = await api.deleteTranscript(item.filePath);
-                if (res?.ok) refreshHistory();
-                else if (res?.error) console.error('delete transcript:', res.error);
-            } },
-            { label: 'Delete summary', icon: 'trash', danger: true, enabled: !!item.hasSummary, action: async () => {
-                const res = await api.deleteSummary(item.filePath);
-                if (res?.ok) refreshHistory();
-                else if (res?.error) console.error('delete summary:', res.error);
-            } },
-        ];
-        for (const spec of items) {
-            if (spec.divider) {
-                const div = document.createElement('div');
-                div.className = 'meeting-menu-divider';
-                menu.appendChild(div);
-                continue;
-            }
-            const btn = document.createElement('button');
-            btn.type = 'button';
-            btn.setAttribute('role', 'menuitem');
-            btn.className = 'meeting-menu-item' + (spec.danger ? ' danger' : '');
-            const iconSpan = document.createElement('span');
-            iconSpan.className = 'meeting-menu-icon';
-            iconSpan.innerHTML = recIcon(spec.icon);
-            const labelSpan = document.createElement('span');
-            labelSpan.textContent = spec.label;
-            btn.append(iconSpan, labelSpan);
-            if (spec.enabled) {
-                btn.addEventListener('click', async () => {
-                    closeRecordingMenu();
-                    await spec.action();
-                });
-            } else {
-                btn.disabled = true;
-            }
-            menu.appendChild(btn);
-        }
-        document.body.appendChild(menu);
-        const rect = anchorBtn.getBoundingClientRect();
-        const left = mousePos?.x ?? (rect.right - 4);
-        const top = mousePos?.y ?? (rect.bottom + 4);
-        menu.style.left = `${left}px`;
-        menu.style.top = `${top}px`;
-        // Clamp inside viewport.
-        const mrect = menu.getBoundingClientRect();
-        if (mrect.right > window.innerWidth - 8) {
-            menu.style.left = `${window.innerWidth - mrect.width - 8}px`;
-        }
-        if (mrect.bottom > window.innerHeight - 8) {
-            menu.style.top = `${window.innerHeight - mrect.height - 8}px`;
-        }
-        _recordingMenu = menu;
-        setTimeout(() => {
-            document.addEventListener('click', closeOnOutsideMenu, true);
-            document.addEventListener('contextmenu', closeOnOutsideMenu, true);
-            document.addEventListener('keydown', menuKeyHandler);
-        }, 0);
-    }
-    function closeRecordingMenu() {
-        if (_recordingMenu) {
-            _recordingMenu.remove();
-            _recordingMenu = null;
-        }
-        document.removeEventListener('click', closeOnOutsideMenu, true);
-        document.removeEventListener('contextmenu', closeOnOutsideMenu, true);
-        document.removeEventListener('keydown', menuKeyHandler);
-    }
-    function closeOnOutsideMenu(ev) {
-        if (_recordingMenu && !_recordingMenu.contains(ev.target)) closeRecordingMenu();
-    }
-    function menuKeyHandler(ev) {
-        if (ev.key === 'Escape') closeRecordingMenu();
     }
 
     // ─── Folder picker (Variant A "Change…") ─────────────────────────────

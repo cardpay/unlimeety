@@ -100,7 +100,6 @@ let lastMenuHtml = '';   // innerHTML openMeetingMenu built
 
 const sandbox = {
     // Module-level state the sliced functions close over.
-    transcribeRunning: new Set(),
     contentMatches: new Map(),
     meetings: [],
     searchQuery: '',
@@ -111,13 +110,24 @@ const sandbox = {
     document: {
         querySelectorAll: () => queried,
         createElement: () => ({
-            set innerHTML(v) { lastMenuHtml = v; },
-            get innerHTML() { return lastMenuHtml; },
-            querySelector: () => ({ addEventListener() {} }),
+            dataset: {},
+            className: '',
+            _html: '',
+            set innerHTML(v) { this._html = v; lastMenuHtml = v; },
+            get innerHTML() { return this._html; },
+            addEventListener() {},
+            querySelector: () => ({ addEventListener() {}, getBoundingClientRect: () => ({}) }),
             querySelectorAll: () => [],
         }),
         body: { appendChild() {} },
     },
+    // Collaborators buildMeetingCard calls that are not what is under test.
+    activeMeetingId: null,
+    selectedRecordings: new Set(),
+    modelChipHtml: () => '',
+    formatMeetingStamp: () => 'STAMP',
+    avatarStackHtml: () => '',
+    enhancedChipTitle: () => 'ENHANCED',
     // Collaborators openMeetingMenu calls that are not what is under test.
     closeMeetingMenu: () => {},
     // The card's info popover: openMeetingMenu dismisses it so the two are
@@ -132,24 +142,52 @@ const SLICED = [
     'modelIsStrong', 'modelLabel', 'modelWorthRedoing', 'meetingMatchesFilter',
     'meetingMatchesSearch', 'computeFilterCounts', 'emptyStateText', 'markActiveChip',
     'deriveStatus', 'stripMeetPrefix', 'deriveMeetingFromTranscript',
+    'deriveMeetingFromRecording',
     'reasonTitle', 'openMeetingMenu',
+    'statusPillHtml', 'formatMeetingDuration', 'formatMeetingSize',
+    'highlightSnippet', 'buildMeetingCard',
 ];
 vm.runInNewContext(
-    [sliceConst(appSrc, 'FILTER_EMPTY_TEXT'), ...SLICED.map((n) => sliceFunction(appSrc, n, 'renderer/app.js'))]
+    [sliceConst(appSrc, 'FILTER_EMPTY_TEXT'), sliceConst(appSrc, 'STATUS_LABELS'),
+     ...SLICED.map((n) => sliceFunction(appSrc, n, 'renderer/app.js'))]
         .join('\n'),
     sandbox,
 );
 const {
     modelWorthRedoing, meetingMatchesFilter, meetingMatchesSearch, computeFilterCounts,
-    deriveMeetingFromTranscript, emptyStateText, markActiveChip, openMeetingMenu,
+    deriveMeetingFromTranscript, deriveMeetingFromRecording, emptyStateText, markActiveChip,
+    openMeetingMenu, buildMeetingCard, formatMeetingSize,
 } = sandbox;
 
 // ─── (a) Behavioral: one case per row of the spec's edge-case matrix ──────────
 
+// A transcript row. hasTranscript is not decoration: the To summarize queue
+// gates on it, so a fixture without it models nothing that exists on disk.
 const meeting = (over) => ({
-    hasAudio: false, hasSummary: false, hasSpokenTurns: false,
+    hasAudio: false, hasTranscript: true, hasSummary: false, hasSpokenTurns: false,
     model: null, enhancedAt: null, readFailed: false, ...over,
 });
+
+// An un-transcribed recording. Every queue flag is false as a finding, not as a
+// default — there is no transcript to enhance, summarize or improve on.
+const recording = (over) => ({
+    hasAudio: true, hasTranscript: false, hasSummary: false, hasSpokenTurns: false,
+    model: undefined, enhancedAt: undefined, readFailed: false, ...over,
+});
+
+// To transcribe: the only queue an audio-only row belongs to, and the only one
+// that is about producing a transcript rather than improving one.
+assert.strictEqual(meetingMatchesFilter(recording({}), 'transcribe'), true,
+    'a recording with no transcript belongs in the To transcribe queue');
+assert.strictEqual(meetingMatchesFilter(meeting({ hasAudio: true }), 'transcribe'), false,
+    'a transcript is not waiting to be transcribed, audio or not');
+
+// …and it belongs in no other queue. `!hasSummary` alone would have swept every
+// recording into To summarize, offering an action it cannot run.
+for (const q of ['retranscribe', 'enhance', 'summarize']) {
+    assert.strictEqual(meetingMatchesFilter(recording({}), q), false,
+        `an un-transcribed recording must not enter the ${q} queue`);
+}
 
 // To re-transcribe. Worth redoing means "not the most accurate model available",
 // so the app's own default — large-v3_turbo — is in the queue: turbo → large-v3
@@ -223,8 +261,14 @@ assert.deepStrictEqual(
     // Spread into a host object: the sandbox's own Object.prototype is a
     // different realm's, which deepStrictEqual counts as a difference.
     { ...computeFilterCounts(library) },
-    { all: 3, audio: 3, retranscribe: 1, enhance: 0, summarize: 1 },
+    { all: 3, audio: 3, transcribe: 0, retranscribe: 1, enhance: 0, summarize: 1 },
     'every transcript enhanced → To enhance counts 0, and the read-failed row counts in none');
+
+// One recording in the library moves exactly one count, and none of the others.
+assert.deepStrictEqual(
+    { ...computeFilterCounts([...library, recording({})]) },
+    { all: 4, audio: 4, transcribe: 1, retranscribe: 1, enhance: 0, summarize: 1 },
+    'a recording counts under To transcribe and under no other queue');
 
 // Acceptance criterion: filter and search both apply, and the counts a chip
 // shows are independent of the search box.
@@ -238,7 +282,8 @@ const visible = searchable.filter(
 assert.deepStrictEqual(visible.map((m) => m.id), ['a'],
     'an active queue chip and a search query must both narrow the list');
 assert.deepStrictEqual(
-    { ...computeFilterCounts(searchable) }, { all: 3, audio: 0, retranscribe: 0, enhance: 0, summarize: 2 },
+    { ...computeFilterCounts(searchable) },
+    { all: 3, audio: 0, transcribe: 0, retranscribe: 0, enhance: 0, summarize: 2 },
     'chip counts are computed off the unfiltered, unsearched list');
 
 // The renderer's pass-through: an IPC-shaped item must arrive on the meeting
@@ -277,6 +322,7 @@ assert.strictEqual(emptyStateText(), 'No meetings yet', 'an empty library says s
 sandbox.meetings = library;
 assert.strictEqual(emptyStateText(), 'No meetings yet', 'the All chip over a library is still that');
 for (const [filter, expected] of [
+    ['transcribe', 'Nothing to transcribe'],
     ['retranscribe', 'Nothing to re-transcribe'],
     ['enhance', 'Nothing to enhance'],
     ['summarize', 'Nothing to summarize'],
@@ -294,7 +340,7 @@ sandbox.meetings = [];
 // ─── Selection, executed ────────────────────────────────────────────────────
 // Exactly one chip pressed. A constant "true" in place of the ternary used to
 // pass every assertion here.
-queried = makeChips(['all', 'retranscribe', 'enhance', 'summarize']);
+queried = makeChips(['all', 'transcribe', 'retranscribe', 'enhance', 'summarize']);
 markActiveChip('enhance');
 assert.deepStrictEqual(
     queried.filter((c) => c.attrs['aria-pressed'] === 'true').map((c) => c.dataset.filter),
@@ -342,12 +388,125 @@ for (const action of ['enhance', 'summarize']) {
 assert.ok(/disabled/.test(itemOf(failedMenu, 'retranscribe')),
     'Re-transcribe stays gated on audio, which a read failure cannot vouch for');
 
+// No item may grey out without saying why — the gate and the tooltip come off
+// one string per cause, so they cannot drift apart.
+const noArtifacts = menuFor(meeting({ hasAudio: false, hasSummary: false, hasSpokenTurns: true }));
+for (const action of ['retranscribe', 'delete-audio']) {
+    assert.ok(/No audio file/.test(itemOf(noArtifacts, action)),
+        `${action} must name the missing audio, not grey out silently`);
+}
+assert.ok(/No summary yet/.test(itemOf(noArtifacts, 'delete-summary')),
+    'Delete summary must name the missing summary');
+
 sandbox.activeJobFor = () => ({ id: 'job' });
 const running = menuFor(meeting({ hasSpokenTurns: true }));
 assert.ok(/disabled/.test(itemOf(running, 'enhance')), 'a running Enhance disables the item');
 assert.ok(/already running/.test(itemOf(running, 'enhance')),
     'a control that greys out silently just looks broken');
 sandbox.activeJobFor = () => null;
+
+// An audio-only row: every item that reads or writes a .txt is off, and the one
+// action it has is spelled Transcribe…, not Re-transcribe….
+const audioOnlyMenu = menuFor(recording({}));
+for (const action of ['summarize', 'enhance', 'delete-transcript']) {
+    assert.ok(/disabled/.test(itemOf(audioOnlyMenu, action)),
+        `${action} must be disabled on a recording with no transcript`);
+    assert.ok(/Not transcribed yet/.test(itemOf(audioOnlyMenu, action)),
+        `${action} must say the transcript is what is missing`);
+}
+assert.ok(!/disabled/.test(itemOf(audioOnlyMenu, 'retranscribe')),
+    'transcribing is the one action a recording does have');
+assert.ok(!/disabled/.test(itemOf(audioOnlyMenu, 'rename')),
+    'renaming a recording moves the wav — it does not need a transcript');
+assert.ok(!/disabled/.test(itemOf(audioOnlyMenu, 'delete-audio')),
+    'the wav is exactly what there is to delete');
+assert.ok(/>Transcribe…</.test(audioOnlyMenu) && !/Re-transcribe/.test(audioOnlyMenu),
+    'nothing has been transcribed yet, so the label cannot say "Re-"');
+assert.ok(itemOf(audioOnlyMenu, 'reveal'), 'a recording offers Show in Finder');
+assert.ok(!/data-action="reveal"/.test(menuFor(meeting({ hasAudio: true }))),
+    'Show in Finder is the recording row\'s item, not every row\'s');
+
+// A transcribe job already running on the same wav — the queue keys on that
+// exact path, so the item can see it.
+sandbox.activeJobFor = (type) => (type === 'transcribe' ? { id: 'job' } : null);
+const busyRec = menuFor(recording({}));
+assert.ok(/disabled/.test(itemOf(busyRec, 'retranscribe')),
+    'a transcription already running on this recording disables the item');
+assert.ok(/already running/.test(itemOf(busyRec, 'retranscribe')), 'and must say why');
+sandbox.activeJobFor = () => null;
+
+// The recordings pass-through, end to end: a `record:list` row must derive into
+// a meeting the To transcribe queue accepts and no other queue does.
+const derivedRec = deriveMeetingFromRecording({
+    filePath: '/tmp/Meet_Recordings/a.wav', filename: 'a.wav',
+    createdAt: Date.now(), mtime: Date.now(), size: 4096, hasTranscript: false,
+});
+assert.strictEqual(derivedRec.id, '/tmp/Meet_Recordings/a.wav',
+    'the wav path is the id — every record:* handler takes exactly that');
+assert.strictEqual(derivedRec.audioPath, derivedRec.id);
+assert.strictEqual(derivedRec.transcriptPath, null);
+assert.strictEqual(derivedRec.hasTranscript, false);
+assert.strictEqual(derivedRec.status, 'audio_only',
+    'deriveStatus must report a transcript-less recording as audio_only');
+assert.strictEqual(meetingMatchesFilter(derivedRec, 'transcribe'), true);
+for (const q of ['retranscribe', 'enhance', 'summarize']) {
+    assert.strictEqual(meetingMatchesFilter(derivedRec, q), false,
+        `a derived recording must not reach the ${q} queue`);
+}
+assert.strictEqual(deriveMeetingFromRecording({}), null, 'a row without a path is not a meeting');
+
+// ─── The card, executed ─────────────────────────────────────────────────────
+// The checkbox is the only route into batch transcription now that the Record
+// sidebar is gone, and its gate is one boolean nothing else observes.
+// `status` the way deriveStatus would have set it — the filter fixtures above
+// model predicates, not derived records, so they carry none.
+const asCard = (m) => ({
+    id: '/r/a.wav', title: 'T', date: new Date(0),
+    status: m.hasTranscript === false ? 'audio_only' : 'transcribed', ...m,
+});
+const cardHtml = (m) => {
+    sandbox.selectedRecordings.clear();
+    return buildMeetingCard(asCard(m))._html;
+};
+
+assert.ok(/class="meeting-pick"/.test(cardHtml(recording({}))),
+    'a recording must offer a checkbox — it is the only way into a batch');
+assert.ok(!/class="meeting-pick"/.test(cardHtml(meeting({ hasAudio: true }))),
+    'a transcript is not batch-transcribable, so it gets no checkbox');
+assert.ok(/aria-label="Select T for batch transcription"/.test(cardHtml(recording({}))),
+    'the checkbox must name its own row, not carry one shared string');
+
+// A wav already in the transcribe lane: re-submitting queues it twice and
+// deleting it kills the run, so the row is neither selectable nor silent.
+sandbox.activeJobFor = (type, fp) => (type === 'transcribe' && fp === '/r/busy.wav' ? { id: 'j' } : null);
+const busyCard = cardHtml(recording({ id: '/r/busy.wav' }));
+assert.ok(!/class="meeting-pick"/.test(busyCard),
+    'a recording being transcribed must not be selectable');
+assert.ok(/<span class="status-pill" data-status="transcribing"/.test(busyCard),
+    'the card must say a transcription is running');
+assert.ok(/class="meeting-progress"/.test(busyCard),
+    'and show the in-flight bar the deleted sidebar used to draw per card');
+const idleCard = cardHtml(recording({ id: '/r/idle.wav' }));
+assert.ok(/Audio only/.test(idleCard) && !/class="meeting-progress"/.test(idleCard),
+    'a recording with no job stays Audio only');
+sandbox.activeJobFor = () => null;
+
+// A checked row must render checked, or the selection is invisible on repaint.
+sandbox.selectedRecordings.add('/r/a.wav');
+assert.ok(/checked/.test(buildMeetingCard(asCard(recording({})))._html),
+    'a selected recording must repaint as checked');
+sandbox.selectedRecordings.clear();
+
+// Size stands in for the duration record:list does not report. Below a megabyte
+// the MB form read "0.0 MB", which is what an empty file looks like.
+assert.strictEqual(formatMeetingSize(0), '');
+assert.strictEqual(formatMeetingSize(62 * 1024), '62 KB');
+assert.strictEqual(formatMeetingSize(500), '1 KB', 'a tiny file is not zero-sized');
+assert.strictEqual(formatMeetingSize(5 * 1024 * 1024), '5.0 MB');
+assert.strictEqual(formatMeetingSize(36 * 1024 * 1024), '36 MB');
+assert.strictEqual(formatMeetingSize(2 * 1024 * 1024 * 1024), '2.0 GB');
+assert.ok(/62 KB/.test(cardHtml(recording({ sizeBytes: 62 * 1024 }))),
+    'the card shows the size where a duration would go');
 
 // ─── The real spoken-turns predicate, on real files ─────────────────────────
 // The shipped function, not a re-implementation: flipping `.length > 0` to
@@ -439,8 +598,8 @@ const chipTags = filterRow[1].split('<button').slice(1).map((tag) => ({
 }));
 const chips = chipTags.map((c) => c.filter);
 assert.deepStrictEqual(
-    chips, ['all', 'retranscribe', 'enhance', 'summarize'],
-    'the chip row is exactly All + the three work queues, All first');
+    chips, ['all', 'transcribe', 'retranscribe', 'enhance', 'summarize'],
+    'the chip row is exactly All + the four work queues, All first');
 assert.deepStrictEqual(
     chipTags.filter((c) => c.active).map((c) => c.filter), ['all'],
     'All must be the one chip marked .active in the markup');

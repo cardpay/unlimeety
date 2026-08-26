@@ -42,13 +42,13 @@ const {
     escHtml,
 );
 
-const { deriveMeetingFromTranscript } = new Function(
+const { deriveMeetingFromTranscript, deriveMeetingFromRecording, mergeMeetings } = new Function(
     'stripMeetPrefix', 'deriveStatus',
     `${region('app.js', 'meeting record')}
-     return { deriveMeetingFromTranscript };`,
+     return { deriveMeetingFromTranscript, deriveMeetingFromRecording, mergeMeetings };`,
 )(
     (s) => s,
-    () => 'transcribed',
+    (m) => (m.hasTranscript ? 'transcribed' : 'audio_only'),
 );
 
 const byKey = (rows) => Object.fromEntries(rows.map((r) => [r.key, r.value]));
@@ -262,6 +262,106 @@ for (const empty of ['', '   \n\n  ', null, undefined]) {
         'a transcript with no header yields no rows, so the card renders no chip',
     );
     assert.deepStrictEqual(meetingMetaRows(undefined), [], 'and neither does no meeting at all');
+}
+
+// ─── main.js record:list row → meeting record ───────────────────────────────
+// Same contract for the other list source. Every key below is one main.js
+// actually emits (main.js:record:list) — renaming either side fails here rather
+// than leaving the library quietly short of half its rows.
+{
+    const row = {
+        filename: '14-30 25-08-26 Daily.wav',
+        filePath: '/Users/me/Downloads/Meet_Recordings/14-30 25-08-26 Daily.wav',
+        createdAt: Date.parse('2026-08-25T14:30:00.000Z'),
+        mtime: Date.parse('2026-08-25T15:05:00.000Z'),
+        size: 41_943_040,
+        hasTranscript: false,
+        transcriptPath: '/Users/me/Downloads/Meet_Transcripts/14-30 25-08-26 Daily.txt',
+        hasSummary: false,
+        summaryPath: null,
+    };
+
+    const m = deriveMeetingFromRecording(row);
+    assert.strictEqual(m.id, row.filePath, 'the wav path is the id');
+    assert.strictEqual(m.audioPath, row.filePath);
+    assert.strictEqual(m.transcriptPath, null, 'the .txt does not exist — do not name it');
+    assert.strictEqual(m.title, '14-30 25-08-26 Daily', 'title is the on-disk stem, minus .wav');
+    assert.strictEqual(m.sizeBytes, row.size);
+    assert.strictEqual(m.date.getTime(), row.createdAt);
+    assert.strictEqual(m.status, 'audio_only');
+    assert.deepStrictEqual(
+        { hasAudio: m.hasAudio, hasTranscript: m.hasTranscript, hasSummary: m.hasSummary,
+          hasSpokenTurns: m.hasSpokenTurns, readFailed: m.readFailed },
+        { hasAudio: true, hasTranscript: false, hasSummary: false,
+          hasSpokenTurns: false, readFailed: false },
+        'every queue flag is a finding here, and none of them is undefined',
+    );
+    // No transcript means no header, so the card must not offer a details chip.
+    assert.strictEqual(m.header, '');
+    assert.deepStrictEqual(meetingMetaRows(m), []);
+
+    // mtime stands in when the row has no birthtime.
+    assert.strictEqual(
+        deriveMeetingFromRecording({ ...row, createdAt: 0 }).date.getTime(), row.mtime,
+        'a row with no createdAt falls back to mtime rather than to now',
+    );
+    assert.strictEqual(deriveMeetingFromRecording(null), null, 'no row, no record');
+    assert.strictEqual(deriveMeetingFromRecording({ filename: 'x.wav' }), null,
+        'a row with no path has no id, so it is not a meeting');
+}
+
+// ─── The union the library renders ──────────────────────────────────────────
+// One card per meeting, whichever list it came from. The dedup rule is the
+// whole point: get it wrong and a recording shows twice, or not at all.
+{
+    const REC = '/Users/me/Downloads/Meet_Recordings';
+    const TXT = '/Users/me/Downloads/Meet_Transcripts';
+    const txt = (stem, audioPath) => ({
+        filename: `${stem}.txt`, filePath: `${TXT}/${stem}.txt`,
+        createdAt: Date.parse('2026-08-20T09:00:00.000Z'),
+        hasAudio: Boolean(audioPath), audioPath: audioPath || null, participants: [],
+    });
+    const wav = (stem, hasTranscript) => ({
+        filename: `${stem}.wav`, filePath: `${REC}/${stem}.wav`,
+        createdAt: Date.parse('2026-08-21T09:00:00.000Z'), size: 1024, hasTranscript,
+    });
+
+    const merged = mergeMeetings(
+        [txt('Daily', `${REC}/Daily.wav`), txt('Pasted', null)],
+        [wav('Daily', true), wav('Fresh', false)],
+    );
+    assert.deepStrictEqual(
+        merged.map((m) => m.id),
+        [`${TXT}/Daily.txt`, `${TXT}/Pasted.txt`, `${REC}/Fresh.wav`],
+        'every transcript, plus only the recordings without one',
+    );
+    assert.strictEqual(merged.filter((m) => m.hasTranscript === false).length, 1);
+
+    // The legacy shape: the wav stem carries a timestamp the transcript's does
+    // not, so record:list cannot pair them — but transcripts:list already did,
+    // and its audioPath is what breaks the tie.
+    const legacyWav = `${REC}/Daily-20260821-090000.wav`;
+    const legacy = mergeMeetings(
+        [txt('Daily', legacyWav)],
+        [{ filename: 'Daily-20260821-090000.wav', filePath: legacyWav, createdAt: 1, size: 1, hasTranscript: false }],
+    );
+    assert.deepStrictEqual(
+        legacy.map((m) => m.id), [`${TXT}/Daily.txt`],
+        'a wav a transcript already claims must not get a second card of its own',
+    );
+
+    // A transcript with no audio claims nothing, so an unrelated recording is
+    // still listed.
+    assert.strictEqual(
+        mergeMeetings([txt('Pasted', null)], [wav('Fresh', false)]).length, 2,
+        'a transcript without audio must not suppress unrelated recordings',
+    );
+    assert.deepStrictEqual(mergeMeetings(null, null), [], 'two empty sources yield an empty library');
+    assert.deepStrictEqual(
+        mergeMeetings([], [null, { filePath: '' }, wav('Fresh', false)]).map((m) => m.id),
+        [`${REC}/Fresh.wav`],
+        'malformed rows are dropped rather than rendered as blank cards',
+    );
 }
 
 // ─── Panel markup ───────────────────────────────────────────────────────────
