@@ -50,13 +50,9 @@
     padding: 40px 24px;
     overflow-y: auto;
 }
-/* `margin: auto` rather than `align-items/justify-content: center`: on a scroll
-   container, centering puts overflow above the top edge where scrollTop cannot
-   reach it — and this form is taller than Live's (sources, permission hint, an
-   expandable troubleshoot block, title, actions), so a short window would hide
-   its heading for good. Auto margins center the same way and still collapse
-   when the content is taller than the box. */
-#record-setup .live-setup-inner { margin: auto; }
+/* No `margin: auto` override here on purpose: it lives on `.live-setup-inner`
+   in live.css, where both tabs read it from. Two copies is how it drifted the
+   first time — Record got the scroll fix and Live kept the broken centering. */
 
 /* Still used by the transcribe-settings header's `.ts-kbd`. */
 .record-kbd {
@@ -632,10 +628,16 @@
     max-width: 600px;
 }
 
-/* Model grid */
+/* Model grid.
+   `minmax(0, 1fr)` rather than `1fr`: a grid item's default `min-width: auto`
+   is its min-content width, so `1fr` tracks refuse to shrink below the widest
+   thing in the card — here `.ts-model-footer`'s "480 MB · 99 languages ↓
+   download 🗑" row. In Live's 520px start-screen column that overflowed the
+   form horizontally by 58px and hid the third card. Wider screens (the Record
+   tab's transcribe settings) never hit the floor, so this is inert there. */
 .ts-model-grid {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 8px;
 }
 .ts-model-card {
@@ -659,6 +661,11 @@
 }
 .ts-model-top {
     display: flex;
+    /* Same story as .ts-model-footer below: radio + name + a non-wrapping
+       "Recommended"/"Best quality" pill is 15px wider than a card in Live's
+       520px column, and the pill was landing on top of the next card. Wrapping
+       drops it to its own line, and only in the narrow layout. */
+    flex-wrap: wrap;
     align-items: center;
     gap: 8px;
 }
@@ -739,6 +746,11 @@
 }
 .ts-model-footer {
     display: flex;
+    /* The other half of the minmax(0, 1fr) fix above: with the track free to
+       shrink, this row is what still stuck out (7px in Live's column). Let it
+       wrap onto a second line instead — 34px tall becomes 40px, and only when
+       it has to. */
+    flex-wrap: wrap;
     align-items: center;
     gap: 5px;
     font-size: 10.5px;
