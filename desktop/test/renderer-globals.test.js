@@ -16,6 +16,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+const vm = require('vm');
 
 const DESKTOP = path.join(__dirname, '..');
 const RENDERER = path.join(DESKTOP, 'renderer');
@@ -38,21 +39,43 @@ const TOP_LEVEL = /^(?:const|let|class|function)\s+([A-Za-z_$][\w$]*)/;
 
 assert.ok(bridges.size > 0, 'expected preload.js to expose at least one bridge');
 
-const collisions = [];
+const problems = [];
 for (const file of rendererScripts(RENDERER)) {
-    const lines = fs.readFileSync(file, 'utf-8').split('\n');
+    const rel = path.relative(DESKTOP, file);
+    const src = fs.readFileSync(file, 'utf-8');
+    // Same silent-death failure mode, other cause: a stray backtick inside an
+    // injected-CSS template literal took calendar-picker.js out whole, so all
+    // three "From calendar" buttons quietly did nothing. vm.Script parses the
+    // way the browser loads a classic <script>, which is what these all are —
+    // and the assertion below this loop keeps it that way, since vm.Script
+    // rejects `import`/`export`/top-level await and would report a perfectly
+    // good module as unparseable.
+    try { new vm.Script(src, { filename: file }); }
+    catch (err) { problems.push(`${rel} does not parse: ${err.message}`); }
+    const lines = src.split('\n');
     lines.forEach((line, i) => {
         const m = TOP_LEVEL.exec(line);
         if (m && bridges.has(m[1])) {
-            collisions.push(`${path.relative(DESKTOP, file)}:${i + 1} declares '${m[1]}'`);
+            problems.push(`${rel}:${i + 1} shadows the bridge global '${m[1]}'`);
         }
     });
 }
 
+// Both kinds reported together: asserted separately, whichever ran first hid
+// every finding of the other kind.
 assert.deepStrictEqual(
-    collisions, [],
-    'renderer top-level binding shadows a contextBridge global (SyntaxError at load):\n  '
-    + collisions.join('\n  ')
+    problems, [],
+    'renderer script dies silently at load:\n  ' + problems.join('\n  ')
+);
+
+// vm.Script above can only vouch for classic scripts. The day one of these
+// becomes type="module" this fires, rather than the parse check quietly
+// reporting a bogus failure (or being quietly skipped).
+assert.doesNotMatch(
+    fs.readFileSync(path.join(RENDERER, 'index.html'), 'utf-8'),
+    /<script[^>]*\btype\s*=\s*["']module["']/,
+    'a renderer script became type="module": the vm.Script parse check above '
+    + 'cannot read modules, so switch it to `node --check` on an .mjs first'
 );
 
 console.log('renderer-globals: all checks passed');
