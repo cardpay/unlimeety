@@ -184,8 +184,8 @@ test('a language no picker lists leaves nothing selected, and does not throw', (
 });
 
 test('a picker absent from the DOM is skipped, not crashed on', () => {
-    // recLangSeg is null until index.html has the recording-screen picker; the
-    // shared painter runs on both tabs regardless.
+    // A picker ref is null on any screen whose markup does not carry one; the
+    // shared painter runs across every tab regardless.
     const batch = fakePicker(LANGS);
     paintLangSegs([null, batch, undefined], 'en');
     assert.deepStrictEqual(selected(batch), ['en']);
@@ -347,4 +347,23 @@ test('the IPC handler coerces a hostile participants value instead of forwarding
     assert.ok(/Array\.isArray\(participants\)/.test(text), 'participants reaches the queue unchecked');
     assert.ok(/canReadPath\(filePath\)/.test(text), 'the path confinement check is gone');
     assert.ok(/process\.platform !== 'darwin'/.test(text), 'the platform gate is gone');
+});
+
+test('every Record language picker is fed to the shared painter and handler', () => {
+    // The failure this guards: adding a picker to index.html, wiring its ref, and
+    // forgetting one of the three call sites — it would then never repaint, or
+    // never respond to clicks, while looking exactly like the others.
+    const refs = src.match(/const langSegs = \[([^\]]*)\]/);
+    assert.ok(refs, 'langSegs list not found in record.js — was it inlined again?');
+    const names = refs[1].split(',').map((n) => n.trim()).filter(Boolean);
+    assert.ok(names.length >= 2, `expected every Record picker in langSegs, got ${names.join(', ')}`);
+    for (const name of names) {
+        assert.ok(
+            new RegExp(`const ${name}\\s*=\\s*\\$\\(`).test(src),
+            `${name} is listed in langSegs but never resolved from the DOM`,
+        );
+    }
+    // All three shared call sites must spread the list rather than name pickers.
+    const spreads = [...src.matchAll(/\[tsLangSeg, \.\.\.langSegs\]/g)];
+    assert.strictEqual(spreads.length, 3, 'expected paint-on-init, applyBatchSettingsToScreen and the click handler to share one list');
 });
