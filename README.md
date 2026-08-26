@@ -83,7 +83,7 @@ Three ways to get a transcript, all landing in the same library:
 | | Path | Use it for |
 |---|---|---|
 | 🎙 | **Live tab** | Any app — Zoom, Teams, Slack huddles, a browser tab, a room. Mic + system audio transcribed in real time, with live speaker diarization. |
-| ⏺ | **Record tab** | Record now to `.wav`, transcribe later with a big model. Also imports existing audio files. |
+| ⏺ | **Record tab** | Records to `.wav` with no live transcription; on **Stop & save** a large-v3 diarized transcription starts on its own, in the language you picked while recording. Also imports existing audio files. |
 | 🧩 | **Chrome extension** | Google Meet only. Reuses Meet's own captions (no audio capture at all) and hands the file to the desktop app. |
 
 Whichever path you took, from there it's the same transcript: edit it, bind real names to speakers,
@@ -176,7 +176,7 @@ the follow-up, export or share it.
 
 **Odds and ends**
 - Lives in the menu bar: close the window and meeting detection keeps working.
-- Hotkeys: `⌘S` save, `⌘⇧S` save as, `⌘O` open, `⌘N` new, `⌘K` search, `⌘R` Record tab, `⌘/` chat,
+- Hotkeys: `⌘S` save, `⌘⇧S` save as, `⌘O` open, `⌘N` new, `⌘K` search, `⌘/` chat,
   `⌘⏎` create + summarize.
 
 ---
@@ -243,7 +243,7 @@ API keys are encrypted with Electron `safeStorage` (Keychain on macOS).
 **Capturing** — three independent paths:
 
 - **Live tab** (any app — Zoom, Teams, Meet, a browser, a room): open Unlimeety → **Live** tab → pick language and model → **Start**. Mic and system audio are transcribed and diarized locally; **Stop** saves the transcript plus the `.wav`. Or just wait: if auto-detect is on, Unlimeety offers to start recording the moment a call begins.
-- **Record tab**: records to `.wav` without live transcription — transcribe later from the library with a bigger model, or batch-transcribe several recordings at once. Also imports existing audio files.
+- **Record tab**: records to `.wav` without live transcription, so it costs almost nothing while the call runs. Pick the transcription language on the recording screen — thirty seconds in you know which one it is. On **Stop & save** a large-v3 diarized transcription starts automatically and an Enhance pass follows; watch both in the queue panel. The batch settings screen is still there to re-run a recording with different settings, or to transcribe several at once. Also imports existing audio files.
 - **Chrome extension** (Google Meet only, uses Meet's captions): join a call → the **Unlimeety** panel appears bottom-right → pick a language (Russian / English / Serbian) → click **record**. On **Save** or when you leave the call, the transcript lands in `~/Downloads/Meet_Transcripts/` and opens in the desktop app.
 
 **Then, in the app:** edit the transcript, bind real names to speakers, re-transcribe with a better
