@@ -588,8 +588,12 @@
           </div>
 
           <h2>Record audio</h2>
-          <p class="live-muted">Stream your microphone and the call's system audio straight to disk — no live transcription, so it costs almost nothing while the call runs. The <code>.wav</code> goes to <code>~/Downloads/Meet_Recordings/</code>.</p>
-          <p class="live-muted">On <strong>Stop &amp; save</strong> a large-v3 transcription with speaker diarization starts on its own, in the language you pick while recording, and writes to <code>~/Downloads/Meet_Transcripts/</code>. It runs locally on your Mac and ignores the batch settings screen — that screen is for re-running a recording with different settings. The Enhance pass that follows uses whichever summarizer you configured, so with a cloud provider that step does leave the machine.</p>
+          <!-- Deliberately as short as Live's blurb — this screen is Live's twin,
+               and a wall of text is the fastest way to stop looking like one. The
+               things this used to spell out are said where they apply: the wav
+               path on the recording screen's file card, and what happens after
+               Stop & save in that screen's footer. -->
+          <p class="live-muted">Record your microphone and the call's system audio to disk — no live transcription, so it costs almost nothing while the call runs. On <strong>Stop &amp; save</strong> a large-v3 transcription starts on its own, in the language you pick while recording.</p>
 
           <div class="live-row">
             <span class="live-label">Sources</span>
@@ -645,7 +649,12 @@
           <div id="record-setup-error" class="record-setup-error hidden"></div>
 
           <div class="live-setup-actions">
-            <button id="record-btn-start" class="btn record-btn-start"><span class="record-btn-start-dot"></span>Start recording</button>
+            <!-- Same classes and icon as #live-btn-start: two buttons that start
+                 a recording should not be two different colours. -->
+            <button class="btn btn-primary btn-lg" id="record-btn-start">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="6"/></svg>
+              Start recording
+            </button>
             <button id="record-btn-import" class="btn btn-ghost">⬆ Import audio file…</button>
           </div>
         </div>
