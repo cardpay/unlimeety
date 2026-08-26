@@ -44,6 +44,10 @@
     const timerEl     = $('record-timer');
     const outputPathEl = $('record-output-path');
     const stopBtn     = $('record-btn-stop');
+    // Language for the transcription that fires on Stop & save. Not a third
+    // piece of state: it reads and writes `batchSettings.language`, the same
+    // value #ts-lang-seg edits.
+    const recLangSeg  = $('record-rec-lang-seg');
 
     const notesListEl  = $('record-notes-list');
     const notesEmptyEl = $('record-notes-empty');
@@ -261,6 +265,58 @@
         renderPresetSelect();
     }
 
+    // ── auto-transcribe ──
+    // Two pure helpers, kept together and free of module state so
+    // test/record-auto-transcribe.test.js can drive them directly.
+
+    // A recording this short holds no speech worth a large-v3 run — the job
+    // would spend minutes to fail with "produced no text". Below the threshold
+    // the wav is still saved and still listed under "To transcribe", so nothing
+    // is lost; it just is not queued automatically.
+    const MIN_AUTO_TRANSCRIBE_SEC = 1;
+
+    /// What to hand `autoQueueTranscribe` when a recording is saved, or null
+    /// when there is nothing worth transcribing. `event.path` is main's
+    /// canonical answer; `st.outputPath` is the one start() reported, used when
+    /// a `recordSaved` arrives without one.
+    function autoTranscribeArgs(event, st) {
+        const filePath = (event && event.path) || st.outputPath || '';
+        if (!filePath) return null;
+        // Absent duration (an older helper) must not block the queue — only a
+        // duration we have and know to be too short does.
+        const durationSec = Number(event && event.durationSec);
+        if (Number.isFinite(durationSec) && durationSec > 0 && durationSec < MIN_AUTO_TRANSCRIBE_SEC) {
+            return null;
+        }
+        return {
+            filePath,
+            language: st.batchSettings.language,
+            participants: Array.isArray(st.calendarParticipants) ? st.calendarParticipants : [],
+        };
+    }
+
+    /// Paint every language picker from one value. Both pickers go through
+    /// here, so the recording screen and the settings screen cannot disagree
+    /// about which language is selected. `aria-checked` rides along: the pills
+    /// are a radio group built from buttons, so it is the only thing that tells
+    /// a screen reader which one is chosen.
+    function paintLangSegs(containers, lang) {
+        for (const box of containers) {
+            if (!box) continue;
+            for (const seg of box.querySelectorAll('.ts-seg')) {
+                const on = seg.dataset.lang === lang;
+                seg.classList.toggle('is-active', on);
+                seg.setAttribute('aria-checked', on ? 'true' : 'false');
+            }
+        }
+    }
+    // ── end auto-transcribe ──
+
+    // The settings screen paints itself when it opens (renderTsScreen), but the
+    // recording screen's picker would otherwise show the markup default until
+    // then — wrong for anyone whose persisted language is not Russian.
+    paintLangSegs([tsLangSeg, recLangSeg], state.batchSettings.language);
+
     // Phase marker on <body>, for phase-specific styling. live.js clears it
     // when the user leaves this tab.
     document.body.dataset.recordPhase = state.phase;
@@ -328,6 +384,29 @@
     }
 
     openScreenSettingsBtn?.addEventListener('click', () => api.openScreenSettings());
+
+    // Troubleshoot block: copy the `tccutil reset …` command to the clipboard so
+    // the user can paste straight into Terminal. Read from the DOM rather than
+    // duplicated as a literal here, so the displayed and copied command cannot
+    // drift apart. Mirrors live.js's handler for the Live tab's own copy.
+    const copyTccBtn = $('record-copy-tcc-cmd');
+    const COPY_TCC_LABEL = 'Copy command';
+    copyTccBtn?.addEventListener('click', async () => {
+        const cmd = $('record-tcc-reset-cmd')?.textContent || '';
+        if (!cmd) return;
+        try {
+            await navigator.clipboard.writeText(cmd);
+            // Restore from the constant, not from whatever the label reads now:
+            // a second click inside the window would otherwise capture
+            // "Copied ✓" as the original and leave it there for good.
+            copyTccBtn.textContent = 'Copied ✓';
+            clearTimeout(copyTccBtn._restore);
+            copyTccBtn._restore = setTimeout(() => { copyTccBtn.textContent = COPY_TCC_LABEL; }, 1500);
+        } catch (_) {
+            // Clipboard blocked — the command is still visible in the <pre>
+            // for manual copy, so leave the label alone.
+        }
+    });
 
     // ─── Import an existing audio file ───────────────────────────────────
     // Skips the selection flow: the imported file is not in the recordings
@@ -701,13 +780,43 @@
                 updateRecordingIndicator();
                 stopTimer();
                 state.outputPath = event.path || state.outputPath;
-                // Return to the idle screen — the new recording shows up in
-                // the Meetings sidebar, which watches the recordings folder
-                // and lists it under "To transcribe". Only from the
-                // recording section: a stop that lands while a parallel
-                // transcription is on screen must not yank the user off it.
+                // Leave the recording screen FIRST. The submit below is the only
+                // thing here that can throw synchronously (a missing bridge
+                // method would), and a throw must not strand the user on a
+                // recording screen for a session that already ended.
+                // Only from the recording section: a stop that lands while a
+                // parallel transcription is on screen must not yank the user
+                // off it.
                 if (state.phase === 'recording') showSection('idle');
                 refreshHistory();
+                // Stop & save goes straight into transcription: nothing is left
+                // to decide, so the wav is queued here rather than parked under
+                // "To transcribe" for a manual trip through the settings screen.
+                // Fixed large-v3 + diarization + a chained Enhance all live in
+                // main's queueAutoTranscribe; the language is the one thing this
+                // tab picks. Progress belongs to the header queue panel and the
+                // idle screen's banner, so there is no screen to switch to.
+                const auto = autoTranscribeArgs(event, state);
+                // Whatever a previous stop failed with is stale now.
+                setupError.textContent = '';
+                setupError.classList.add('hidden');
+                if (auto) {
+                    // Calendar attendees belong to the session that just ended.
+                    // Consumed here, or recording #2 inherits recording #1's
+                    // guest list into an unattended transcript header.
+                    state.calendarParticipants = [];
+                    const failed = (message) => {
+                        setupError.textContent = message || 'Could not start transcription.';
+                        setupError.classList.remove('hidden');
+                    };
+                    Promise.resolve()
+                        .then(() => api.autoQueueTranscribe(auto.filePath, auto.language, auto.participants))
+                        .then((res) => { if (!res?.ok) failed(res?.error); })
+                        // A rejection here means the IPC itself failed — the
+                        // handler threw, or the bridge is gone. Silence would
+                        // read as "transcription started" while nothing runs.
+                        .catch((err) => failed(err?.message));
+                }
                 break;
             }
 
@@ -1106,12 +1215,8 @@
                 }
             }
         }
-        // Language segmented
-        if (tsLangSeg) {
-            for (const seg of tsLangSeg.querySelectorAll('.ts-seg')) {
-                seg.classList.toggle('is-active', seg.dataset.lang === bs.language);
-            }
-        }
+        // Language segmented — both pickers, one value.
+        paintLangSegs([tsLangSeg, recLangSeg], bs.language);
         // Diarize switch + inner state
         if (tsDiarizeToggle) tsDiarizeToggle.checked = !!bs.diarize;
         if (tsDiaInner) tsDiaInner.classList.toggle('is-disabled', !bs.diarize);
@@ -1187,12 +1292,12 @@
             recomputeTsEta();
         });
     }
-    if (tsLangSeg) {
-        tsLangSeg.addEventListener('click', (ev) => {
-            const seg = ev.target.closest('.ts-seg');
-            if (!seg) return;
-            const lang = seg.dataset.lang;
-            if (!lang || lang === 'more') return;
+    // One handler for both pickers: they write the same setting, so a second
+    // copy of this could only ever drift from the first.
+    for (const box of [tsLangSeg, recLangSeg]) {
+        box?.addEventListener('click', (ev) => {
+            const lang = ev.target.closest('.ts-seg')?.dataset.lang;
+            if (!lang) return;
             state.batchSettings.language = lang;
             onBatchSettingsChanged();
             applyBatchSettingsToScreen();
@@ -1253,13 +1358,6 @@
         if (m > 0) return `${m}m ${String(r).padStart(2, '0')}s`;
         return `${r}s`;
     }
-
-    // ─── Folder picker (Variant A "Change…") ─────────────────────────────
-    $('record-btn-change-folder')?.addEventListener('click', async () => {
-        // TODO: wire to a dedicated folder-picker IPC for recordings (none yet);
-        // currently no-op with a console warn.
-        console.warn('[record] folder picker is not wired (TODO).');
-    });
 
     // ─── Transcribing UI ──────────────────────────────────────────────────
     function setTransStatus(kind, text) {

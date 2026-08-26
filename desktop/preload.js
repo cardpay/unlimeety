@@ -145,6 +145,11 @@ contextBridge.exposeInMainWorld('recordApi', {
     // transcriptPath arrive via queueApi.onChanged. Cancel goes through
     // queueApi.cancel(jobId) now.
     transcribe:         (opts)   => ipcRenderer.invoke('record:transcribe', opts),
+    // Fired the moment a recording is saved. Takes no settings: the model is
+    // fixed to large-v3 in main and diarization is always on, so the only thing
+    // the renderer decides is the language.
+    autoQueueTranscribe: (filePath, language, participants) =>
+        ipcRenderer.invoke('record:autoQueueTranscribe', filePath, language, participants),
     getInstalledModels: ()       => ipcRenderer.invoke('record:getInstalledModels'),
     deleteModel:        (name)   => ipcRenderer.invoke('record:deleteModel', name),
     onEvent:            (cb)     => ipcRenderer.on('record:event', (_e, evt) => cb(evt)),

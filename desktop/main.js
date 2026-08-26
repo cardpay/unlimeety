@@ -28,13 +28,20 @@ queue.onChange((jobs) => {
 // Its own successful completion chains an Enhance pass; see runRecordTranscribeJob's
 // return. Replaces the old autoPipelineQueue: same large-v3/diarize-on defaults,
 // now a visible, cancelable job instead of a silent 2s-polled FIFO.
-function queueAutoTranscribe(filePath, language) {
+// `participants` is optional so live:saveTranscript's two-argument call keeps
+// working; runRecordTranscribeJob is what sanitises and merges it into the
+// transcript's "Participants:" line.
+function queueAutoTranscribe(filePath, language, participants = []) {
     return queue.submit('transcribe', filePath, {
         title: path.basename(filePath),
         extra: {
             filePath,
             model: 'openai_whisper-large-v3',
-            language,
+            // Falling through to runRecordTranscribeJob's own `|| 'ru'` would
+            // transcribe an unattended recording as Russian on the strength of
+            // a missing field. Detection is the honest answer when nobody said.
+            language: language || 'auto',
+            participants,
             diarize: true,
             // numberOfSpeakers left undefined — auto-detect.
         },
@@ -3367,16 +3374,21 @@ ipcMain.handle('record:stop', async () => {
     return { ok: true };
 });
 
-// Not called by any UI yet — the hook a later Record-tab "auto-enhance"
-// toggle will call. Same platform gate as `record:transcribe`, checked here
-// rather than left for the queue to discover a drain cycle later, and the
-// same `canReadPath` confinement every renderer-supplied path gets.
-ipcMain.handle('record:autoQueueTranscribe', (_e, filePath, language) => {
+// What the Record tab calls the moment a recording is saved: the wav needs no
+// further decisions, so it goes straight into the queue. Same platform gate as
+// `record:transcribe`, checked here rather than left for the queue to discover a
+// drain cycle later, and the same `canReadPath` confinement every
+// renderer-supplied path gets.
+ipcMain.handle('record:autoQueueTranscribe', (_e, filePath, language, participants) => {
     if (process.platform !== 'darwin') {
         return { ok: false, error: 'Local transcription is macOS-only.' };
     }
     if (!canReadPath(filePath)) return { ok: false, error: 'File is not accessible.' };
-    const job = queueAutoTranscribe(filePath, typeof language === 'string' ? language : '');
+    const job = queueAutoTranscribe(
+        filePath,
+        typeof language === 'string' ? language : '',
+        Array.isArray(participants) ? participants : [],
+    );
     return { ok: true, jobId: job.id };
 });
 
