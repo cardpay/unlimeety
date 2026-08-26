@@ -684,6 +684,10 @@ body.mode-record #btn-ask-ai {
     font-family: inherit;
 }
 .library-selection-link:hover { color: var(--text-secondary); }
+/* The one constructive action in the row — Delete is destructive and Clear is a
+   way out, so only this one carries the accent. */
+.library-selection-link.primary { color: var(--accent); font-weight: 600; }
+.library-selection-link.primary:hover { color: var(--accent-2); }
 .library-selection-link.danger { color: var(--danger); }
 .library-selection-link.danger:hover { opacity: 0.8; }
 
