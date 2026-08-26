@@ -331,6 +331,8 @@ npm start          # or: npm run dev   (opens DevTools)
 
 The helper binary lives at `desktop/live-helper/.build/release/unlimeety-live`. Rebuild it with `npm run build:helper` after editing any `*.swift` file under `live-helper/Sources/`.
 
+`npm test` covers the pure modules and the renderer logic sliced out for a `vm` sandbox — no Electron, under a second. `npm run check:layout` is the separate geometry check for the Record and Live start screens and the shared "From calendar" popover: it launches its own Electron and drives it over CDP, so it needs a display and Node 22 or newer, and prints one PASS/FAIL line per case.
+
 ### Build the desktop app
 
 ```bash
