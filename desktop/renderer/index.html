@@ -155,9 +155,21 @@
            starts with what the chip says. -->
       <div class="library-filters" role="group" aria-label="Filter meetings by work left to do">
         <button class="filter-chip active" data-filter="all" aria-pressed="true" title="Every meeting in the library" aria-label="All — every meeting in the library">All <span class="filter-count" data-count="all">0</span></button>
+        <button class="filter-chip" data-filter="transcribe" aria-pressed="false" title="Has audio and no transcript yet" aria-label="To transcribe — has audio and no transcript yet">To transcribe <span class="filter-count" data-count="transcribe">0</span></button>
         <button class="filter-chip" data-filter="retranscribe" aria-pressed="false" title="Has audio and was transcribed with something less accurate than large-v3" aria-label="To re-transcribe — has audio and was transcribed with something less accurate than large-v3">To re-transcribe <span class="filter-count" data-count="retranscribe">0</span></button>
         <button class="filter-chip" data-filter="enhance" aria-pressed="false" title="Has spoken turns and Enhance has never run on it" aria-label="To enhance — has spoken turns and Enhance has never run on it">To enhance <span class="filter-count" data-count="enhance">0</span></button>
         <button class="filter-chip" data-filter="summarize" aria-pressed="false" title="Has no summary on disk" aria-label="To summarize — has no summary on disk">To summarize <span class="filter-count" data-count="summarize">0</span></button>
+      </div>
+
+      <!-- Batch selection. Only rows without a transcript can be checked, so the
+           row stays hidden until at least one recording is selected — there is
+           nothing to say about an empty selection. -->
+      <div class="library-selection hidden" id="library-selection" role="group" aria-label="Selected recordings">
+        <span class="library-selection-label" id="library-selection-label">0 selected</span>
+        <button type="button" class="library-selection-link" id="library-selection-all">Select all</button>
+        <button type="button" class="library-selection-link primary" id="library-selection-transcribe">Transcribe…</button>
+        <button type="button" class="library-selection-link danger" id="library-selection-delete">Delete</button>
+        <button type="button" class="library-selection-link" id="library-selection-clear">Clear</button>
       </div>
 
       <!-- Meetings list -->
@@ -241,6 +253,23 @@
 
       <!-- Transcript view — rendered segments for audio sync, replaces textarea when audio is present -->
       <div id="transcript-view" class="hidden"></div>
+
+      <!-- Audio-only meeting: a recording with no transcript to open. The player
+           above plays it; this pane names the one action it has. -->
+      <div id="audio-only-state" class="hidden">
+        <div id="audio-only-icon">
+          <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+            <line x1="12" y1="19" x2="12" y2="23"/>
+          </svg>
+        </div>
+        <h2 id="audio-only-title">Recording</h2>
+        <p id="audio-only-sub">Not transcribed yet</p>
+        <div class="empty-actions">
+          <button class="btn btn-primary btn-lg" id="audio-only-transcribe">Transcribe…</button>
+        </div>
+      </div>
 
       <!-- Empty state -->
       <div id="empty-state">
@@ -535,55 +564,6 @@
     </div>
 
     <div id="record-main" class="hidden">
-
-      <!-- Sidebar: recordings library + batch CTA -->
-      <aside id="record-sidebar" class="record-sidebar">
-        <div class="record-sb-header">
-          <span>RECORDINGS</span>
-          <span class="record-sb-count" id="record-sb-count">0</span>
-        </div>
-        <div class="record-sb-selection" id="record-sb-selection">
-          <label class="record-sb-master">
-            <input type="checkbox" id="record-sb-master-cb" />
-            <span class="record-sb-master-visual"></span>
-          </label>
-          <span class="record-sb-summary-label" id="record-sb-summary-label">0 selected</span>
-          <button type="button" class="record-sb-link" data-action="select-all" id="record-sb-select-all">Select all</button>
-          <button type="button" class="record-sb-link" data-action="clear" id="record-sb-clear">Clear</button>
-          <button type="button" class="record-sb-link record-sb-link-danger hidden" data-action="delete" id="record-sb-delete">Delete</button>
-        </div>
-        <div id="record-sb-list" class="record-sb-list"></div>
-        <div id="record-sb-empty" class="record-sb-empty hidden">
-          No recordings yet.
-        </div>
-        <!-- Inline audio player — visible only while a recording is loaded -->
-        <div id="record-ap" class="record-ap hidden">
-          <audio id="record-audio-el" preload="metadata"></audio>
-          <button id="record-ap-play" class="ap-play" title="Play / Pause">
-            <svg id="record-ap-icon-play" width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-              <polygon points="5,3 19,12 5,21"/>
-            </svg>
-            <svg id="record-ap-icon-pause" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" class="hidden">
-              <rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>
-            </svg>
-          </button>
-          <div class="ap-main">
-            <div id="record-ap-waveform" class="ap-waveform"></div>
-            <span id="record-ap-time" class="ap-time">0:00 / 0:00</span>
-          </div>
-          <button id="record-ap-speed" class="ap-speed">1×</button>
-        </div>
-        <div class="record-sb-cta">
-          <button id="record-btn-transcribe-all" class="record-sb-cta-btn" disabled>
-            <span class="record-sb-cta-spark">✦</span>
-            <span id="record-sb-cta-label">Select recordings to transcribe</span>
-          </button>
-          <div class="record-sb-cta-meta">
-            <span id="record-sb-cta-eta">—</span>
-            <button type="button" class="record-sb-link" id="record-sb-settings">Settings…</button>
-          </div>
-        </div>
-      </aside>
 
       <!-- Right-pane container for the four phase sections -->
       <div class="record-main-pane">
