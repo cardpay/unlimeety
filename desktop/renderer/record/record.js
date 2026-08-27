@@ -30,6 +30,9 @@
     const recordingSection  = $('record-recording');
     const tsSection         = $('record-transcribe-settings');
     const transcribeSection = $('record-transcribing');
+    // Wraps ts/transcribe sections — a top-level panel of its own (see
+    // record.css), shown independently of which tab is active underneath.
+    const transcribeFlowWrap = $('transcribe-flow');
 
     const srcMicCheck       = $('record-src-mic');
     const srcSystemCheck    = $('record-src-system');
@@ -59,7 +62,6 @@
     const notesInputEl = $('record-notes-input');
 
     // Transcribe-settings screen (Variant C) refs.
-    const tsCrumbCount   = $('ts-crumb-count');
     const tsBatchCount   = $('ts-batch-count');
     const tsBatchSub     = $('ts-batch-sub');
     const tsBatchList    = $('ts-batch-list');
@@ -101,7 +103,7 @@
     const transStream = $('record-trans-stream');
     const cancelTransBtn         = $('record-btn-cancel-trans');
     const newRecordingFromTransBtn = $('record-btn-new-recording');
-    const tsCrumbBack            = $('ts-crumb-back');
+    const tsBtnClose             = $('ts-btn-close');
     const transActiveBanner      = $('record-trans-active-banner');
     const viewQueueBtn           = $('record-btn-view-queue');
 
@@ -365,8 +367,30 @@
         recordingSection.classList.toggle('hidden',  name !== 'recording');
         tsSection.classList.toggle('hidden',         name !== 'transcribeSettings');
         transcribeSection.classList.toggle('hidden', name !== 'transcribing');
+        transcribeFlowWrap?.classList.toggle('hidden', name !== 'transcribeSettings' && name !== 'transcribing');
         updateTransActiveBanner();
     }
+
+    // #transcribe-flow is a top-level overlay now, not gated by the tab
+    // switcher — so live.js calls this on every tab-button click (Live,
+    // Record, or the recording-indicator pill) to make sure it can't stay
+    // pinned on top of a tab the user just switched away to. A pending batch
+    // config (not yet submitted) is abandoned like Cancel; an already-running
+    // transcription is left alone — same as the "New recording" button here,
+    // it keeps going in the queue, just off screen.
+    function closeTranscribeFlow() {
+        if (state.phase === 'transcribeSettings') cancelTranscribeSettings();
+        else if (state.phase === 'transcribing') showSection('idle');
+    }
+
+    // Escape closes #transcribe-flow, matching every other dismissible
+    // surface in the app (modals, popovers, context menus).
+    document.addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape') return;
+        if (!transcribeFlowWrap || transcribeFlowWrap.classList.contains('hidden')) return;
+        e.preventDefault();
+        closeTranscribeFlow();
+    });
 
     // Toolbar pill follows `state.recordingActive`, NOT the current section.
     // Recording can continue while the user is in transcribeSettings/transcribing
@@ -443,7 +467,7 @@
         state.calendarParticipants = Array.isArray(participants) ? participants : [];
     }
     window.calendarPicker?.attach({ button: $('record-cal-btn'), onPick: applyCalendarPick });
-    window.recordTab = { applyCalendarPick, enterTranscribeSettings };
+    window.recordTab = { applyCalendarPick, enterTranscribeSettings, closeTranscribeFlow };
 
     startBtn.addEventListener('click', async () => {
         setupError.classList.add('hidden');
@@ -623,7 +647,9 @@
         }
     });
 
-    tsBtnCancel?.addEventListener('click', () => {
+    // Shared by the footer Cancel button and the header close (✕) — both back
+    // out of the batch the same way.
+    function cancelTranscribeSettings() {
         state.outputPath = null;
         state.pendingBatchTargets = null;
         if (tsError) {
@@ -632,7 +658,10 @@
         }
         showSection('idle');
         refreshHistory();
-    });
+    }
+
+    tsBtnCancel?.addEventListener('click', cancelTranscribeSettings);
+    tsBtnClose?.addEventListener('click', cancelTranscribeSettings);
 
     tsEditSelection?.addEventListener('click', () => {
         // Back to library — user adjusts checkboxes and hits Transcribe again.
@@ -737,11 +766,12 @@
         // restored from there.
     });
 
-    newRecordingFromTransBtn?.addEventListener('click', () => showSection('idle'));
-
-    tsCrumbBack?.addEventListener('click', () => {
-        state.pendingBatchTargets = null;
-        showSection('idle');
+    // Now that this screen opens over whichever tab launched it (usually
+    // Transcripts), "New recording" has to take the user to the Record tab
+    // itself, not just clear this screen — switching tabs is what closes it
+    // (see closeTranscribeFlow, called from live.js's switchTab).
+    newRecordingFromTransBtn?.addEventListener('click', () => {
+        document.querySelector('.tab-btn[data-tab="record"]')?.click();
     });
 
     // The on-page NOW/NEXT queue widget is gone — the header panel (app.js)
@@ -1035,10 +1065,21 @@
     // single imported file. The same screen handles N≥1; single is the
     // degenerate case of a 1-element batch.
     function enterTranscribeSettings(filePaths, opts = {}) {
+        // The settings/transcribing panel lives on the Transcripts tab now — an
+        // overlay of its own (see #transcribe-flow in record.css), not part of
+        // Record's tab panel. Make sure Transcripts is the tab shown underneath,
+        // regardless of which tab this was triggered from (e.g. Record's own
+        // "Import audio file…" button).
+        document.querySelector('.tab-btn[data-tab="editor"]')?.click();
         state.pendingBatchTargets = filePaths.slice();
         state.outputPath = filePaths[0] || null;
         renderTsScreen({ importedSize: opts.size });
         showSection('transcribeSettings');
+        // Same "move focus into the thing that just opened" convention as this
+        // app's modals (e.g. the New Transcript dialog). The close button is a
+        // safe, always-present landing spot — the screen has no single obvious
+        // first field the way a modal with one text input does.
+        tsBtnClose?.focus();
         // Only now is the phase right for refreshHistory to run: the rows above
         // are labelled from whatever `currentItems` still held, and this fills
         // in size and timestamp for anything it did not know.
@@ -1073,7 +1114,6 @@
         const targets = state.pendingBatchTargets || [];
         const n = targets.length;
 
-        if (tsCrumbCount) tsCrumbCount.textContent = String(n);
         if (tsBatchCount) tsBatchCount.textContent = String(n);
         if (tsBtnTranscribeLabel) {
             tsBtnTranscribeLabel.textContent =

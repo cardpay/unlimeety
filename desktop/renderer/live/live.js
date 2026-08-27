@@ -221,6 +221,11 @@
     // Both live.js and record.js bind click handlers on the same buttons but
     // only this function ever toggles panel visibility, so there's no race.
     function switchTab(name) {
+        // #transcribe-flow (record.js) is a top-level overlay independent of
+        // which tab panel is showing — close it first so a tab switch (toolbar
+        // click, ⌘R, a recording-indicator pill) can never leave it pinned on
+        // top of the tab the user just switched to.
+        window.recordTab?.closeTranscribeFlow?.();
         tabButtons.forEach(b => b.classList.toggle('tab-active', b.dataset.tab === name));
         editorPanel.classList.toggle('hidden', name !== 'editor');
         livePanel.classList.toggle('hidden',   name !== 'live');
