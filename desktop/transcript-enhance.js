@@ -63,11 +63,22 @@ Output the blocks and nothing else.`;
 // Nothing the model says is taken on trust. A name is used only if it is
 // already a listed participant or is actually spoken somewhere in the
 // transcript, so the worst case is a placeholder left alone, never an invented
-// person. `Me` is never renamed: it is the user, and it is already correct.
+// person.
+//
+// `Me` is a placeholder like any other. It says which turns are the user's, not
+// who the user is, and the transcript itself usually answers that — the others
+// address them by name. So it is asked about too and written `Valerij (Me)`,
+// keeping the label that tells the reader whose microphone this was.
 
 const MAX_NAME_CHARS = 40;
 const MAX_NAME_WORDS = 3;
-const DEFAULT_EVIDENCE_CHARS = 6000;
+// The whole meeting, in practice. Naming is one call over the transcript, the
+// same shape as summarize — which reads the file whole and resolves speakers
+// reliably. The old 6000-char budget strided over almost everything and dropped
+// the one turn where a name was said, which is why this pass kept failing where
+// summarize did not. The cap only exists so a marathon transcript degrades to
+// sampling instead of overflowing the model outright.
+const DEFAULT_EVIDENCE_CHARS = 40000;
 
 // `[00:20] Delta:` → the three pieces around the speaker, so a rename keeps the
 // original timestamp and trailing whitespace byte for byte.
@@ -77,12 +88,14 @@ const NAME_SHAPE = /^\p{L}[\p{L}\p{M}'’.\- ]*$/u;
 
 const SPEAKER_PROMPT = `You are identifying the speakers in a meeting transcript.
 
-Automatic diarization labelled each speaker with a placeholder because it does not know who they are. Work out each placeholder's real name from the conversation itself: self-introductions, people addressing each other by name, someone being handed a topic they own.
+Automatic diarization labelled each speaker with a placeholder because it does not know who they are: a Greek letter (Alpha, Beta, Gamma, ...), S1/S2, or "Me" for the person who made the recording. Work out each placeholder's real name from the conversation itself: self-introductions, people addressing each other by name, someone being greeted or thanked by name, someone being handed a topic they own. "Me" is named the same way — the others address them by name too.
 
 Rules you must not break:
 - Use only names that are actually spoken in the transcript or listed as participants. Never guess a name from a role, an accent or a topic.
+- Write the name as its owner would introduce themselves: the plain dictionary form, not the form it is declined into when someone calls out to them.
+- Keep the name in the script of the transcript. Never transliterate it.
 - If a placeholder's name is not clearly established, answer ? for it. A wrong name is far worse than no name.
-- Answer one line per placeholder, exactly: Placeholder = Name
+- Answer one line per placeholder, exactly: Placeholder -> Name (short evidence)
 - Output those lines and nothing else.`;
 
 function speakerFromMarker(marker) {
@@ -101,8 +114,7 @@ function markerWithSpeaker(marker, name) {
 function isPlaceholderLabel(label, phonetic = []) {
     const s = String(label || '').trim();
     if (!s) return false;
-    if (s === 'Me') return false; // the user — already the right answer
-    if (s === 'Speaker' || s === '?' || s === '…') return true;
+    if (s === 'Me' || s === 'Speaker' || s === '?' || s === '…') return true;
     if (/^S\d+$/i.test(s)) return true;
     // `Beta`, and the wrap-around form `Beta 2`.
     const m = /^(\p{L}+)(?: (\d+))?$/u.exec(s);
@@ -153,10 +165,24 @@ function escapeRe(s) {
     return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-/// Spoken somewhere, as a word rather than a substring: "Ан" must not qualify
-/// on the strength of "Анна", or a placeholder gets someone else's name.
+/// Spoken somewhere, as a word rather than a substring: "Ол" must not qualify on
+/// the strength of "Олег", or a placeholder gets someone else's name.
+///
+/// A name of four letters or more matches by its stem plus a short ending,
+/// because the vocative that names a speaker in the first place is declined:
+/// the model answers "Олег" and the transcript says "Олега", "Валеру" for
+/// "Валерий", "Марину" for "Марина". Demanding the exact answered form threw
+/// away almost every correct answer in a Russian meeting — the single biggest
+/// reason this pass ended up renaming nothing. The ending is capped at three
+/// letters so a stem cannot swallow an unrelated longer word ("Марк" must not
+/// ride in on "маркетинг"), and shorter names still need an exact word: three
+/// letters of prefix match half the dictionary.
+const MAX_INFLECTION_CHARS = 3;
+
 function spokenIn(word, haystack) {
-    return new RegExp(`(^|[^\\p{L}])${escapeRe(word)}([^\\p{L}]|$)`, 'iu').test(haystack);
+    const stem = word.length >= 4 ? word.slice(0, Math.max(4, word.length - 2)) : word;
+    const ending = word.length >= 4 ? `\\p{L}{0,${MAX_INFLECTION_CHARS}}` : '';
+    return new RegExp(`(^|[^\\p{L}])${escapeRe(stem)}${ending}([^\\p{L}]|$)`, 'iu').test(haystack);
 }
 
 function nameIsAttested(name, body, participants) {
@@ -166,6 +192,29 @@ function nameIsAttested(name, body, participants) {
     return parts.length > 0 && parts.every((p) => spokenIn(p, body));
 }
 
+// One answered line, in any shape a model actually returns: `Beta = Anna`,
+// `Beta: Anna`, `- **Beta** -> Anna Petrova (introduces herself at 00:02)`. The
+// arrow forms and the parenthesised evidence are the reason: asking for the
+// evidence is what makes the answer better (it is what the summarize prompt asks
+// for, and that one resolves speakers well), so the parser has to accept the
+// shape that comes back with it. A stricter `label = name` reader dropped every
+// such line and reported the whole pass as "no names found".
+const REPLY_LINE = /^\s*(?:[-*•]\s*)?(.+?)\s*(?:=|:|→|->|=>)\s*(.+?)\s*$/;
+
+function stripDecoration(s) {
+    return String(s).replace(/[*_`"'«»]/g, '').trim();
+}
+
+/// The name alone: no markdown, no quotes, and no trailing evidence — neither
+/// the parenthesised form the prompt asks for nor a dash-separated aside. An
+/// answer already in display form (`Anna (Beta)`) reduces to the name too.
+function cleanName(s) {
+    return stripDecoration(s)
+        .replace(/\s+[—–]\s+.*$/, '')
+        .replace(/\s*\([^()]*\)\s*$/, '')
+        .trim();
+}
+
 /// Model reply → a validated `label → name` map. Every rule that fails drops
 /// that one label and keeps its placeholder; nothing fails the whole pass.
 function parseSpeakerNames(reply, { labels = [], body = '', participants = [], phonetic = [] } = {}) {
@@ -173,10 +222,10 @@ function parseSpeakerNames(reply, { labels = [], body = '', participants = [], p
     const map = new Map();
     const taken = new Set();
     for (const line of stripCodeFence(String(reply || '')).split('\n')) {
-        const m = /^\s*(.+?)\s*[=:]\s*(.+?)\s*$/.exec(line);
+        const m = REPLY_LINE.exec(line);
         if (!m) continue;
-        const label = wanted.get(m[1].trim().toLowerCase());
-        const name = m[2].trim().replace(/^["'«]|["'»]$/g, '').trim();
+        const label = wanted.get(stripDecoration(m[1]).toLowerCase());
+        const name = cleanName(m[2]);
         if (!label || map.has(label)) continue;
         if (!name || name === '?' || /^(unknown|unclear|n\/?a)$/i.test(name)) continue;
         if (name.length > MAX_NAME_CHARS) continue;
