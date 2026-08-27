@@ -202,3 +202,11 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-record-live-parity.md`
   summary: `record:getFolder` and its `recordApi.getFolder` bridge have no callers.
   evidence: `main.js:3281` and `preload.js:131` exist; `grep -rn 'getFolder' desktop/renderer/` finds no call. Pre-existing — the deleted "SAVE TO" row displayed a hard-coded `~/Downloads/Meet_Transcripts` string (itself wrong: recordings go to `RECORDINGS_FOLDER`, `~/Downloads/Meet_Recordings`, `main.js:12`) and never called the handler. Either wire it or drop both ends.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-recording-summary-filename-date-suffix.md`
+  summary: `defaultRecordingStem`/`defaultSummaryBase` (`desktop/main.js`) have no unit test pinning their filename format, so a future edit could flip the title/timestamp order back without any test failing.
+  evidence: `grep -n 'module.exports' desktop/main.js` returns nothing — the whole file is untested in isolation by design. Only `desktop/test/transcript-meta.test.js` touches these filenames, and only as a literal fixture string fed to unrelated parsing logic, so it does not exercise the generator functions at all. Pinning the format would require adding exports, an architectural change beyond this spec's one-line format swap.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-recording-summary-filename-date-suffix.md`
+  summary: `recordingTimestamp()` (`HH-mm DD-MM-YY`) and `formatDateDdMmYy()` (`DD.MM.YY`) stamp recordings and summaries with two different, inconsistent date formats.
+  evidence: Pre-existing — both functions used these same formats before this change, just as a leading prefix instead of a trailing suffix; the reorder did not introduce or worsen the inconsistency, only made the two trailing stamps sit visually closer together for a recording and its own summary.
