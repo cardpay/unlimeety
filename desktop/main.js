@@ -777,7 +777,7 @@ function defaultSummaryBase(transcriptPath, info, mtimeMs) {
     const rawTitle = info?.title || legacySummaryBase(transcriptPath);
     const shortName = sanitizeFilenameChars(stripMeetPrefix(rawTitle));
     if (!shortName) return legacySummaryBase(transcriptPath);
-    return `${formatDateDdMmYy(transcriptPath, mtimeMs)} ${shortName}`;
+    return `${shortName} ${formatDateDdMmYy(transcriptPath, mtimeMs)}`;
 }
 
 function readTranscriptInfoSync(transcriptPath) {
@@ -2778,7 +2778,7 @@ ipcMain.handle('live:start', async (_e, opts) => {
 
     // Tee audio to a WAV under RECORDINGS_FOLDER using the Record tab's
     // naming convention. The stem becomes "HH-mm DD-MM-YY" (no user title)
-    // or "HH-mm DD-MM-YY <title>" when the user typed one. Collision suffix
+    // or "<title> HH-mm DD-MM-YY" when the user typed one. Collision suffix
     // " (N)" mirrors record:start so concurrent or rapid sessions don't
     // clobber each other.
     if (!fs.existsSync(RECORDINGS_FOLDER)) {
@@ -3242,7 +3242,7 @@ function defaultRecordingStem(title) {
     // 'Recording' is the placeholder used when the user didn't type a title
     // (see record:start handler). In that case the stem is just the timestamp.
     const isDefault = !cleaned || cleaned === 'Recording';
-    return isDefault ? stamp : `${stamp} ${cleaned}`;
+    return isDefault ? stamp : `${cleaned} ${stamp}`;
 }
 
 function defaultRecordingPath(title) {
