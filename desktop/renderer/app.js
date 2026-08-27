@@ -1743,12 +1743,12 @@ function selectableVisible() {
   );
 }
 
-// Hand the paths to the Record tab's transcribe-settings screen — the same
-// entry point the ⋯ menu's Transcribe… uses, and the same one the removed
-// Record sidebar used for its batch CTA. N ≥ 1 is all one case there.
+// Hand the paths to the transcribe-settings screen — the same entry point
+// the ⋯ menu's Transcribe… uses, and the same one the removed Record sidebar
+// used for its batch CTA. N ≥ 1 is all one case there. enterTranscribeSettings
+// itself makes sure the Transcripts tab is the one showing underneath.
 function sendToTranscribeSettings(paths) {
   if (!paths.length) return;
-  document.querySelector('.tab-btn[data-tab="record"]')?.click();
   window.recordTab?.enterTranscribeSettings?.(paths);
 }
 
@@ -2086,8 +2086,6 @@ function openMeetingMenu(x, y, m) {
           playerShowPath(renamed.audioPath);
         }
       } else if (action === "retranscribe") {
-        // Transcription lives on the Record tab; hand it the source audio and
-        // jump there so the user lands on the transcribe-settings screen.
         if (m.audioPath) sendToTranscribeSettings([m.audioPath]);
       } else if (action === "reveal") {
         recApi?.showInFinder(m.id);
@@ -3729,7 +3727,7 @@ dropOverlay.addEventListener("drop", async (e) => {
 // Anything layered over the editor: the six .modal-overlay modals plus the two
 // popovers built in JS (meeting rename, speaker rename).
 function anyOverlayOpen() {
-  return !!document.querySelector(".modal-overlay:not(.hidden), .rename-overlay, .spk-rename, #meeting-meta-root");
+  return !!document.querySelector(".modal-overlay:not(.hidden), .rename-overlay, .spk-rename, #meeting-meta-root, #transcribe-flow:not(.hidden)");
 }
 
 document.addEventListener("keydown", (e) => {

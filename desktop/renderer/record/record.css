@@ -1,7 +1,11 @@
 /* ─── Record tab (isolated stylesheet) ──────────────────────────────────────
- * All selectors below are scoped to #record-container or .record-*. The Live
- * stylesheet handles all the shared .live-* classes (topbar, meters, segment
- * cards, level meters) which are reused here for visual consistency.
+ * Selectors below are scoped to #record-container or .record-*, plus
+ * #transcribe-flow and its .ts-* contents — the transcribe-settings /
+ * transcribing flow, which opens as its own top-level panel (shown over
+ * whichever tab launched it, usually Transcripts) rather than living inside
+ * the Record tab. The Live stylesheet handles all the shared .live-* classes
+ * (topbar, meters, segment cards, level meters) which are reused here for
+ * visual consistency.
  * ─────────────────────────────────────────────────────────────────────── */
 
 #record-container {
@@ -10,6 +14,27 @@
     left: 0;
     right: 0;
     bottom: 0;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-base);
+    overflow: hidden;
+}
+
+/* Transcribe-settings + transcribing progress: a top-level panel of its own
+   (same fixed box as #record-container), not nested under it — it now opens
+   on top of whichever tab launched it (almost always Transcripts), instead of
+   forcing a jump to the Record tab. */
+#transcribe-flow {
+    position: fixed;
+    top: var(--toolbar-height);
+    left: 0;
+    right: 0;
+    bottom: 0;
+    /* Explicit, not just "last in the DOM": it must stay above the three tab
+       panels regardless of markup order, but below menus/popovers/modals
+       (rename-popup 501, modal-overlay 300) that can still open on top of it —
+       e.g. this screen's own "Save as preset…" popover. */
+    z-index: 10;
     display: flex;
     flex-direction: column;
     background: var(--bg-base);
@@ -422,30 +447,8 @@
     gap: 16px;
 }
 .ts-header-text { min-width: 0; }
+.ts-header-right { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
 .ts-kbd { flex-shrink: 0; white-space: nowrap; }
-.ts-crumb {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-family: var(--font-mono);
-    font-size: 11px;
-    color: var(--text-muted);
-    letter-spacing: 0.02em;
-}
-.ts-crumb-sep { opacity: 0.5; }
-.ts-crumb-tail { color: var(--text-primary); }
-.ts-crumb-link {
-    background: none;
-    border: none;
-    padding: 0;
-    cursor: pointer;
-    font: inherit;
-    color: var(--text-muted);
-}
-.ts-crumb-link:hover {
-    color: var(--text-primary);
-    text-decoration: underline;
-}
 .ts-title {
     font-size: 22px;
     font-weight: 600;
