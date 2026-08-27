@@ -74,6 +74,16 @@
         // true after a successful save — the next click on the Live tab resets
         // back to the setup screen instead of showing the finished transcript.
         finished: false,
+        // true while stopAndSave is in flight. The helper's own `exited` event
+        // arrives mid-stop (main forwards it before live:stop's promise
+        // resolves), and without this flag the crash path below would fire a
+        // second, concurrent save on every normal stop.
+        stopping: false,
+        // null normally; set to a short description of how the helper died
+        // ("signal SIGTRAP", "code 1") when it exits on its own. Truthy is what
+        // lets stopAndSave run past its `running` guard, so a crash doesn't
+        // take the transcript with it.
+        crashed: null,
         startedAt: 0,
         timerInterval: null,
         finalizedSegments: [],       // final segments collected in order
@@ -385,12 +395,21 @@
     // ─── Stop → save ─────────────────────────────────────────────────────
     // Shared by the Stop button and the auto-stop trigger (main fires a
     // `autoStop` event when the meeting ended and the countdown elapsed).
+    // Also driven by the `exited` handler when the helper dies on its own —
+    // `state.crashed` is what lets it through the guard, since the crash path
+    // has no live helper left to stop but still holds a full transcript.
     async function stopAndSave() {
-        if (!state.running) return;
+        if (!state.running && !state.crashed) return;
+        if (state.stopping) return;
+        state.stopping = true;
         stopBtn.disabled = true;
         stopBtn.querySelector('span:last-child').textContent = 'Saving…';
-        setStatus('loading', 'Finalizing…');
+        setStatus('loading', state.crashed
+            ? `Helper crashed (${state.crashed}) — saving transcript…`
+            : 'Finalizing…');
 
+        // Returns { ok: false } when the helper is already gone; the save below
+        // doesn't need it alive, so the result is deliberately ignored.
         await live.stop();
         stopTimer();
         stopMeterPulse();
@@ -417,8 +436,13 @@
             speakerNames: state.speakerNames,
         });
 
+        state.stopping = false;
+
         if (result?.ok) {
-            setStatus('idle', `Saved to ${result.filePath}`);
+            const prefix = state.crashed
+                ? `Recording interrupted (${state.crashed}) — saved to`
+                : 'Saved to';
+            setStatus('idle', `${prefix} ${result.filePath}`);
             stopBtn.classList.add('hidden');
             discardBtn.classList.remove('hidden');
             discardBtn.textContent = 'New recording';
@@ -431,7 +455,10 @@
         } else {
             setStatus('idle', `Save failed: ${result?.error || 'unknown'}`);
             stopBtn.disabled = false;
-            stopBtn.querySelector('span:last-child').textContent = 'Stop & save';
+            // After a crash there is nothing left to stop, so the button is a
+            // plain retry for the save that just failed.
+            stopBtn.querySelector('span:last-child').textContent =
+                state.crashed ? 'Save transcript' : 'Stop & save';
         }
     }
 
@@ -572,14 +599,21 @@
                 // the stop-button handler already drove the save flow.
                 break;
 
-            case 'exited':
-                if (state.running) {
-                    state.running = false;
-                    stopTimer();
-                    setStatus('idle', `Helper exited (code ${event.code})`);
-                    updateLiveRecordingIndicator();
-                }
+            case 'exited': {
+                // A normal Stop also lands here — main forwards the helper's
+                // exit before live:stop's promise resolves, so stopAndSave is
+                // still mid-flight with `running` set. That one is not a crash.
+                if (!state.running || state.stopping) break;
+
+                // The helper died on its own. The transcript is still entirely
+                // in `state.finalizedSegments` and live:saveTranscript doesn't
+                // need a live helper, so save it rather than stranding the user
+                // on a recording screen whose only button no longer does
+                // anything.
+                state.crashed = event.signal ? `signal ${event.signal}` : `code ${event.code}`;
+                stopAndSave();   // clears the timer, meter and running flag; sets the status
                 break;
+            }
         }
     });
 
@@ -808,6 +842,8 @@
 
     function resetRecordingUI() {
         state.finished = false;
+        state.crashed = null;
+        state.stopping = false;
         state.finalizedSegments = [];
         state.activePartials.clear();
         diarizationWarningShown = false;

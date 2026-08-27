@@ -2902,12 +2902,15 @@ ipcMain.handle('live:start', async (_e, opts) => {
             }
         });
 
-        proc.on('exit', (code) => {
+        proc.on('exit', (code, signal) => {
             // Mirrors the recorder's exit: a helper that dies on its own never
             // reaches live:saveTranscript, so mirror the notes to disk while
             // outputPath still points at the (salvageable) WAV.
             flushNotesSidecar(live);
-            liveSendToRenderer({ type: 'exited', code });
+            // `signal` is the whole story when a helper is killed rather than
+            // returning: without it the renderer could only report the useless
+            // "code null" a crash leaves behind.
+            liveSendToRenderer({ type: 'exited', code, signal });
             live.proc = null;
             cancelAutoStop('live');
             closeNotesWindow();
