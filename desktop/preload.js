@@ -90,6 +90,7 @@ contextBridge.exposeInMainWorld('live', {
     saveTranscript:     (data)  => ipcRenderer.invoke('live:saveTranscript', data),
     downloadModel:      (name)  => ipcRenderer.invoke('live:downloadModel', name),
     openScreenSettings: ()      => ipcRenderer.invoke('live:openScreenSettings'),
+    micStatus:          ()      => ipcRenderer.invoke('live:micStatus'),
     onEvent:            (cb)    => ipcRenderer.on('live:event', (_e, evt) => cb(evt)),
     // Auto-detect: main asks the Live tab to start a session for a detected call.
     onAutoStart:        (cb)    => ipcRenderer.on('live:autoStart', (_e, data) => cb(data)),
@@ -132,6 +133,7 @@ contextBridge.exposeInMainWorld('recordApi', {
     start:              (opts)   => ipcRenderer.invoke('record:start', opts),
     stop:               ()       => ipcRenderer.invoke('record:stop'),
     openScreenSettings: ()       => ipcRenderer.invoke('record:openScreenSettings'),
+    micStatus:          ()       => ipcRenderer.invoke('record:micStatus'),
     list:               ()       => ipcRenderer.invoke('record:list'),
     watch:              ()       => ipcRenderer.invoke('record:watch'),
     delete:             (p)      => ipcRenderer.invoke('record:delete', p),

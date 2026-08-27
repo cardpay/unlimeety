@@ -165,14 +165,14 @@ const {
 // gates on it, so a fixture without it models nothing that exists on disk.
 const meeting = (over) => ({
     hasAudio: false, hasTranscript: true, hasSummary: false, hasSpokenTurns: false,
-    model: null, enhancedAt: null, readFailed: false, ...over,
+    model: null, enhancedAt: null, enhanceAttemptedAt: null, readFailed: false, ...over,
 });
 
 // An un-transcribed recording. Every queue flag is false as a finding, not as a
 // default — there is no transcript to enhance, summarize or improve on.
 const recording = (over) => ({
     hasAudio: true, hasTranscript: false, hasSummary: false, hasSpokenTurns: false,
-    model: undefined, enhancedAt: undefined, readFailed: false, ...over,
+    model: undefined, enhancedAt: undefined, enhanceAttemptedAt: undefined, readFailed: false, ...over,
 });
 
 // To transcribe: the only queue an audio-only row belongs to, and the only one
@@ -233,6 +233,14 @@ assert.strictEqual(
 assert.strictEqual(
     meetingMatchesFilter(meeting({ enhancedAt: '2026-08-01T10:00:00Z', hasSpokenTurns: true }), 'enhance'),
     false, 'already enhanced');
+// Every proofreading part was rejected on an earlier run — a re-run would hit
+// the identical rejection, so this must not sit in the queue forever either.
+assert.strictEqual(
+    meetingMatchesFilter(
+        meeting({ enhancedAt: null, enhanceAttemptedAt: '2026-08-01T10:00:00Z', hasSpokenTurns: true }),
+        'enhance',
+    ),
+    false, 'already attempted and rejected — re-running would not help');
 
 // To summarize
 assert.strictEqual(meetingMatchesFilter(meeting({ hasSummary: false }), 'summarize'), true);
@@ -747,5 +755,18 @@ assert.ok(!/spokenTurnsIndex\.set\(/.test(afterTry),
     'a failed scan must not be cached');
 assert.ok(!/err\.message/.test(helper),
     'reading .message off a non-Error throws again, out of the very try that exists to contain it');
+
+// ─── parseTranscriptHeaderMain, executed ────────────────────────────────────
+// Pure string parsing, no electron dependency — sliced out and run directly,
+// not only exercised indirectly through the ...info spread fixtures above.
+const parseBox = {};
+vm.runInNewContext(sliceFunction(mainSrc, 'parseTranscriptHeaderMain', 'main.js'), parseBox);
+const attempted = parseBox.parseTranscriptHeaderMain(
+    'Meeting: x\nEnhance-Attempted: 2026-08-27T10:00:00.000Z\n',
+);
+assert.strictEqual(attempted.enhanceAttemptedAt, '2026-08-27T10:00:00.000Z',
+    'the full timestamp must survive — a slice() length one off from the key would truncate it');
+const notAttempted = parseBox.parseTranscriptHeaderMain('Meeting: x\nEnhanced: 2026-08-27T10:00:00.000Z\n');
+assert.strictEqual(notAttempted.enhanceAttemptedAt, null, 'absent by default, not a guess');
 
 console.log('library-filters: all checks passed');
