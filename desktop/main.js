@@ -44,6 +44,10 @@ function queueAutoTranscribe(filePath, language, participants = []) {
             participants,
             diarize: true,
             // numberOfSpeakers left undefined — auto-detect.
+            // Read by runRecordTranscribeJob to mark `transcriber.background` —
+            // the quit flush uses that to avoid popping the window back up for
+            // a job nobody's watching. See the flush's before-quit handler.
+            background: true,
         },
     });
 }
@@ -280,7 +284,15 @@ app.on('before-quit', (e) => {
     cancelAutoStop();     // whatever the countdown was going to do, we're doing now
     const saved = new Promise((resolve) => { quitFlushDone = resolve; });
     if (rendererAlive) {
-        showMainWindow();  // the user should see "Finalizing…", not a Quit that hangs
+        // A live/record session is something the user is watching finish, so
+        // pop the window back up for "Finalizing…". A `transcriber` slot on
+        // its own can also just be a background auto-queue job (see
+        // queueAutoTranscribe) that nobody started or is watching — showing
+        // the window for that alone would be a Quit that appears to hang for
+        // no reason the user can see.
+        if (pending.has('live') || pending.has('record') || !transcriber.background) {
+            showMainWindow();
+        }
         triggerAutoStop(['live', 'record']); // renderers run the same stop+save as their Stop buttons
     }
     // Closing the transcriber's stdin cancels its run — it can't be waited out
@@ -831,6 +843,16 @@ function summaryDirAllowed(transcriptPath, folderOverride) {
     return false;
 }
 
+// A summary written before a later Enhance or Re-transcribe is stale: both
+// rewrite the transcript in place, so its mtime moving past the summary's is
+// exactly "this summary no longer reflects the text". Best-effort: a summary
+// that vanishes between the find and the stat just reads as not outdated,
+// same as "no summary" would.
+function isSummaryOutdated(summaryPath, transcriptMtimeMs) {
+    try { return fs.statSync(summaryPath).mtimeMs < transcriptMtimeMs; }
+    catch { return false; }
+}
+
 function findExistingSummaryPath(transcriptPath, folderOverride) {
     const cfg = readConfig();
     const dir = folderOverride ?? cfg.summaryFolder ?? path.dirname(transcriptPath);
@@ -1212,6 +1234,21 @@ async function runClaudeCode(content, promptInstruction, onAbort) {
     return spawnClaude(claudePath, CLAUDE_BASE_ARGS, content, promptInstruction, extendedPath, onAbort);
 }
 
+// SIGTERM alone leaves two gaps: a child that ignores/traps it never exits,
+// and on Windows `proc` is the shell spawned for the .cmd wrapper (see the
+// `shell: true` below) — killing the shell's PID doesn't kill the claude.cmd
+// grandchild actually doing the work. `taskkill /t` kills that whole tree;
+// on POSIX, a SIGKILL escalation after a grace period catches the rest.
+function killClaudeProcess(proc) {
+    if (process.platform === 'win32') {
+        if (proc.pid) execFile('taskkill', ['/pid', String(proc.pid), '/t', '/f'], () => {});
+        return;
+    }
+    proc.kill('SIGTERM');
+    const escalate = setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, 3000);
+    proc.once('exit', () => clearTimeout(escalate));
+}
+
 function spawnClaude(claudePath, args, content, promptInstruction, extendedPath, onAbort) {
     return new Promise((resolve) => {
         let stdout = '';
@@ -1238,7 +1275,7 @@ function spawnClaude(claudePath, args, content, promptInstruction, extendedPath,
         // resolving), that request is remembered by the caller, not by us — handing
         // over the handle here gives it something to act on, and it fires the
         // abort right back at us synchronously when that's the case.
-        if (onAbort) onAbort({ abort: () => { canceled = true; proc.kill(); } });
+        if (onAbort) onAbort({ abort: () => { canceled = true; killClaudeProcess(proc); } });
 
         // A child that rejects its flags exits during this write, and a transcript
         // is far bigger than the pipe buffer — the rest of it then lands on a
@@ -1254,7 +1291,7 @@ function spawnClaude(claudePath, args, content, promptInstruction, extendedPath,
         proc.stderr.on('data', (d) => { stderr += d.toString(); });
 
         const timer = setTimeout(() => {
-            proc.kill();
+            killClaudeProcess(proc);
             resolve({ ok: false, error: 'Timed out (5 min). Make sure Claude Code is authenticated.' });
         }, 300_000);
 
@@ -1881,7 +1918,9 @@ ipcMain.handle('transcripts:list', () => {
                     const createdAt = Number.isFinite(recordedAtMs)
                         ? recordedAtMs
                         : (stat.birthtimeMs || stat.mtimeMs);
-                    const hasSummary = findExistingSummaryPath(filePath) !== null;
+                    const summaryPath = findExistingSummaryPath(filePath);
+                    const hasSummary = summaryPath !== null;
+                    const summaryOutdated = hasSummary && isSummaryOutdated(summaryPath, stat.mtimeMs);
                     const audioPaths = findRelatedAudioPaths(filePath);
                     const hasAudio = audioPaths.length > 0;
                     // Computed here because the renderer never holds the body of
@@ -1890,7 +1929,7 @@ ipcMain.handle('transcripts:list', () => {
                     // `head` verbatim as well as the parsed fields: the card's info
                     // panel shows every header line, and this whitelist has never
                     // covered all of them (older extension builds wrote `Started:`).
-                    return { filename: f, filePath, createdAt, mtime: stat.mtimeMs, hasSummary, hasAudio, hasSpokenTurns, readFailed: false, audioPath: audioPaths[0] || null, header: head, ...info };
+                    return { filename: f, filePath, createdAt, mtime: stat.mtimeMs, hasSummary, summaryOutdated, hasAudio, hasSpokenTurns, readFailed: false, audioPath: audioPaths[0] || null, header: head, ...info };
                 } catch (err) {
                     // Everything below is a fabricated default, not a finding —
                     // the read, or the summary/audio lookup after it, never
@@ -3079,7 +3118,7 @@ ipcMain.handle('live:saveTranscript', async (_e, payload) => {
         // same session, then (on its success) an Enhance pass over the
         // result — no manual action needed. Skipped if the wav never existed
         // or has since vanished; nothing else here depends on it either way.
-        if (wavPath && fs.existsSync(wavPath)) queueAutoTranscribe(wavPath, language);
+        if (wavPath && fs.existsSync(wavPath)) queueAutoTranscribe(wavPath, language, calendarParticipants);
         noteSessionFlushed('live');
         return { ok: true, filePath, audioPath: wavPath };
     } catch (err) {
@@ -3182,6 +3221,12 @@ const transcriber = {
     // letting it finish, so whatever `record:transcribe` writes afterwards is a
     // prefix of the real transcript and must not pass for a complete one.
     interrupted: false,
+    // True while the current job is an unattended auto-queue run (see
+    // queueAutoTranscribe) rather than something the user clicked — the
+    // quit flush reads this to decide whether popping the window back up
+    // is actually for the user's benefit. Set alongside `proc` in
+    // runRecordTranscribeJob, so it's always current for whichever job owns it.
+    background: false,
 };
 
 function recordSendToRenderer(event) {
@@ -3832,6 +3877,7 @@ async function runRecordTranscribeJob(opts, sendEvent) {
 
     const segments = [];
     let diarSegments = null;
+    let detectedLanguage = null;
     let resolveDone;
     const done = new Promise((resolve) => { resolveDone = resolve; });
 
@@ -3841,6 +3887,7 @@ async function runRecordTranscribeJob(opts, sendEvent) {
         if (evt?.type === 'diarizationComplete' && Array.isArray(evt.segments)) {
             diarSegments = evt.segments;
         }
+        if (evt?.type === 'languageDetected' && evt.language) detectedLanguage = evt.language;
         // The helper's command loop stays parked on `readLine()` after the
         // FileTranscriber task finishes, so `proc.exit` only fires when we
         // close stdin or SIGTERM the proc. Resolve on the `stopped` event
@@ -3854,6 +3901,7 @@ async function runRecordTranscribeJob(opts, sendEvent) {
     // Cleared at the start of every run, so a cancel that lands on one run
     // can't mark the next one partial. Every exit path below is covered.
     transcriber.interrupted = false;
+    transcriber.background = Boolean(opts?.background);
 
     transcriber.proc.on('exit', (code) => {
         sendEvent({ type: 'transcriberExited', code });
@@ -3967,7 +4015,15 @@ async function runRecordTranscribeJob(opts, sendEvent) {
         : recordingTranscriptPath(filePath);
     try {
         if (!fs.existsSync(TRANSCRIPTS_FOLDER)) fs.mkdirSync(TRANSCRIPTS_FOLDER, { recursive: true });
-        const title = path.basename(filePath, path.extname(filePath));
+        // A prior transcript for this same recording may already carry a real
+        // title — typed at Live save time, or set later via "Rename…" — while
+        // the wav itself keeps its timestamp-derived filename forever. Falling
+        // back to the filename stem reverts that title to a raw timestamp on
+        // every re-transcription; preferring the existing header keeps it.
+        const existingTitle = transcriptSnapshot
+            ? parseTranscriptHeaderMain(transcriptSnapshot).title
+            : null;
+        const title = existingTitle || path.basename(filePath, path.extname(filePath));
         const speakerParticipants = Array.from(new Set(
             finalSegments.map(s => humanizeSpeakerLabel(s.speaker)).filter(x => x && x !== '?' && x !== '…')
         ));
@@ -3990,7 +4046,14 @@ async function runRecordTranscribeJob(opts, sendEvent) {
         headerLines.push(`Generated: ${new Date().toLocaleString()}`);
         headerLines.push(`Model: ${model}`);
         if (participants.length) headerLines.push(`Participants: ${participants.join(', ')}`);
-        if (language) headerLines.push(`Language: ${language}`);
+        // WhisperKit's own answer when it was told to detect the language
+        // ("auto") — writing the request verbatim would stamp every
+        // auto-detected transcript with the literal word "auto". Only
+        // substituted for "auto": when the user picked a specific language,
+        // that's what was requested and what belongs in the header, even if
+        // WhisperKit's own reported language ever disagreed with it.
+        const writtenLanguage = (language === 'auto' && detectedLanguage) || language;
+        if (writtenLanguage) headerLines.push(`Language: ${writtenLanguage}`);
         headerLines.push(`Source: ${filePath}`);
         const segBlocks = finalSegments.map(seg => {
             const t = formatHms(seg.start);
@@ -4019,7 +4082,13 @@ async function runRecordTranscribeJob(opts, sendEvent) {
             }
         }
 
-        fs.writeFileSync(transcriptPath, content, 'utf-8');
+        // Unlike runEnhanceJob's write, deliberately not followed by
+        // stampSelfWrite: Enhance suppresses the watcher because it already
+        // pushes the updated content straight to an open editor, but a
+        // transcribe job has no such consumer — the folder watcher firing
+        // transcripts:changed is what tells the library this file exists (or
+        // changed) at all.
+        writeFileAtomic(transcriptPath, content);
         // Keep a partial out of Recent Documents — it isn't a document anyone
         // asked for, it's a salvage file.
         if (!interrupted) {

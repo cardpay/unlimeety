@@ -349,6 +349,32 @@ test('the IPC handler coerces a hostile participants value instead of forwarding
     assert.ok(/process\.platform !== 'darwin'/.test(text), 'the platform gate is gone');
 });
 
+test("live:saveTranscript threads calendarParticipants into its own auto-queued re-transcription", () => {
+    // live:saveTranscript computes `calendarParticipants` and writes it into the
+    // header it saves, but the auto-queued re-transcription that follows used to
+    // call queueAutoTranscribe with only 2 arguments — dropping the calendar
+    // attendees from the large-v3 pass that overwrites the same file minutes
+    // later. A regex guard because the handler is an inline arrow, not a named
+    // function sliceMainFunction() could isolate and execute.
+    const start = MAIN.indexOf("ipcMain.handle('live:saveTranscript'");
+    assert.notStrictEqual(start, -1, 'live:saveTranscript handler not found in main.js');
+    const text = sliceBracesForTest(MAIN, start);
+    assert.ok(
+        /queueAutoTranscribe\(wavPath,\s*language,\s*calendarParticipants\)/.test(text),
+        'live:saveTranscript must pass calendarParticipants to its own queueAutoTranscribe call, or attendee names vanish from the re-transcription',
+    );
+});
+
+/// Text from `from` through the brace-matched block starting at the first `{`.
+function sliceBracesForTest(src, from) {
+    let depth = 0;
+    for (let i = src.indexOf('{', from); i < src.length; i++) {
+        if (src[i] === '{') depth++;
+        else if (src[i] === '}' && --depth === 0) return src.slice(from, i + 1);
+    }
+    throw new Error('unbalanced braces while slicing live:saveTranscript');
+}
+
 test('every Record language picker is fed to the shared painter and handler', () => {
     // The failure this guards: adding a picker to index.html, wiring its ref, and
     // forgetting one of the three call sites — it would then never repaint, or

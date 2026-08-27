@@ -33,16 +33,18 @@ const summaryWarnings = new Map();
 // summary rail. It is derived from a transcript item returned by
 // api.listTranscripts(). The renderer-only shim below extends each item with a
 // status enum + artifact flags so the new UI can render uniformly. Fields the
-// current IPC does not expose (summaryPath, mtime-driven outdated,
-// recording/failed states) are left undefined until main.js is extended.
+// current IPC does not expose (summaryPath, recording/failed states) are left
+// undefined until main.js is extended.
 //
 // Status derivation, given today's IPC surface:
-//   summarized    — hasSummary === true
+//   outdated      — hasSummary === true but summaryOutdated === true (a later
+//                   Enhance/Re-transcribe rewrote the transcript since)
+//   summarized    — hasSummary === true and not outdated
 //   transcribed   — a transcript file exists
 //   audio_only    — a recording with no transcript yet (deriveMeetingFromRecording)
 // `transcribing` is painted by buildMeetingCard off the job queue, not derived
 // here: whether a run is in flight is queue state, not disk state. recording /
-// outdated / failed still need IPC support and will appear once added.
+// failed still need IPC support and will appear once added.
 //
 // Fields that drive the sidebar's work-queue chips, never undefined — from
 // transcripts:list for a transcript row, and pinned to false by
@@ -51,6 +53,7 @@ const summaryWarnings = new Map();
 //   model           — which model produced it; absent on older/pasted ones
 //   enhancedAt      — Enhance has already run
 //   hasSummary      — a summary exists on disk
+//   summaryOutdated — that summary predates a later Enhance/Re-transcribe
 //   hasSpokenTurns  — the body holds turns Enhance would act on
 //   readFailed      — the transcript could not be read, so every flag above is
 //                     a fabricated default rather than a finding
@@ -63,7 +66,7 @@ let contextMenu = null;               // { x, y, meetingId } | null
 // queue (jobsApi), and the cards read it through activeJobFor. The two Sets
 // that used to sit here were declared, checked, and never added to.
 function deriveStatus(m) {
-  if (m.hasSummary) return "summarized";
+  if (m.hasSummary) return m.summaryOutdated ? "outdated" : "summarized";
   if (m.hasTranscript) return "transcribed";
   return "audio_only";
 }
@@ -81,6 +84,7 @@ function deriveMeetingFromTranscript(item) {
   const date = rawDate ? new Date(rawDate) : new Date();
   const hasTranscript = Boolean(item.filePath);
   const hasSummary = Boolean(item.hasSummary);
+  const summaryOutdated = Boolean(item.summaryOutdated);
   const m = {
     id: item.filePath,
     // Display the title from the on-disk filename (stem) rather than the
@@ -98,6 +102,7 @@ function deriveMeetingFromTranscript(item) {
     hasAudio: Boolean(item.hasAudio),
     hasTranscript,
     hasSummary,
+    summaryOutdated,
     language: item.language,
     // Provenance, straight from the transcript header. Undefined on transcripts
     // written before those lines existed and on pasted ones — the card renders
@@ -152,6 +157,7 @@ function deriveMeetingFromRecording(item) {
     // summarize or re-transcribe from.
     hasTranscript: false,
     hasSummary: false,
+    summaryOutdated: false,
     hasSpokenTurns: false,
     language: undefined,
     model: undefined,
@@ -1559,8 +1565,10 @@ function meetingMatchesFilter(m, filter) {
   if (filter === "enhance") return !m.enhancedAt && m.hasSpokenTurns === true;
   // The hasTranscript gate is what keeps un-transcribed recordings out: they
   // have no summary either, so `!m.hasSummary` alone would sweep every one of
-  // them into a queue whose action they cannot run.
-  if (filter === "summarize") return m.hasTranscript === true && !m.hasSummary;
+  // them into a queue whose action they cannot run. A summary that predates a
+  // later Enhance/Re-transcribe (summaryOutdated) belongs back in the queue
+  // too — it exists on disk, but no longer reflects the current transcript.
+  if (filter === "summarize") return m.hasTranscript === true && (!m.hasSummary || m.summaryOutdated === true);
   return true;
 }
 
