@@ -367,8 +367,8 @@
 
           <div class="live-row">
             <label class="live-label">Model</label>
-            <!-- Same card style as the Record tab's batch settings; live UI
-                 keeps only the three smallest WhisperKit variants because
+            <!-- Same card style as the transcribe-settings screen (#transcribe-flow);
+                 live UI keeps only the three smallest WhisperKit variants because
                  real-time transcription cares much more about latency than
                  about the last few accuracy percent. -->
             <div id="live-model-grid" class="ts-model-grid live-model-grid">
@@ -750,6 +750,12 @@
         <div class="record-rec-footer">ⓘ Audio streams directly to disk — no live transcription while you record. On Stop &amp; save, a large-v3 transcription with speaker diarization starts automatically in the language above; it runs locally and ignores the batch settings screen. An Enhance pass follows through your configured summarizer. Watch both in the queue panel.</div>
       </section>
 
+      </div>
+    </div>
+  </main>
+
+  <!-- Transcribe flow (Variant C settings + progress) — lives on the Transcripts tab now, not Record -->
+  <div id="transcribe-flow" class="hidden" role="dialog" aria-modal="true" aria-label="Transcribe recordings">
       <!-- Transcribe settings (Variant C — batch / single-file confirmation) -->
       <section id="record-transcribe-settings" class="hidden">
         <div class="ts-scroll">
@@ -758,15 +764,13 @@
             <!-- Header -->
             <div class="ts-header">
               <div class="ts-header-text">
-                <div class="ts-crumb">
-                  <button class="ts-crumb-link" id="ts-crumb-back">Record</button>
-                  <span class="ts-crumb-sep">›</span>
-                  <span class="ts-crumb-tail"><span id="ts-crumb-count">0</span> recordings</span>
-                </div>
                 <h2 class="ts-title">Transcription settings</h2>
                 <p class="ts-muted">These settings apply to every recording in the batch. Runs locally on your Mac — nothing leaves the machine.</p>
               </div>
-              <kbd class="record-kbd ts-kbd">⌘⏎</kbd>
+              <div class="ts-header-right">
+                <kbd class="record-kbd ts-kbd">⌘⏎</kbd>
+                <button type="button" class="modal-close-btn ts-btn-close" id="ts-btn-close" title="Close" aria-label="Close">✕</button>
+              </div>
             </div>
 
             <!-- Batch summary -->
@@ -998,10 +1002,7 @@
           <span>Transcription runs locally via WhisperKit + SpeakerKit. The result will be saved to <code>~/Downloads/Meet_Transcripts/</code>.</span>
         </footer>
       </section>
-
-      </div>
-    </div>
-  </main>
+  </div>
 
   <!-- New Transcript Modal -->
   <div id="new-modal" class="modal-overlay hidden">
