@@ -275,6 +275,12 @@
 
 .live-perm-link:hover { color: var(--text-primary); }
 
+/* Real Microphone TCC status, prepended to the hint above — see main.js's
+   micPermissionStatus(). Screen Recording status is not shown next to it:
+   the OS API for it is known to cache and lie right after a fresh grant. */
+.live-perm-mic:empty { display: none; }
+.live-perm-mic.is-denied { color: var(--danger); }
+
 /* ─── Permission troubleshoot disclosure ────────────────────────────────
    Sits just below `.live-perm-hint`. Visible only when the user expands it,
    so the setup form stays visually quiet for the common case. */
