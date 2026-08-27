@@ -52,6 +52,8 @@ const summaryWarnings = new Map();
 //   hasAudio        — re-transcribing is possible at all
 //   model           — which model produced it; absent on older/pasted ones
 //   enhancedAt      — Enhance has already run
+//   enhanceAttemptedAt — Enhance ran but proofreading rejected every part
+//                     (speaker naming may still have applied)
 //   hasSummary      — a summary exists on disk
 //   summaryOutdated — that summary predates a later Enhance/Re-transcribe
 //   hasSpokenTurns  — the body holds turns Enhance would act on
@@ -109,6 +111,7 @@ function deriveMeetingFromTranscript(item) {
     // that as unknown rather than assuming anything.
     model: item.model || undefined,
     enhancedAt: item.enhancedAt || undefined,
+    enhanceAttemptedAt: item.enhanceAttemptedAt || undefined,
     // Whether the transcript holds anything Enhance would act on, decided in
     // main by the very predicate the Enhance job uses. False on an unreadable
     // transcript, so the "To enhance" filter leaves it out.
@@ -162,6 +165,7 @@ function deriveMeetingFromRecording(item) {
     language: undefined,
     model: undefined,
     enhancedAt: undefined,
+    enhanceAttemptedAt: undefined,
     readFailed: false,
     header: "",
     progress: undefined,
@@ -1562,7 +1566,9 @@ function meetingMatchesFilter(m, filter) {
   // Weak model AND re-transcribable: the Re-transcribe menu item is gated on
   // hasAudio too, so without it the queue would list meetings you cannot act on.
   if (filter === "retranscribe") return m.hasAudio === true && modelWorthRedoing(m.model);
-  if (filter === "enhance") return !m.enhancedAt && m.hasSpokenTurns === true;
+  // enhanceAttemptedAt: proofreading rejected every part on an earlier run —
+  // a re-run hits the same rejection, so it must not sit in the queue forever.
+  if (filter === "enhance") return !m.enhancedAt && !m.enhanceAttemptedAt && m.hasSpokenTurns === true;
   // The hasTranscript gate is what keeps un-transcribed recordings out: they
   // have no summary either, so `!m.hasSummary` alone would sweep every one of
   // them into a queue whose action they cannot run. A summary that predates a
@@ -3744,12 +3750,19 @@ document.addEventListener("keydown", (e) => {
     e.preventDefault();
     e.shiftKey ? saveAsFile() : saveFile();
   }
+  // These three open a modal, body-level like the ⋯ meeting menu's own
+  // overlay — which only closes on Escape, an outside click, or picking an
+  // item, none of which these shortcuts trigger. Left open, the new modal
+  // renders underneath it, still covered by the overlay's click-swallowing
+  // div. Closing it here is cheap: it is a popover, not state.
   if (mod && e.key === "o") {
     e.preventDefault();
+    if (contextMenu) closeMeetingMenu();
     openFile();
   }
   if (mod && e.key === "n") {
     e.preventDefault();
+    if (contextMenu) closeMeetingMenu();
     openNewModal();
   }
   if (mod && e.key === "k") {
@@ -3775,6 +3788,7 @@ document.addEventListener("keydown", (e) => {
   if (mod && e.key === "/") {
     e.preventDefault();
     if (state.filePath) {
+      if (contextMenu) closeMeetingMenu();
       const m = getMeetingById(state.filePath);
       openChatModal({ kind: "file", filePath: state.filePath }, m?.title || null);
     }

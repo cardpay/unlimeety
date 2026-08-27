@@ -41,6 +41,7 @@
     const importBtn         = $('record-btn-import');
     const setupError        = $('record-setup-error');
     const openScreenSettingsBtn = $('record-open-screen-settings');
+    const micStatusEl       = $('record-mic-status');
 
     const statusDot   = $('record-status-dot');
     const statusText  = $('record-status-text');
@@ -344,6 +345,31 @@
         api.watch();
     })();
 
+    // The hint below this used to always say "First launch: macOS will ask…"
+    // regardless of whether that had already happened. Real Microphone status
+    // replaces the guesswork for the two states worth reporting; Screen
+    // Recording is left as-is (see live.css) — that OS API is known to cache
+    // and lie right after a fresh grant, unlike this one. 'not-determined' —
+    // macOS hasn't even asked yet — is left blank rather than shown as denied;
+    // the static copy below already covers that case. Re-run every time the
+    // idle screen shows (see showSection): the very first Start click is what
+    // triggers the real prompt, so the answer is only known *after* it.
+    async function refreshMicStatus() {
+        const status = await api.micStatus?.();
+        if (!micStatusEl || !status) return;
+        if (status === 'granted') {
+            micStatusEl.textContent = 'Microphone: granted. ';
+            micStatusEl.classList.remove('is-denied');
+        } else if (status === 'denied' || status === 'restricted') {
+            micStatusEl.textContent = 'Microphone: not granted. ';
+            micStatusEl.classList.add('is-denied');
+        } else {
+            micStatusEl.textContent = '';
+            micStatusEl.classList.remove('is-denied');
+        }
+    }
+    refreshMicStatus();
+
     api.onListChanged(() => refreshHistory());
 
     // The idle-screen "transcription in progress" banner reads `queueJobs` —
@@ -369,6 +395,7 @@
         transcribeSection.classList.toggle('hidden', name !== 'transcribing');
         transcribeFlowWrap?.classList.toggle('hidden', name !== 'transcribeSettings' && name !== 'transcribing');
         updateTransActiveBanner();
+        if (name === 'idle') refreshMicStatus();
     }
 
     // #transcribe-flow is a top-level overlay now, not gated by the tab

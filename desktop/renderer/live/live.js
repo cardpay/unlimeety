@@ -41,6 +41,7 @@
     const setupError     = $('live-setup-error');
     const startBtn       = $('live-btn-start');
     const openScreenSettingsBtn = $('live-open-screen-settings');
+    const micStatusEl    = $('live-mic-status');
 
     const statusDot   = $('live-status-dot');
     const statusText  = $('live-status-text');
@@ -333,6 +334,31 @@
         }
     })();
 
+    // The hint below this used to always say "First launch: macOS will ask…"
+    // regardless of whether that had already happened. Real Microphone status
+    // replaces the guesswork for the two states worth reporting; Screen
+    // Recording is left as-is (see live.css) — that OS API is known to cache
+    // and lie right after a fresh grant, unlike this one. 'not-determined' —
+    // macOS hasn't even asked yet — is left blank rather than shown as denied;
+    // the static copy below already covers that case. Re-run on return to
+    // setup too: the very first Start click is what triggers the real prompt,
+    // so the answer is only known *after* it, not at module load.
+    async function refreshMicStatus() {
+        const status = await live?.micStatus?.();
+        if (!micStatusEl || !status) return;
+        if (status === 'granted') {
+            micStatusEl.textContent = 'Microphone: granted. ';
+            micStatusEl.classList.remove('is-denied');
+        } else if (status === 'denied' || status === 'restricted') {
+            micStatusEl.textContent = 'Microphone: not granted. ';
+            micStatusEl.classList.add('is-denied');
+        } else {
+            micStatusEl.textContent = '';
+            micStatusEl.classList.remove('is-denied');
+        }
+    }
+    refreshMicStatus();
+
     // ─── Setup → start ───────────────────────────────────────────────────
     startBtn.addEventListener('click', async () => {
         setupError.classList.add('hidden');
@@ -372,6 +398,11 @@
             setupSection.classList.remove('hidden');
             recordingSection.classList.add('hidden');
             showSetupError(res?.error || 'Failed to start');
+            // Back on setup after main's own mic-permission gate ran (and,
+            // most likely, just triggered the real OS prompt for the first
+            // time) — re-read the answer instead of showing what was true
+            // before the click.
+            refreshMicStatus();
             return;
         }
 
@@ -838,6 +869,7 @@
         setupSection.classList.remove('hidden');
         recordingSection.classList.add('hidden');
         resetRecordingUI();
+        refreshMicStatus();
     }
 
     function resetRecordingUI() {
