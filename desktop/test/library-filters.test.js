@@ -237,6 +237,14 @@ assert.strictEqual(
 // To summarize
 assert.strictEqual(meetingMatchesFilter(meeting({ hasSummary: false }), 'summarize'), true);
 assert.strictEqual(meetingMatchesFilter(meeting({ hasSummary: true }), 'summarize'), false);
+// A summary written before a later Enhance/Re-transcribe rewrote the
+// transcript is stale — it must re-enter the queue exactly like "no summary"
+// would, and the status pill must say so rather than "Summarized".
+assert.strictEqual(
+    meetingMatchesFilter(meeting({ hasSummary: true, summaryOutdated: true }), 'summarize'),
+    true, 'an outdated summary belongs back in the To summarize queue');
+assert.strictEqual(sandbox.deriveStatus(meeting({ hasSummary: true, summaryOutdated: true })), 'outdated');
+assert.strictEqual(sandbox.deriveStatus(meeting({ hasSummary: true, summaryOutdated: false })), 'summarized');
 
 // Read failure: every flag a queue would read is a fabricated default, so all
 // three exclude it — including the one whose summary exists on disk but whose
