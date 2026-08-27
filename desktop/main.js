@@ -780,6 +780,16 @@ function defaultSummaryBase(transcriptPath, info, mtimeMs) {
     return `${shortName} ${formatDateDdMmYy(transcriptPath, mtimeMs)}`;
 }
 
+// Summaries written before the date-suffix reorder used date-then-title. Kept
+// only so findExistingSummaryPath can still locate those pre-existing files —
+// new summaries are never written in this order.
+function dateFirstSummaryBase(transcriptPath, info, mtimeMs) {
+    const rawTitle = info?.title || legacySummaryBase(transcriptPath);
+    const shortName = sanitizeFilenameChars(stripMeetPrefix(rawTitle));
+    if (!shortName) return legacySummaryBase(transcriptPath);
+    return `${formatDateDdMmYy(transcriptPath, mtimeMs)} ${shortName}`;
+}
+
 function readTranscriptInfoSync(transcriptPath) {
     let info = { title: null, generated: null, language: null, participants: [] };
     let mtimeMs = Date.now();
@@ -830,6 +840,7 @@ function findExistingSummaryPath(transcriptPath, folderOverride) {
     if (safeOverride) candidates.push(path.join(dir, safeOverride + '.summary.md'));
     const { info, mtimeMs } = readTranscriptInfoSync(transcriptPath);
     candidates.push(path.join(dir, defaultSummaryBase(transcriptPath, info, mtimeMs) + '.summary.md'));
+    candidates.push(path.join(dir, dateFirstSummaryBase(transcriptPath, info, mtimeMs) + '.summary.md'));
     candidates.push(path.join(dir, legacySummaryBase(transcriptPath) + '.summary.md'));
     for (const p of candidates) {
         if (fs.existsSync(p)) return p;
