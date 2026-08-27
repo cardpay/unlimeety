@@ -2317,9 +2317,13 @@ async function runEnhanceJob(filePath, sender) {
             sender.send('transcripts:enhanceProgress', { filePath, phase: 'speakers' });
         }
         const participants = enhance.participantsFromHeader(header);
+        const meetingTitle = parseTranscriptHeaderMain(header).title;
         const evidence = enhance.speakerEvidence(blocks, NOTE_LABEL);
-        const instruction = participants.length
-            ? `${enhance.SPEAKER_PROMPT}\n\nParticipants: ${participants.join(', ')}`
+        const context = [];
+        if (meetingTitle) context.push(`Meeting: ${meetingTitle}`);
+        if (participants.length) context.push(`Participants: ${participants.join(', ')}`);
+        const instruction = context.length
+            ? `${enhance.SPEAKER_PROMPT}\n\n${context.join('\n')}`
             : enhance.SPEAKER_PROMPT;
         try {
             const res = await runSummarizerProvider(
