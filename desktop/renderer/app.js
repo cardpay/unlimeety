@@ -4359,7 +4359,6 @@ function jobStatusText(job) {
 function renderQueueBadge() {
   const active = queueJobs.filter((j) => j.status === "queued" || j.status === "running");
   const failed = queueJobs.filter((j) => j.status === "failed");
-  queueIndicatorBtn.classList.toggle("hidden", queueJobs.length === 0);
   const showBadge = active.length > 0 || failed.length > 0;
   queueIndicatorBadge.classList.toggle("hidden", !showBadge);
   queueIndicatorBadge.classList.toggle("queue-indicator-badge--danger", active.length === 0 && failed.length > 0);
