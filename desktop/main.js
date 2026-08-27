@@ -1798,6 +1798,7 @@ function parseTranscriptHeaderMain(content) {
     const info = {
         title: null, generated: null, recordedAt: null, language: null,
         participants: [], source: null, model: null, enhancedAt: null,
+        enhanceAttemptedAt: null,
     };
     for (const line of content.split('\n')) {
         if (line === '') break;
@@ -1811,6 +1812,11 @@ function parseTranscriptHeaderMain(content) {
         // these lines existed, and on pasted ones — null, never a guess.
         else if (line.startsWith('Model: '))      info.model       = line.slice(7).trim();
         else if (line.startsWith('Enhanced: '))   info.enhancedAt  = line.slice(10).trim();
+        // A run whose proofreading pass rejected every part but still renamed
+        // speakers — not a proofreading pass (see runEnhanceJob), but a repeat
+        // run would hit the identical rejection, so it must still leave "To
+        // enhance" rather than sit there forever asking to be re-run.
+        else if (line.startsWith('Enhance-Attempted: ')) info.enhanceAttemptedAt = line.slice(19).trim();
         else if (line.startsWith('Participants: '))
             info.participants = line.slice(14).trim().split(', ').filter(Boolean);
     }
@@ -2492,10 +2498,23 @@ async function runEnhanceJob(filePath, sender) {
         // of the re-run they actually need.
         // A run that only named speakers (`done === 0`, every proofreading part
         // rejected) is not a proofreading pass either — it keeps the names, but
-        // the text it was supposed to clean up was never touched.
-        const stamped = (enhanceCancelled || !done)
+        // the text it was supposed to clean up was never touched. It still gets
+        // its own stamp (never `Enhanced`, which would claim proofreading ran) —
+        // otherwise a re-run hits the identical rejection and "To enhance" never
+        // clears. `!namedSpeakers` cannot reach here: the early return above
+        // already bails when both are zero.
+        // A prior rejected run may have left `Enhance-Attempted:` in the header;
+        // stampHeaderLine only ever upserts its own key, so a later successful
+        // pass must drop that line itself or both stamps sit there forever,
+        // contradicting each other in the info panel.
+        const withoutAttempted = header.split('\n')
+            .filter((l) => !l.replace(/\r$/, '').startsWith('Enhance-Attempted: '))
+            .join('\n');
+        const stamped = enhanceCancelled
             ? header
-            : enhance.stampHeaderLine(header, 'Enhanced', new Date().toISOString());
+            : done
+                ? enhance.stampHeaderLine(withoutAttempted, 'Enhanced', new Date().toISOString())
+                : enhance.stampHeaderLine(header, 'Enhance-Attempted', new Date().toISOString());
         const updated = enhance.matchLineEndings(enhance.assembleTranscript(stamped, blocks), original);
         if (updated === original) {
             return { ok: true, canceled: enhanceCancelled, total: chunks.length, skipped, namedSpeakers, changed: false };
@@ -2681,6 +2700,15 @@ ipcMain.handle('live:platformOK', () => process.platform === 'darwin');
 // So we let the helper try; if `SCShareableContent` throws because the
 // permission isn't actually granted, swift surfaces a precise, user-actionable
 // error message that we render as a red banner in the stream.
+// Unlike screen-recording status (see the comment above this function), the
+// microphone TCC status is not known to lie or go stale — safe to surface
+// verbatim to the setup screens instead of the permanently-static hint text
+// both used to show regardless of whether the user had already granted it.
+function micPermissionStatus() {
+    if (process.platform !== 'darwin') return 'granted';
+    return systemPreferences.getMediaAccessStatus('microphone');
+}
+
 async function ensureMacPermissions() {
     if (process.platform !== 'darwin') return { ok: true };
 
@@ -2707,6 +2735,8 @@ ipcMain.handle('live:openScreenSettings', () => {
     shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture');
     return true;
 });
+
+ipcMain.handle('live:micStatus', () => micPermissionStatus());
 
 // ─── Calendar (EventKit) ────────────────────────────────────────────────────
 // One-shot query: spawn the swift helper, ask for nearby calendar events, read
@@ -3457,6 +3487,8 @@ ipcMain.handle('record:openScreenSettings', () => {
     shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture');
     return true;
 });
+
+ipcMain.handle('record:micStatus', () => micPermissionStatus());
 
 ipcMain.handle('record:list', () => {
     try {

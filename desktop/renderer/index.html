@@ -448,7 +448,8 @@
               </label>
             </div>
             <p class="live-perm-hint">
-              First launch: macOS will ask for Microphone and Screen Recording permission.
+              <strong id="live-mic-status" class="live-perm-mic" aria-live="polite"></strong>
+              macOS asks for Microphone and Screen Recording permission before you can record — already-granted ones are simply skipped.
               After granting Screen Recording you must <strong>fully quit</strong> (Cmd+Q) and relaunch the app.
               <button type="button" class="live-perm-link" id="live-open-screen-settings">Open Privacy Settings →</button>
             </p>
@@ -635,7 +636,8 @@
               </label>
             </div>
             <p class="live-perm-hint">
-              First launch: macOS will ask for Microphone and Screen Recording permission.
+              <strong id="record-mic-status" class="live-perm-mic" aria-live="polite"></strong>
+              macOS asks for Microphone and Screen Recording permission before you can record — already-granted ones are simply skipped.
               After granting Screen Recording you must <strong>fully quit</strong> (Cmd+Q) and relaunch the app.
               <button type="button" class="live-perm-link" id="record-open-screen-settings">Open Privacy Settings →</button>
             </p>
