@@ -4408,13 +4408,14 @@ function renderQueueList() {
         : dismissable
           ? '<button class="btn btn-ghost queue-job-cancel" data-action="dismiss" type="button" title="Dismiss">✕</button>'
           : "";
+      const statusText = escapeHtml(jobStatusText(job));
       return `
         <li class="queue-job" data-status="${job.status}" data-job-id="${escapeHtml(job.id)}">
           <div class="queue-job-row1">
             <span class="queue-job-title" title="${title}">${typeLabel} — ${title}</span>
             ${actionBtn}
           </div>
-          <div class="queue-job-meta">${escapeHtml(jobStatusText(job))}</div>
+          <div class="queue-job-meta" title="${statusText}">${statusText}</div>
         </li>`;
     })
     .join("");
