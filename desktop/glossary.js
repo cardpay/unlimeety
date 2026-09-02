@@ -143,15 +143,20 @@ function select(entries, text, limit = MAX_ENTRIES) {
     return [...exact, ...fuzzy].slice(0, limit);
 }
 
-function render(entries) {
+// The heading carries the block's imperative, so it belongs to the caller and
+// not to the renderer. Proofreading wants the spellings restored; the speaker
+// naming pass must not be told to restore anything — it answers
+// `Placeholder -> Name` and nothing else, and an imperative left dangling at the
+// end of its prompt is an instruction it will try to follow.
+const PROOFREAD_HEADING = 'Domain terms — restore these spellings when the transcript mangles them:';
+const REFERENCE_HEADING = 'Domain terms and names that come up in this meeting, spelled correctly:';
+
+function render(entries, heading = PROOFREAD_HEADING) {
     if (!entries.length) return '';
     const lines = entries.map((e) =>
         e.aliases.length ? `- ${e.term} (heard as: ${e.aliases.join(', ')})` : `- ${e.term}`
     );
-    return [
-        'Domain terms — restore these spellings when the transcript mangles them:',
-        ...lines,
-    ].join('\n');
+    return [heading, ...lines].join('\n');
 }
 
 /// Convenience: glossary file text + one chunk → prompt block ('' if nothing
@@ -160,4 +165,10 @@ function blockFor(glossaryText, chunkText, limit = MAX_ENTRIES) {
     return render(select(parse(glossaryText), chunkText, limit));
 }
 
-module.exports = { parse, select, render, blockFor, MAX_ENTRIES };
+// `withinDistance` is exported for the speaker naming pass, which compares a
+// transliterated name part against the segments of a participant's email
+// address. One Levenshtein in the repo, not two.
+module.exports = {
+    parse, select, render, blockFor, withinDistance,
+    MAX_ENTRIES, REFERENCE_HEADING,
+};
