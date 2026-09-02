@@ -2293,6 +2293,13 @@ let enhanceCancelled = false;
 // part, so there is nothing to learn from parts 4..500.
 const FAIL_FAST_PARTS = 3;
 
+// How much spoken text the naming prompt's glossary block is chosen from.
+// `glossary.select` is a synchronous O(words × terms) fuzzy scan on the main
+// process — a second per 40000 characters with a large glossary — and the
+// selection is capped at 40 entries anyway, so scanning a whole marathon
+// transcript would freeze the UI to pick the same handful of terms.
+const GLOSSARY_SCAN_CHARS = 40000;
+
 // Enhance is deliberately not a quit-flush slot (see before-quit): it holds
 // nothing that must be saved — the file is written only at the end — so quitting
 // mid-run costs model time, not data. Cancelling just stops the next call.
@@ -2338,6 +2345,10 @@ async function runEnhanceJob(filePath, sender) {
     let header = split.header;
     let blocks = enhance.parseBlocks(body);
     const cfg = readSummarizerConfig();
+    // Parsed once for the whole run — both passes select from it, and `select`
+    // still runs per prompt so a block only carries the terms that text
+    // plausibly contains.
+    const glossaryEntries = glossary.parse(readConfig().glossary || '');
 
     // A renderer that reloads or goes away can no longer show the result, and the
     // run would otherwise hold the lock for hours and write the file under a
@@ -2364,12 +2375,22 @@ async function runEnhanceJob(filePath, sender) {
         const participants = enhance.participantsFromHeader(header);
         const meetingTitle = parseTranscriptHeaderMain(header).title;
         const evidence = enhance.speakerEvidence(blocks, NOTE_LABEL);
-        const context = [];
-        if (meetingTitle) context.push(`Meeting: ${meetingTitle}`);
-        if (participants.length) context.push(`Participants: ${participants.join(', ')}`);
-        const instruction = context.length
-            ? `${enhance.SPEAKER_PROMPT}\n\n${context.join('\n')}`
-            : enhance.SPEAKER_PROMPT;
+        // Selected against the spoken text only, exactly as the proofreading loop
+        // below does and for the same reason: matching the rendered evidence also
+        // matches the marker lines, so a term that happens to be a participant's
+        // surname is selected by every transcript. Capped, because unlike the
+        // loop's per-chunk selection this one is a single scan over the whole
+        // file (see GLOSSARY_SCAN_CHARS).
+        const spokenBody = blocks
+            .filter((b) => !enhance.isNoteBlock(b, NOTE_LABEL))
+            .map((b) => b.text).join('\n')
+            .slice(0, GLOSSARY_SCAN_CHARS);
+        // Its own heading: the proofreading imperative ("restore these
+        // spellings") must not be the last thing a prompt says when the only
+        // answer wanted is `Placeholder -> Name`.
+        const terms = glossary.render(
+            glossary.select(glossaryEntries, spokenBody), glossary.REFERENCE_HEADING);
+        const instruction = enhance.speakerInstruction({ terms, meetingTitle, participants });
         try {
             const res = await runSummarizerProvider(
                 `Placeholders to identify: ${placeholders.join(', ')}\n\n${evidence}`,
@@ -2380,7 +2401,7 @@ async function runEnhanceJob(filePath, sender) {
                 });
                 if (named.size) {
                     blocks = enhance.renameSpeakers(blocks, named);
-                    header = enhance.renameParticipantsLine(header, named);
+                    header = enhance.renameParticipantsLine(header, named, body);
                     namedSpeakers = named.size;
                 }
             } else {
@@ -2400,9 +2421,6 @@ async function runEnhanceJob(filePath, sender) {
     }
 
     const chunks = enhance.chunkBlocks(targets);
-    // Parsed once for the whole run; `select` still runs per chunk, so the block
-    // only carries the terms that chunk plausibly contains.
-    const glossaryEntries = glossary.parse(readConfig().glossary || '');
 
     let skipped = 0;
     let done = 0;
