@@ -85,20 +85,50 @@
     return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   }
 
-  // Index of the event happening now; otherwise the next upcoming; otherwise 0.
-  function defaultIndex(events) {
+  // How far back the listed window reaches. The helper's own default is 120,
+  // which is more finished meetings than is useful to look at — and one of them
+  // used to end up pre-selected.
+  const LIST_BACK_MIN = 60;
+  // How far ahead an upcoming meeting still counts as the one about to be
+  // recorded. The listed window reaches 8 h forward (the helper's default),
+  // which is far too wide to prefill a title from.
+  const UPCOMING_CAP_MIN = 20;
+  // All-day and multi-day entries ("PTO", "Sprint 42") are "ongoing" from
+  // midnight to midnight and would beat the real meeting to the pick. The
+  // helper ships no isAllDay flag, so cap by duration instead — ship isAllDay
+  // from CalendarBridge.swift if a genuine all-day workshop ever needs to
+  // prefill a title.
+  const MAX_MEETING_MS = 6 * 3600 * 1000;
+
+  // The event to prefill from: the one happening now, else the nearest one
+  // starting within UPCOMING_CAP_MIN — and null when the calendar holds nothing
+  // relevant. Never an event that already ended: the old fallback returned
+  // index 0 in that case, i.e. the OLDEST event in the window, which is how a
+  // meeting that had already finished ended up pre-selected.
+  function currentEvent(events) {
     const now = Date.now();
-    let ongoing = -1;
-    let nextUpcoming = -1;
-    events.forEach((ev, i) => {
+    let ongoing = null;
+    let ongoingLen = Infinity;
+    let next = null;
+    for (const ev of Array.isArray(events) ? events : []) {
       const start = new Date(ev.start).getTime();
       const end = new Date(ev.end).getTime();
-      if (start <= now && now <= end && ongoing < 0) ongoing = i;
-      if (start >= now && nextUpcoming < 0) nextUpcoming = i;
-    });
-    if (ongoing >= 0) return ongoing;
-    if (nextUpcoming >= 0) return nextUpcoming;
-    return 0;
+      if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
+      if (end - start > MAX_MEETING_MS) continue;
+      // A nameless event can prefill nothing, so it must not be the pick either
+      // — otherwise the popover pre-selects a row the prefill then ignores.
+      if (!String(ev.title || '').trim()) continue;
+      // Overlapping meetings: the shortest one wins. A 4 h "focus block" is
+      // ongoing across the 30 min call inside it, and the call is what is being
+      // recorded. Comparing durations also drops the reliance on the helper's
+      // sort order that picking the first match had.
+      if (start <= now && now <= end) {
+        if (!ongoing || end - start < ongoingLen) { ongoing = ev; ongoingLen = end - start; }
+      } else if (start > now && (!next || start < new Date(next.start).getTime())) next = ev;
+    }
+    if (ongoing) return ongoing;
+    if (next && new Date(next.start).getTime() - now <= UPCOMING_CAP_MIN * 60000) return next;
+    return null;
   }
 
   function closePopover() {
@@ -145,7 +175,7 @@
       showMessage('No calendar events around now.', false);
       return;
     }
-    const def = defaultIndex(events);
+    const def = events.indexOf(currentEvent(events)); // -1 → nothing pre-selected
     events.forEach((ev, i) => {
       const item = document.createElement('div');
       item.className = 'cal-pop-item' + (i === def ? ' cal-default' : '');
@@ -181,7 +211,7 @@
     const mine = popover;
     let res;
     try {
-      res = await api.list();
+      res = await api.list({ windowBackMinutes: LIST_BACK_MIN });
     } catch (err) {
       res = { ok: false, error: String(err && err.message || err) };
     }
@@ -205,5 +235,82 @@
     });
   }
 
-  window.calendarPicker = { attach };
+  // ─── Auto-prefill ──────────────────────────────────────────────────────────
+  // Read fresh on every call — the whole point is that nothing here is cached
+  // between tab visits. `ok` separates "the calendar says nothing is on now"
+  // from "the calendar could not be read at all" (denied, non-macOS, helper
+  // gone). Only the former may clear a title: a read that failed knows nothing
+  // about the meeting, and wiping the field on it would turn a revoked
+  // permission into lost work.
+  async function readCurrent() {
+    if (!(await platformReady)) return { ok: false, pick: null };
+    let res;
+    try { res = await api.list({ windowBackMinutes: LIST_BACK_MIN }); } catch { return { ok: false, pick: null }; }
+    if (!res || !res.ok) return { ok: false, pick: null };
+    const ev = currentEvent(res.events || []);
+    if (!ev || !ev.title) return { ok: true, pick: null };
+    return {
+      ok: true,
+      pick: {
+        title: String(ev.title),
+        participants: Array.isArray(ev.participants) ? ev.participants : [],
+      },
+    };
+  }
+
+  // Keeps a setup form's title field in step with the calendar. refresh() — call
+  // it whenever the tab is opened — re-reads the calendar, fills in the current
+  // meeting, and clears its own value once that meeting is over. It only ever
+  // touches what it wrote itself: a title typed by hand, or picked from the
+  // popover, is left alone. Without this, a prefilled title outlived its meeting
+  // until the app restarted, so the next recording inherited it.
+  // `active` (optional) answers "is the form this field lives on still the one
+  // on screen?" — a read spans an 8 s helper spawn, and pressing Start mid-read
+  // must not let the clear below land on a session in progress, whose save path
+  // is about to read that very title.
+  function autoPrefill({ input, onPick, active }) {
+    let auto = '';  // the last value we wrote, trimmed
+    let writes = 0; // bumped on every write, so an in-flight refresh can tell
+                    // that someone (another refresh, or main's auto-record
+                    // title) wrote while it was reading, and back off
+    const usable = () => !active || active();
+    const ours = () => {
+      const v = input.value.trim();
+      return !v || v === auto;
+    };
+    const put = (pick) => {
+      if (!pick || !pick.title || !usable() || !ours()) return;
+      // Trimmed on both sides of the comparison: a calendar title with padding
+      // ("Retro ") would otherwise never equal the trimmed field again, and the
+      // prefill would lose ownership of its own value for good — the original
+      // bug, back again.
+      const title = String(pick.title).trim();
+      if (!title) return;
+      const same = title === auto;
+      auto = title;
+      writes++;
+      onPick({
+        title,
+        // A title that arrives without attendees is main's auto-record prompt,
+        // which knows none. Keeping the ones already stashed would file the new
+        // meeting under the previous one's guest list — unless it IS the same
+        // meeting, where `undefined` leaves them in place.
+        participants: Array.isArray(pick.participants) ? pick.participants : (same ? undefined : []),
+      });
+    };
+    return {
+      put,
+      refresh: async () => {
+        const seen = writes;
+        const { ok, pick } = await readCurrent();
+        if (writes !== seen || !usable()) return;
+        if (pick) { put(pick); return; }
+        // `clear` rather than an empty title: the sinks must be able to tell
+        // this apart from a nameless event's '' arriving on some other path.
+        if (ok && auto && ours()) { auto = ''; writes++; onPick({ title: '', participants: [], clear: true }); }
+      },
+    };
+  }
+
+  window.calendarPicker = { attach, currentEvent, autoPrefill };
 })();
