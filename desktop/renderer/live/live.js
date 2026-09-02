@@ -111,11 +111,27 @@
     // ─── Calendar pre-fill ───────────────────────────────────────────────
     // Shared by the picker (this tab's 📅 button) and the smart router
     // (calendar-smart.js), which routes here and pre-fills after switching tab.
-    function applyCalendarPick({ title, participants }) {
-        if (title) titleInput.value = title;
-        state.calendarParticipants = Array.isArray(participants) ? participants : [];
+    // An absent `title` / `participants` leaves that half alone: the auto-record
+    // prompt hands over a title only, and must not wipe attendees the calendar
+    // refresh just filled in. Only an explicit `clear` empties the field — a
+    // nameless calendar event reaches the smart router as `title: ''`
+    // (calendar-smart.js passes it raw), and that must never wipe a typed title.
+    function applyCalendarPick({ title, participants, clear }) {
+        if (clear) titleInput.value = '';
+        else if (title) titleInput.value = title;
+        if (Array.isArray(participants)) state.calendarParticipants = participants;
     }
     window.calendarPicker?.attach({ button: $('live-cal-btn'), onPick: applyCalendarPick });
+    // Re-read on every visit to this tab: the field used to keep whatever the
+    // calendar said the first time it was filled, so a meeting that ended hours
+    // ago was still pre-selected.
+    const calPrefill = window.calendarPicker?.autoPrefill({
+        input: titleInput,
+        onPick: applyCalendarPick,
+        // Re-checked after the calendar read too: Start may have been pressed
+        // while it was in flight, and stopAndSave still has to read this title.
+        active: () => !setupSection.classList.contains('hidden'),
+    });
     window.liveTab = { applyCalendarPick };
 
     // ─── Model picker ────────────────────────────────────────────────────
@@ -303,8 +319,17 @@
         // fresh "new recording" setup screen, not the last transcript. The
         // `finished` flag is only set after a successful save (never during
         // startup), so a session that's still loading is never wiped.
-        if (btn.dataset.tab === 'live' && state.finished && !state.running) {
-            returnToSetup();
+        if (btn.dataset.tab === 'live' && !state.running) {
+            // returnToSetup() re-reads the calendar itself, so only the
+            // still-on-setup case needs its own refresh here — and only when
+            // setup is what's actually on screen. `!state.running` is also true
+            // while live.start() loads the model, after a failed save and after
+            // a helper crash, and in all three the recording screen is up with
+            // a title that stopAndSave() still has to read: clearing it there
+            // would save the session under defaultTitle(). Mirrors record.js's
+            // `state.phase === 'idle'` gate.
+            if (state.finished) returnToSetup();
+            else if (!setupSection.classList.contains('hidden')) calPrefill?.refresh();
         }
         switchTab(btn.dataset.tab);
     }));
@@ -420,7 +445,11 @@
     // presses Start manually.
     live.onAutoStart?.(({ title } = {}) => {
         document.querySelector('.tab-btn[data-tab="live"]')?.click();
-        if (title && !titleInput.value.trim()) titleInput.value = title;
+        // Through the prefill, not straight into the field: main's title has to
+        // win over a stale auto-filled one (the old `!titleInput.value.trim()`
+        // guard is exactly why the prompt kept landing on the previous
+        // meeting), while a title typed by hand still survives.
+        if (title) calPrefill?.put({ title });
     });
 
     // ─── Stop → save ─────────────────────────────────────────────────────
@@ -870,6 +899,14 @@
         recordingSection.classList.add('hidden');
         resetRecordingUI();
         refreshMicStatus();
+        // The finished session's meeting data must not seed the next one:
+        // attendees fed its "Participants:" header line and the renames its
+        // speaker labels. Cleared here rather than in resetRecordingUI(), which
+        // also runs on Start — there it would wipe the pick for the session
+        // about to begin. The title is the refresh's business.
+        state.calendarParticipants = [];
+        state.speakerNames = {};
+        calPrefill?.refresh();
     }
 
     function resetRecordingUI() {
