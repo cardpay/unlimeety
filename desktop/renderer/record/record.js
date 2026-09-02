@@ -489,11 +489,28 @@
     // participants are stashed for the transcribe step's "Participants:" line.
     // Shared by the picker (this tab's 📅 button) and the smart router
     // (calendar-smart.js), which routes here and pre-fills after switching tab.
-    function applyCalendarPick({ title, participants }) {
-        if (title) titleInput.value = title;
-        state.calendarParticipants = Array.isArray(participants) ? participants : [];
+    // An absent half is left alone. Only an explicit `clear` empties the field:
+    // a nameless calendar event reaches the smart router as `title: ''` and must
+    // not wipe a title typed by hand.
+    function applyCalendarPick({ title, participants, clear }) {
+        if (clear) titleInput.value = '';
+        else if (title) titleInput.value = title;
+        if (Array.isArray(participants)) state.calendarParticipants = participants;
     }
     window.calendarPicker?.attach({ button: $('record-cal-btn'), onPick: applyCalendarPick });
+    // Re-read on every visit to this tab (live.js owns the switcher, so this is
+    // a listener of our own): the field used to keep whatever the calendar said
+    // the first time it was filled, so a meeting that ended hours ago was still
+    // pre-selected — and its title names the WAV file.
+    const calPrefill = window.calendarPicker?.autoPrefill({
+        input: titleInput,
+        onPick: applyCalendarPick,
+        // Also re-checked after the calendar read: a refresh started on the setup
+        // screen must not land once recording or transcribing is on screen.
+        active: () => state.phase === 'idle',
+    });
+    document.querySelector('#tab-switch .tab-btn[data-tab="record"]')
+        ?.addEventListener('click', () => { if (state.phase === 'idle') calPrefill?.refresh(); });
     window.recordTab = { applyCalendarPick, enterTranscribeSettings, closeTranscribeFlow };
 
     startBtn.addEventListener('click', async () => {
@@ -862,6 +879,11 @@
                 // Whatever a previous stop failed with is stale now.
                 setupError.textContent = '';
                 setupError.classList.add('hidden');
+                // The finished meeting's title names the next WAV, so refresh it
+                // against the calendar whatever came of this recording — a stop
+                // too short to queue (autoTranscribeArgs → null) ends a session
+                // just the same.
+                calPrefill?.refresh();
                 if (auto) {
                     // Calendar attendees belong to the session that just ended.
                     // Consumed here, or recording #2 inherits recording #1's
