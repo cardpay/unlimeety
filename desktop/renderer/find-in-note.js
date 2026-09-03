@@ -64,9 +64,9 @@
     bar.innerHTML =
       `<input type="text" placeholder="Find in note…" autocomplete="off" spellcheck="false" />` +
       `<span id="find-count"></span>` +
-      `<button type="button" data-find="prev" title="Previous (⇧⏎)">↑</button>` +
-      `<button type="button" data-find="next" title="Next (⏎)">↓</button>` +
-      `<button type="button" data-find="close" title="Close (Esc)">✕</button>`;
+      `<button type="button" data-find="prev" title="Previous">↑</button>` +
+      `<button type="button" data-find="next" title="Next">↓</button>` +
+      `<button type="button" data-find="close" title="Close">✕</button>`;
     const wrap = document.getElementById("editor-wrap");
     if (wrap) wrap.insertBefore(bar, document.getElementById("transcript-view"));
     else document.body.appendChild(bar);
