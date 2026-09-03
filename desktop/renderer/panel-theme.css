@@ -20,16 +20,6 @@
    <style>: light overrides split across files are how the setup-screen fix
    drifted (see test/setup-screens.test.js), and test/panel-theme.test.js now
    fails if a color literal reappears in either panel.
-   ───────────────────────────────────────────────────────────────────────────
-   ponytail: the theme is resolved once, at window load. A panel already on
-   screen keeps its palette until it is reopened, so flipping the theme — or the
-   OS appearance changing under the `system` preference — leaves an open notes
-   widget on the old colors. Excluded by this spec's Never list, and it barely
-   shows on the prompt, which is transient; the notes widget is the one main.js
-   creates once and keeps for a whole meeting. Upgrade path: broadcast a
-   `theme:changed` event from main.js over the `for (const win of [notesWindow,
-   mainWindow])` loop it already has at main.js:4295, and re-run theme-init's
-   resolution in the panel on receipt.
    ═══════════════════════════════════════════════════════════════════════════ */
 
 :root {
