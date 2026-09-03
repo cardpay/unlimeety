@@ -1139,24 +1139,7 @@
         <button class="modal-close-btn" id="settings-close" title="Close">✕</button>
       </div>
       <div class="modal-body">
-        <label class="modal-label">Appearance</label>
-        <div class="settings-provider-group" id="settings-theme-group">
-          <label class="settings-radio">
-            <input type="radio" name="settings-theme" value="dark" />
-            <span class="settings-radio-title">Dark</span>
-          </label>
-          <label class="settings-radio">
-            <input type="radio" name="settings-theme" value="light" />
-            <span class="settings-radio-title">Light</span>
-          </label>
-          <label class="settings-radio">
-            <input type="radio" name="settings-theme" value="system" />
-            <span class="settings-radio-title">System</span>
-            <span class="settings-radio-sub">Follow OS appearance</span>
-          </label>
-        </div>
-
-        <label class="modal-label" style="margin-top:18px">Summarizer</label>
+        <label class="modal-label">Summarizer</label>
         <div class="settings-provider-group">
           <label class="settings-radio">
             <input type="radio" name="settings-provider" value="claude-code" />
@@ -1226,8 +1209,23 @@
           </div>
         </div>
 
-        <label class="modal-label" style="margin-top:18px">Date &amp; time format</label>
-        <div style="display:flex; gap:16px">
+        <label class="modal-label" style="margin-top:18px">Appearance</label>
+        <div class="settings-provider-group" id="settings-theme-group">
+          <label class="settings-radio">
+            <input type="radio" name="settings-theme" value="dark" />
+            <span class="settings-radio-title">Dark</span>
+          </label>
+          <label class="settings-radio">
+            <input type="radio" name="settings-theme" value="light" />
+            <span class="settings-radio-title">Light</span>
+          </label>
+          <label class="settings-radio">
+            <input type="radio" name="settings-theme" value="system" />
+            <span class="settings-radio-title">System</span>
+            <span class="settings-radio-sub">Follow OS appearance</span>
+          </label>
+        </div>
+        <div style="display:flex; gap:16px; margin-top:10px">
           <div class="settings-provider-group" id="settings-date-order-group" style="flex:1">
             <label class="settings-radio">
               <input type="radio" name="settings-date-order" value="dmy" />
