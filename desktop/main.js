@@ -1090,6 +1090,11 @@ function readSummarizerConfig() {
 
 ipcMain.handle('settings:getSummarizer', () => readSummarizerConfig());
 
+// Shown at the foot of Settings. `app.getVersion()` reads the packaged
+// Info.plist, so a built app reports its real version rather than whatever
+// package.json happened to say at bundle time.
+ipcMain.handle('app:version', () => app.getVersion());
+
 ipcMain.handle('settings:getAutoStop', () => autoStopEnabled());
 ipcMain.handle('settings:setAutoStop', (_e, on) => { setAutoStopEnabled(Boolean(on)); return { ok: true }; });
 
