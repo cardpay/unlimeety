@@ -81,4 +81,24 @@ assert.strictEqual(resolve('system', THROWS), 'dark');
 assert.strictEqual(resolve('light', THROWS), 'light');
 assert.strictEqual(resolve('dark', THROWS), 'dark');
 
+// window.__themeInit.apply lets an already-loaded window re-resolve the
+// preference later (notes.js calls it on a main-process broadcast). Unlike
+// resolve() above, this needs stubs that persist across two calls: the first
+// runs the script's own load-time apply(), the second is the explicit re-run.
+{
+    let stored = 'dark';
+    const documentEl = { documentElement: { dataset: {} } };
+    const windowStub = { matchMedia: () => ({ matches: false, addEventListener: () => {} }) };
+    new Function('localStorage', 'window', 'document', SRC)(
+        { getItem: (k) => (k === 'uds-theme' ? stored : null) },
+        windowStub,
+        documentEl,
+    );
+    assert.strictEqual(documentEl.documentElement.dataset.theme, 'dark');
+
+    stored = 'light';
+    windowStub.__themeInit.apply();
+    assert.strictEqual(documentEl.documentElement.dataset.theme, 'light');
+}
+
 console.log('theme-init: all checks passed');

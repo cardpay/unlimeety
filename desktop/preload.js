@@ -173,6 +173,20 @@ contextBridge.exposeInMainWorld('promptApi', {
     hide: () => ipcRenderer.send('prompt:hide'),
 });
 
+// ─── Theme (isolated namespace) ─────────────────────────────────────────────
+// theme-init.js resolves the shared `uds-theme` preference once, at load, in
+// every window. The main window is the only one with a Settings UI to change
+// it — this relays that change to the floating notes window, which stays open
+// across it and would otherwise keep its stale palette until reopened.
+contextBridge.exposeInMainWorld('themeApi', {
+    notifyChanged: () => ipcRenderer.send('theme:changed'),
+    onChanged:     (cb) => {
+        const handler = () => cb();
+        ipcRenderer.on('theme:changed', handler);
+        return () => ipcRenderer.removeListener('theme:changed', handler);
+    },
+});
+
 // ─── Notes (isolated namespace) ──────────────────────────────────────────────
 // Freeform timestamped notes captured during a Live or Record session. Shared
 // across the floating notes window (Live) and the inline Record-tab control —

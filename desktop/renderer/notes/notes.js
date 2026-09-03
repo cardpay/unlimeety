@@ -35,6 +35,11 @@ window.notesList.refresh(listEl, emptyEl);
 // long as the window does.
 window.notesList.watch(listEl, emptyEl);
 
+// theme-init.js resolves the shared theme once at load; this window stays
+// open across a Settings change in the main window, so it needs telling
+// separately. The disposer is unused for the same reason as the watch above.
+window.themeApi.onChanged(() => window.__themeInit.apply());
+
 closeBtn.addEventListener('click', () => window.notesApi.close());
 
 // Collapse to just the header bar — same idea as the Chrome extension

@@ -4978,6 +4978,9 @@ function applyTheme(pref) {
   localStorage.setItem("uds-theme", pref);
   const effective = pref === "system" ? (lightThemeMQ.matches ? "light" : "dark") : pref;
   document.documentElement.dataset.theme = effective;
+  // The floating notes window is a separate document and only resolves this
+  // once at load — tell main so it can relay the change.
+  window.themeApi.notifyChanged();
 }
 
 settingsThemeRadios.forEach((r) =>

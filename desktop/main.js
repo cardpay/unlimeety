@@ -4315,6 +4315,15 @@ function broadcastNotesChanged() {
     }
 }
 
+// The main window's Settings panel is the only place `uds-theme` is chosen;
+// the notes window is a separate document that only resolves it once at load
+// (theme-init.js), so it needs telling. The prompt window gets no such
+// listener — it's transient enough that this was deliberately left out of
+// scope (spec-panel-windows-theme.md).
+ipcMain.on('theme:changed', () => {
+    if (notesWindow && !notesWindow.isDestroyed()) notesWindow.webContents.send('theme:changed');
+});
+
 // The floating window is closeable and reopenable mid-session, so it can't be
 // the source of truth for what has been captured — main is. Hand it the
 // session's notes on load so a reopened window shows the real list instead of
