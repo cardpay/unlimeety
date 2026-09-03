@@ -5123,6 +5123,8 @@ async function openSettingsModal() {
   const autoStopEl = document.getElementById("settings-autostop");
   if (autoStopEl && api.getAutoStop) autoStopEl.checked = await api.getAutoStop();
   settingsGlossary.value = (await api.getGlossary?.()) || "";
+  const versionEl = document.getElementById("settings-version");
+  if (versionEl && api.getAppVersion) versionEl.textContent = `Unlimeety ${await api.getAppVersion()}`;
   settingsError.classList.add("hidden");
   settingsError.textContent = "";
   updateSettingsSections();
