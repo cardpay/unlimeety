@@ -42,6 +42,7 @@ contextBridge.exposeInMainWorld('transcriber', {
     pickFolder:       () => ipcRenderer.invoke('settings:pickFolder'),
     getSummarizer:    ()     => ipcRenderer.invoke('settings:getSummarizer'),
     setSummarizer:    (cfg)  => ipcRenderer.invoke('settings:setSummarizer', cfg),
+    getAppVersion:    ()     => ipcRenderer.invoke('app:version'),
     getAutoStop:      ()     => ipcRenderer.invoke('settings:getAutoStop'),
     setAutoStop:      (on)   => ipcRenderer.invoke('settings:setAutoStop', on),
     getGlossary:      ()     => ipcRenderer.invoke('settings:getGlossary'),
