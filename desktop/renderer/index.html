@@ -120,7 +120,7 @@
           <span class="library-title">Meetings</span>
           <span id="library-count" class="library-count"></span>
         </div>
-        <button id="btn-open" class="meeting-open-btn" title="Open transcript file (⌘O)">
+        <button id="btn-open" class="meeting-open-btn" title="Open transcript file">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
           </svg>
@@ -142,7 +142,7 @@
           <line x1="21" y1="21" x2="16.65" y2="16.65"/>
         </svg>
         <input id="meeting-search" type="text" placeholder="Search meetings, speakers…" autocomplete="off" spellcheck="false" />
-        <span class="library-search-kbd">⌘K</span>
+        <button type="button" id="meeting-search-clear" class="library-search-clear hidden" title="Clear" aria-label="Clear search">✕</button>
       </div>
 
       <!-- Filter chips — work left to do, not work already done. A "To transcribe"
@@ -198,7 +198,7 @@
           </svg>
           Cancel changes
         </button>
-        <button class="btn btn-ghost btn-sm" id="btn-save-as" title="Save As (⌘⇧S)" disabled>
+        <button class="btn btn-ghost btn-sm" id="btn-save-as" title="Save As" disabled>
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
             <polyline points="17 21 17 13 7 13 7 21"/>
@@ -307,7 +307,7 @@
           </svg>
           <span id="btn-rail-resummarize-label">Summarize</span>
         </button>
-        <button class="btn-rail-primary" id="btn-rail-ask-ai" type="button" title="Ask AI about this meeting (⌘/)">
+        <button class="btn-rail-primary" id="btn-rail-ask-ai" type="button" title="Ask AI about this meeting">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
           </svg>
@@ -450,7 +450,7 @@
             <p class="live-perm-hint">
               <strong id="live-mic-status" class="live-perm-mic" aria-live="polite"></strong>
               macOS asks for Microphone and Screen Recording permission before you can record — already-granted ones are simply skipped.
-              After granting Screen Recording you must <strong>fully quit</strong> (Cmd+Q) and relaunch the app.
+              After granting Screen Recording you must <strong>fully quit</strong> and relaunch the app.
               <button type="button" class="live-perm-link" id="live-open-screen-settings">Open Privacy Settings →</button>
             </p>
             <details class="live-perm-troubleshoot">
@@ -459,7 +459,7 @@
                 <p>macOS sometimes desyncs between the Privacy &amp; Security toggle and the actual permission state — this happens when the app's signature changes between builds, or when a previous prompt was denied.</p>
                 <p>Reset the saved decisions and grant fresh:</p>
                 <ol>
-                  <li>Quit the app fully (<kbd>Cmd</kbd>+<kbd>Q</kbd>).</li>
+                  <li>Quit the app fully.</li>
                   <li>Open <strong>Terminal</strong> and run:
                     <pre><code id="live-tcc-reset-cmd">tccutil reset ScreenCapture com.transcriber.desktop &amp;&amp; tccutil reset Microphone com.transcriber.desktop</code></pre>
                     <button type="button" class="live-perm-link" id="live-copy-tcc-cmd">Copy command</button>
@@ -638,7 +638,7 @@
             <p class="live-perm-hint">
               <strong id="record-mic-status" class="live-perm-mic" aria-live="polite"></strong>
               macOS asks for Microphone and Screen Recording permission before you can record — already-granted ones are simply skipped.
-              After granting Screen Recording you must <strong>fully quit</strong> (Cmd+Q) and relaunch the app.
+              After granting Screen Recording you must <strong>fully quit</strong> and relaunch the app.
               <button type="button" class="live-perm-link" id="record-open-screen-settings">Open Privacy Settings →</button>
             </p>
             <details class="live-perm-troubleshoot">
@@ -647,7 +647,7 @@
                 <p>macOS sometimes desyncs between the Privacy &amp; Security toggle and the actual permission state — this happens when the app's signature changes between builds, or when a previous prompt was denied.</p>
                 <p>Reset the saved decisions and grant fresh:</p>
                 <ol>
-                  <li>Quit the app fully (<kbd>Cmd</kbd>+<kbd>Q</kbd>).</li>
+                  <li>Quit the app fully.</li>
                   <li>Open <strong>Terminal</strong> and run:
                     <pre><code id="record-tcc-reset-cmd">tccutil reset ScreenCapture com.transcriber.desktop &amp;&amp; tccutil reset Microphone com.transcriber.desktop</code></pre>
                     <button type="button" class="live-perm-link" id="record-copy-tcc-cmd">Copy command</button>
@@ -770,7 +770,6 @@
                 <p class="ts-muted">These settings apply to every recording in the batch. Runs locally on your Mac — nothing leaves the machine.</p>
               </div>
               <div class="ts-header-right">
-                <kbd class="record-kbd ts-kbd">⌘⏎</kbd>
                 <button type="button" class="modal-close-btn ts-btn-close" id="ts-btn-close" title="Close" aria-label="Close">✕</button>
               </div>
             </div>
