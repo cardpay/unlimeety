@@ -146,7 +146,7 @@
         calendarParticipants: [],
         batchSettings: {
             model: 'openai_whisper-large-v3',
-            language: 'ru',
+            language: 'auto',
             diarize: true,
             expectedSpeakers: '3',
             mergeAdjacent: true,

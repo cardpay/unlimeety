@@ -23,6 +23,17 @@
 
     // ─── DOM refs ────────────────────────────────────────────────────────
     const $ = (id) => document.getElementById(id);
+
+    // Last-used transcription language, remembered across sessions the same
+    // way the Record tab remembers its own picker. No last-used value (first
+    // run) falls back to auto-detect rather than guessing a language.
+    const LS_LANGUAGE = 'live.language';
+    function loadLastLanguage() {
+        try { return localStorage.getItem(LS_LANGUAGE) || 'auto'; } catch (_) { return 'auto'; }
+    }
+    function saveLastLanguage(lang) {
+        try { localStorage.setItem(LS_LANGUAGE, lang); } catch (_) {}
+    }
     const tabButtons = Array.from(document.querySelectorAll('#tab-switch .tab-btn'));
     const editorPanel = $('editor-container');
     const livePanel   = $('live-container');
@@ -89,7 +100,7 @@
         timerInterval: null,
         finalizedSegments: [],       // final segments collected in order
         activePartials: new Map(),   // key source → { node, seg } for the rolling partial
-        currentLanguage: languageSelect?.querySelector('.ts-seg.is-active')?.dataset.lang || 'ru',
+        currentLanguage: loadLastLanguage(),
         sources: ['mic', 'system'], // currently active sources
         meterPulse: null,            // setInterval handle for the fake activity meter
         lastSeenAt: { mic: 0, system: 0 }, // timestamps of last segment per source
@@ -107,6 +118,15 @@
         // Baked into the transcript on save; suggested from calendarParticipants.
         speakerNames: {},
     };
+
+    // Markup always ships with Russian marked active; repaint from the
+    // restored value so a returning user (or a fresh install's auto-detect
+    // default) doesn't see the wrong pill lit.
+    for (const s of languageSelect?.querySelectorAll('.ts-seg') || []) {
+        const on = s.dataset.lang === state.currentLanguage;
+        s.classList.toggle('is-active', on);
+        s.setAttribute('aria-checked', on ? 'true' : 'false');
+    }
 
     // ─── Calendar pre-fill ───────────────────────────────────────────────
     // Shared by the picker (this tab's 📅 button) and the smart router
@@ -241,6 +261,7 @@
             s.classList.toggle('is-active', s === seg);
         }
         state.currentLanguage = lang;
+        saveLastLanguage(lang);
     });
 
     // ─── Tab switching ───────────────────────────────────────────────────

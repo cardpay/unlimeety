@@ -633,19 +633,29 @@ body.mode-record #btn-ask-ai {
     background: var(--bg-base);
 }
 
-.library-search-kbd {
+.library-search-clear {
     position: absolute;
-    right: 8px;
+    right: 6px;
     top: 50%;
     transform: translateY(-50%);
-    font-family: var(--font-mono);
-    font-size: 10px;
+    width: 18px;
+    height: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    line-height: 1;
     color: var(--text-muted);
-    background: var(--bg-base);
-    border: 1px solid var(--border);
+    background: transparent;
+    border: none;
     border-radius: 4px;
-    padding: 1px 5px;
-    pointer-events: none;
+    cursor: pointer;
+    padding: 0;
+}
+
+.library-search-clear:hover {
+    color: var(--text-primary);
+    background: var(--bg-elevated);
 }
 
 /* Filter chips */
