@@ -3091,7 +3091,6 @@ function buildNoSummaryHtml() {
     <div class="rail-empty">
       <span class="rail-empty-icon">${iconSvg("sparkle", { size: 22 })}</span>
       <h3>No summary yet</h3>
-      <p>Summarize this meeting locally — extract decisions, action items, and a brief.</p>
     </div>
   `;
 }
