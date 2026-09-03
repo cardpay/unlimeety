@@ -3573,12 +3573,14 @@ if (summaryShareBtnDocx) {
 
 // ─── Sidebar wire-up: New, search, filter chips ──────────────────────────────
 const meetingSearchInput = document.getElementById("meeting-search");
+const meetingSearchClear = document.getElementById("meeting-search-clear");
 const btnMeetingNew = document.getElementById("btn-meeting-new");
 
 if (btnMeetingNew) btnMeetingNew.addEventListener("click", openNewModal);
 
 if (meetingSearchInput) {
   meetingSearchInput.addEventListener("input", () => {
+    meetingSearchClear?.classList.toggle("hidden", !meetingSearchInput.value);
     clearTimeout(searchDebounceTimer);
     searchDebounceTimer = setTimeout(async () => {
       searchQuery = meetingSearchInput.value.trim().toLowerCase();
@@ -3592,6 +3594,14 @@ if (meetingSearchInput) {
       }
       renderMeetings();
     }, 150);
+  });
+}
+
+if (meetingSearchClear) {
+  meetingSearchClear.addEventListener("click", () => {
+    meetingSearchInput.value = "";
+    meetingSearchInput.dispatchEvent(new Event("input"));
+    meetingSearchInput.focus();
   });
 }
 
