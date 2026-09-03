@@ -3816,10 +3816,14 @@ api.onFileOpened(async (data) => {
 
 // ─── Record tab finished a transcription (single file, or last of a batch) ───
 // Jump to the Transcripts tab and open the freshly created transcript.
-document.addEventListener("transcript:created", (e) => {
+document.addEventListener("transcript:created", async (e) => {
   const filePath = e.detail?.filePath;
   if (!filePath) return;
   document.querySelector('.tab-btn[data-tab="editor"]')?.click();
+  // Refresh the library first so the new file has a card by the time it opens —
+  // otherwise renderTranscriptView's `carded` check (see transcriptMetaHtml)
+  // misses it and the meta block renders inline instead of behind the card icon.
+  await loadLibrary();
   api.openFromLibrary(filePath);
 });
 
