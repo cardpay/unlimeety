@@ -4476,7 +4476,7 @@ function startCallMonitor() {
 }
 
 function stopCallMonitor() {
-    closePromptWindow();
+    closeCallPrompt();
     if (!callMonitor.proc) return;
     try { callMonitor.proc.stdin.write(JSON.stringify({ cmd: 'stopMonitor' }) + '\n'); } catch {}
     try { callMonitor.proc.stdin.end(); } catch {}
@@ -4487,7 +4487,7 @@ function stopCallMonitor() {
 function handleMonitorEvent(evt) {
     if (!evt || typeof evt.type !== 'string') return;
     if (evt.type === 'micActive') maybeShowPrompt(evt);
-    else if (evt.type === 'micInactive') closePromptWindow(); // call ended first
+    else if (evt.type === 'micInactive') closeCallPrompt(); // call ended first
 }
 
 function maybeShowPrompt(evt) {
@@ -4499,6 +4499,10 @@ function maybeShowPrompt(evt) {
 }
 
 function showPromptWindow(data) {
+    // One panel at a time: a call prompt left up when a recording starts by
+    // hand would otherwise be orphaned by the auto-stop prompt that replaces
+    // it — always-on-top, on every space, and with no handle left to close it.
+    closePromptWindow();
     const wa = screen.getPrimaryDisplay().workArea;
     const W = 360, H = 132;
     promptWindow = new BrowserWindow({
@@ -4545,7 +4549,8 @@ function showPromptWindow(data) {
         // does not focus/surface any window, so the main window is not promoted.
         if (process.platform === 'darwin') app.setActivationPolicy('regular');
     });
-    promptWindow.on('closed', () => { promptWindow = null; });
+    const win = promptWindow;
+    win.on('closed', () => { if (promptWindow === win) promptWindow = null; });
 }
 
 function closePromptWindow() {
@@ -4604,6 +4609,16 @@ async function currentCalendarTitle() {
     } catch {
         return '';
     }
+}
+
+// Chrome holds the input *device* open until its Meet window is closed, long
+// after it released the mic per-process — so `micInactive` can land minutes
+// after `meetingEnded` and tear down the "Meeting ended" prompt the user is
+// still looking at, while its countdown keeps running unseen. Call-detect
+// teardown therefore stops at a running countdown.
+function closeCallPrompt() {
+    if (autoStopTimer) return;
+    closePromptWindow();
 }
 
 ipcMain.on('prompt:record', () => triggerAutoRecord());
