@@ -189,6 +189,15 @@ for (const q of ['retranscribe', 'enhance', 'summarize']) {
         `an un-transcribed recording must not enter the ${q} queue`);
 }
 
+// A queue excludes a row whose own job is already in flight — same guard the
+// menu item disables on — so it is never offered work already running.
+sandbox.activeJobFor = (type, fp) => (type === 'transcribe' && fp === '/r/busy.wav' ? { id: 'j' } : null);
+assert.strictEqual(meetingMatchesFilter(recording({ id: '/r/busy.wav' }), 'transcribe'), false,
+    'a recording already being transcribed must not stay in To transcribe');
+assert.strictEqual(meetingMatchesFilter(recording({ id: '/r/idle.wav' }), 'transcribe'), true,
+    'a different recording with no job in flight is unaffected');
+sandbox.activeJobFor = () => null;
+
 // To re-transcribe. Worth redoing means "not the most accurate model available",
 // so the app's own default — large-v3_turbo — is in the queue: turbo → large-v3
 // is the upgrade users actually have.
@@ -207,6 +216,13 @@ assert.strictEqual(
 assert.strictEqual(
     meetingMatchesFilter(meeting({ model: null, hasAudio: true }), 'retranscribe'),
     false, 'unknown model is not evidence of a weak model');
+// The in-flight guard checks audioPath (the transcribe job's own key), not id.
+sandbox.activeJobFor = (type, fp) => (type === 'transcribe' && fp === '/r/busy.wav' ? { id: 'j' } : null);
+assert.strictEqual(
+    meetingMatchesFilter(
+        meeting({ model: 'openai_whisper-medium', hasAudio: true, audioPath: '/r/busy.wav' }), 'retranscribe'),
+    false, 'already being re-transcribed — must not stay in the queue too');
+sandbox.activeJobFor = () => null;
 
 // The predicate is the filter's own; modelIsStrong() keeps its /large/i meaning
 // so the provenance chip's colour does not move with it.
@@ -241,10 +257,20 @@ assert.strictEqual(
         'enhance',
     ),
     false, 'already attempted and rejected — re-running would not help');
+sandbox.activeJobFor = (type, fp) => (type === 'enhance' && fp === '/t/busy.txt' ? { id: 'j' } : null);
+assert.strictEqual(
+    meetingMatchesFilter(meeting({ enhancedAt: null, hasSpokenTurns: true, id: '/t/busy.txt' }), 'enhance'),
+    false, 'already being enhanced — must not stay in the queue too');
+sandbox.activeJobFor = () => null;
 
 // To summarize
 assert.strictEqual(meetingMatchesFilter(meeting({ hasSummary: false }), 'summarize'), true);
 assert.strictEqual(meetingMatchesFilter(meeting({ hasSummary: true }), 'summarize'), false);
+sandbox.activeJobFor = (type, fp) => (type === 'summarize' && fp === '/t/busy.txt' ? { id: 'j' } : null);
+assert.strictEqual(
+    meetingMatchesFilter(meeting({ hasSummary: false, id: '/t/busy.txt' }), 'summarize'),
+    false, 'already being summarized — must not stay in the queue too');
+sandbox.activeJobFor = () => null;
 // A summary written before a later Enhance/Re-transcribe rewrote the
 // transcript is stale — it must re-enter the queue exactly like "no summary"
 // would, and the status pill must say so rather than "Summarized".

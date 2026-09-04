@@ -1799,6 +1799,11 @@ ipcMain.handle('chat:ask', async (_e, target, messages) => {
 
 // ─── IPC: Transcripts library ─────────────────────────────────────────────────
 
+// The keys below feed the library list's filtering/sorting; the meta
+// info-chip's own special-cased display (renderer/app.js's META_LABELS and
+// metaValue()) is a separate, unlinked list — a key added only here still
+// renders in the panel (parseTranscriptMeta has no whitelist), just without
+// whatever bespoke label/formatting a new special case would want.
 function parseTranscriptHeaderMain(content) {
     const info = {
         title: null, generated: null, recordedAt: null, language: null,

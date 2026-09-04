@@ -316,7 +316,7 @@
     // Rolling window of the last ~80 helper-stderr lines.
     const diagBuffer = [];
     function pushDiag(line) {
-        const stamp = new Date().toLocaleTimeString();
+        const stamp = formatClockTime(new Date());
         diagBuffer.push(`${stamp}  ${line}`);
         if (diagBuffer.length > 80) diagBuffer.shift();
         if (!diagPanel) return;

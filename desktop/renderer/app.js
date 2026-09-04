@@ -1061,7 +1061,9 @@ function renameSpeakerInText(content, oldName, newName) {
 const META_ISO = /^\d{4}-\d{2}-\d{2}T/;
 
 // Display labels for keys whose on-disk name is clumsier than it needs to be.
-// The parsed key is untouched — this is presentation only.
+// The parsed key is untouched — this is presentation only. Unlinked to (and
+// not a subset of) parseTranscriptHeaderMain's own key list in main.js — a new
+// header line there needs its bespoke label/formatting, if any, added here too.
 const META_LABELS = { "Recorded-At": "Recorded" };
 
 // Display form of one header value: raw ids and ISO stamps are what the file
@@ -1351,6 +1353,12 @@ async function saveFile() {
     saveChip.classList.remove("flash");
     void saveChip.offsetWidth; // restart CSS animation
     saveChip.classList.add("flash");
+    // The watcher suppresses its own writes (stampSelfWrite), so an autosave
+    // that just gave this transcript its first spoken turns would otherwise
+    // leave "To enhance" stale until something else happens to re-list.
+    // Debounced separately from autosave's own 1s pause — typing steadily
+    // would otherwise re-scan the whole folder every autosave.
+    scheduleLibraryRefresh();
   } else {
     // Typed during the write — stay dirty and commit the remainder.
     setDirty(true);
@@ -1377,6 +1385,17 @@ const AUTOSAVE_DELAY_MS = 1000;
 function scheduleAutosave() {
   clearTimeout(autosaveTimer);
   autosaveTimer = setTimeout(autosave, AUTOSAVE_DELAY_MS);
+}
+
+// Separate, longer debounce for re-listing the library after a save: steady
+// typing autosaves roughly every AUTOSAVE_DELAY_MS, and a full re-scan on
+// every one of those would be wasteful — this only fires once things go
+// quiet for a few seconds.
+let libraryRefreshTimer = null;
+const LIBRARY_REFRESH_DELAY_MS = 4000;
+function scheduleLibraryRefresh() {
+  clearTimeout(libraryRefreshTimer);
+  libraryRefreshTimer = setTimeout(() => { loadLibrary(); }, LIBRARY_REFRESH_DELAY_MS);
 }
 
 // Loading another note overwrites both editor.value and state.savedContent, so
@@ -1562,19 +1581,33 @@ function meetingMatchesFilter(m, filter) {
   if (m.readFailed === true) return false;
   // The one queue an audio-only row belongs to, and the only queue that is not
   // about improving a transcript that already exists.
-  if (filter === "transcribe") return m.hasTranscript === false;
+  // A queue also excludes a row already being worked on — same job-in-flight
+  // check the menu item disables on (activeJobFor), so a queue never asks the
+  // user to start what is already running.
+  if (filter === "transcribe") {
+    return m.hasTranscript === false && !activeJobFor("transcribe", m.id);
+  }
   // Weak model AND re-transcribable: the Re-transcribe menu item is gated on
   // hasAudio too, so without it the queue would list meetings you cannot act on.
-  if (filter === "retranscribe") return m.hasAudio === true && modelWorthRedoing(m.model);
+  if (filter === "retranscribe") {
+    return m.hasAudio === true && modelWorthRedoing(m.model)
+      && !activeJobFor("transcribe", m.audioPath || m.id);
+  }
   // enhanceAttemptedAt: proofreading rejected every part on an earlier run —
   // a re-run hits the same rejection, so it must not sit in the queue forever.
-  if (filter === "enhance") return !m.enhancedAt && !m.enhanceAttemptedAt && m.hasSpokenTurns === true;
+  if (filter === "enhance") {
+    return !m.enhancedAt && !m.enhanceAttemptedAt && m.hasSpokenTurns === true
+      && !activeJobFor("enhance", m.id);
+  }
   // The hasTranscript gate is what keeps un-transcribed recordings out: they
   // have no summary either, so `!m.hasSummary` alone would sweep every one of
   // them into a queue whose action they cannot run. A summary that predates a
   // later Enhance/Re-transcribe (summaryOutdated) belongs back in the queue
   // too — it exists on disk, but no longer reflects the current transcript.
-  if (filter === "summarize") return m.hasTranscript === true && (!m.hasSummary || m.summaryOutdated === true);
+  if (filter === "summarize") {
+    return m.hasTranscript === true && (!m.hasSummary || m.summaryOutdated === true)
+      && !activeJobFor("summarize", m.id);
+  }
   return true;
 }
 
@@ -2377,6 +2410,18 @@ function timeFormatPref() {
 
 function formatMeetingStamp(date) {
   return formatMeetingDateTime(date, dateOrderPref(), timeFormatPref());
+}
+
+// Time only, honoring the same 12h/24h preference as the Transcripts sidebar —
+// for the Record and Live tabs' own timestamps (record.js, live.js), which
+// otherwise called toLocaleTimeString() directly and ignored it.
+function formatClockTime(date) {
+  if (!(date instanceof Date) || isNaN(date.getTime())) return "";
+  try {
+    return meetingFormatters("dmy", timeFormatPref()).time.format(date).replace(/ /g, " ");
+  } catch (_) {
+    return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+  }
 }
 
 // An audio-only row has no duration — `record:list` reports bytes, not seconds,
@@ -4642,6 +4687,10 @@ function onQueueChanged(jobs) {
   queueJobs = jobs;
   renderQueuePanel();
   syncEditorReadOnly();
+  // The work queues (meetingMatchesFilter) exclude a row already being worked
+  // on — re-render so a job starting or finishing moves it in or out live,
+  // not just whenever loadLibrary() next happens to run.
+  renderMeetings();
   const presentIds = new Set(jobs.map((j) => j.id));
   let refreshLibrary = false;
   for (const job of jobs) {
