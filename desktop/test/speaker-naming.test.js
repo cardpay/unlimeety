@@ -446,10 +446,11 @@ const emails = (...list) => ({
     assert.strictEqual(map.get('Beta'), 'Полина Зорина', 'first answer wins, as everywhere else');
 
     // And the header stays honest — the address the name was read off carries
-    // that one name, and the label that got nothing keeps its placeholder.
+    // that one name (annotated, not discarded), and the label that got
+    // nothing keeps its placeholder.
     assert.strictEqual(
         renameParticipantsLine('Participants: p.zorina@example.com, Beta, Gamma\n', map, two.body),
-        'Participants: Полина Зорина (Beta), Gamma\n',
+        'Participants: Полина Зорина (Beta) <p.zorina@example.com>, Gamma\n',
         'one address, one name, and the unnamed label untouched');
 }
 
@@ -537,13 +538,13 @@ const emails = (...list) => ({
 
     const withEmails = `Meeting: Sync\nParticipants: ${listed.join(', ')}\nLanguage: ru\n\n`;
     assert.ok(renameParticipantsLine(withEmails, map, SPOKEN).includes(
-        'Participants: Полина Зорина (Beta), k.lebedev@example.com'),
+        'Participants: Полина Зорина (Beta) <p.zorina@example.com>, k.lebedev@example.com'),
         renameParticipantsLine(withEmails, map, SPOKEN));
 
     const both = `Participants: ${listed[0]}, Beta, ${listed[1]}\n`;
     assert.strictEqual(renameParticipantsLine(both, map, SPOKEN),
-        'Participants: Полина Зорина (Beta), k.lebedev@example.com\n',
-        'the address and the placeholder were one person all along');
+        'Participants: Полина Зорина (Beta) <p.zorina@example.com>, k.lebedev@example.com\n',
+        'the address and the placeholder were one person all along, and the address is kept, not dropped');
 
     // Without the body there is no way to know which parts were spoken, so the
     // placeholder rewrite still happens and no address is touched.

@@ -33,7 +33,7 @@ function sliceFunction(name) {
 // together so it can be evaluated standalone with only `path` injected.
 const DEPS = [
     'sanitizeRecordingName', 'recordingTimestamp', 'defaultRecordingStem',
-    'dateParts', 'meetingDateParts', 'formatDateDdMmYy',
+    'dateParts', 'meetingDateParts', 'formatDateDashedYy',
     'stripMeetPrefix', 'sanitizeFilenameChars', 'legacySummaryBase', 'defaultSummaryBase',
 ];
 const src = DEPS.map(sliceFunction).join('\n');
@@ -56,8 +56,8 @@ test('an untitled recording stem is just the timestamp — no leading placeholde
 
 test('a summary base is "<title> <date>", not the reverse', () => {
     const base = defaultSummaryBase('/x/some-transcript.txt', { title: 'Weekly Sync' }, Date.now());
-    assert.match(base, /^Weekly Sync \d{2}\.\d{2}\.\d{2}$/,
-        `expected "<title> DD.MM.YY", got ${JSON.stringify(base)}`);
+    assert.match(base, /^Weekly Sync \d{2}-\d{2}-\d{2}$/,
+        `expected "<title> DD-MM-YY", got ${JSON.stringify(base)}`);
 });
 
 test('a missing title still gets the date suffix, derived from the transcript filename', () => {
@@ -65,7 +65,7 @@ test('a missing title still gets the date suffix, derived from the transcript fi
     // stem as the *title* source, which then still runs through the same
     // "<title> <date>" order as an explicit title would.
     const base = defaultSummaryBase('/x/some-transcript.txt', {}, Date.now());
-    assert.match(base, /^some-transcript \d{2}\.\d{2}\.\d{2}$/, `got ${JSON.stringify(base)}`);
+    assert.match(base, /^some-transcript \d{2}-\d{2}-\d{2}$/, `got ${JSON.stringify(base)}`);
 });
 
 test('a title that sanitizes down to nothing falls back to the bare transcript stem, no date', () => {

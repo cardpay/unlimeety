@@ -99,21 +99,31 @@
   // from CalendarBridge.swift if a genuine all-day workshop ever needs to
   // prefill a title.
   const MAX_MEETING_MS = 6 * 3600 * 1000;
+  // How long a meeting that ran past its scheduled end still counts as "the
+  // one that was on" — meetings routinely overrun their slot, and without this
+  // the title cleared the moment the calendar stopped agreeing, between the
+  // overrun and pressing Start. Ranked below both a truly ongoing event and an
+  // upcoming one inside UPCOMING_CAP_MIN: a back-to-back next meeting, or one
+  // still actually running, must win over a stale finished one.
+  const OVERRUN_GRACE_MIN = 15;
 
   // The event to prefill from: the one happening now, else the nearest one
-  // starting within UPCOMING_CAP_MIN — and null when the calendar holds nothing
-  // relevant. Never an event that already ended: the old fallback returned
-  // index 0 in that case, i.e. the OLDEST event in the window, which is how a
-  // meeting that had already finished ended up pre-selected.
+  // starting within UPCOMING_CAP_MIN, else one that ended within
+  // OVERRUN_GRACE_MIN — and null when the calendar holds nothing relevant.
+  // Never an event that already ended outside the grace window: the old
+  // fallback returned index 0 in that case, i.e. the OLDEST event in the
+  // window, which is how a meeting that had already finished ended up
+  // pre-selected.
   // main.js's currentCalendarTitle() independently reimplements this same
-  // shape (all-day cap, non-empty title, shortest-overlap-wins) for the
-  // auto-record prefill, since main has no access to this module — keep both
-  // in sync if the picking logic here ever changes.
+  // shape (all-day cap, non-empty title, shortest-overlap-wins, no grace
+  // window) for the auto-record prefill, since main has no access to this
+  // module — keep both in sync if the picking logic here ever changes.
   function currentEvent(events) {
     const now = Date.now();
     let ongoing = null;
     let ongoingLen = Infinity;
     let next = null;
+    let recentlyEnded = null;
     for (const ev of Array.isArray(events) ? events : []) {
       const start = new Date(ev.start).getTime();
       const end = new Date(ev.end).getTime();
@@ -128,10 +138,17 @@
       // sort order that picking the first match had.
       if (start <= now && now <= end) {
         if (!ongoing || end - start < ongoingLen) { ongoing = ev; ongoingLen = end - start; }
-      } else if (start > now && (!next || start < new Date(next.start).getTime())) next = ev;
+      } else if (start > now && (!next || start < new Date(next.start).getTime())) {
+        next = ev;
+      } else if (end < now && now - end <= OVERRUN_GRACE_MIN * 60000
+          && (!recentlyEnded || end > new Date(recentlyEnded.end).getTime())) {
+        // Most recently ended wins, same "shortest/closest" spirit as ongoing.
+        recentlyEnded = ev;
+      }
     }
     if (ongoing) return ongoing;
     if (next && new Date(next.start).getTime() - now <= UPCOMING_CAP_MIN * 60000) return next;
+    if (recentlyEnded) return recentlyEnded;
     return null;
   }
 
