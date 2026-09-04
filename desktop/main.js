@@ -1799,6 +1799,11 @@ ipcMain.handle('chat:ask', async (_e, target, messages) => {
 
 // ─── IPC: Transcripts library ─────────────────────────────────────────────────
 
+// The keys below feed the library list's filtering/sorting; the meta
+// info-chip's own special-cased display (renderer/app.js's META_LABELS and
+// metaValue()) is a separate, unlinked list — a key added only here still
+// renders in the panel (parseTranscriptMeta has no whitelist), just without
+// whatever bespoke label/formatting a new special case would want.
 function parseTranscriptHeaderMain(content) {
     const info = {
         title: null, generated: null, recordedAt: null, language: null,
@@ -2416,6 +2421,10 @@ async function runEnhanceJob(filePath, sender) {
             console.warn(`enhance: speaker naming threw — ${err.message}`);
         }
     }
+    // Surfaced to the user below: placeholders were left unnamed, which reads
+    // identically to "the model could not work the names out" — the very
+    // confusion this distinction exists to resolve.
+    const speakerNamingFailed = placeholders.length > 0 && namedSpeakers === 0;
 
     const targets = enhance.spokenTargets(blocks, NOTE_LABEL);
     if (!targets.length) {
@@ -2540,7 +2549,10 @@ async function runEnhanceJob(filePath, sender) {
                 : enhance.stampHeaderLine(header, 'Enhance-Attempted', new Date().toISOString());
         const updated = enhance.matchLineEndings(enhance.assembleTranscript(stamped, blocks), original);
         if (updated === original) {
-            return { ok: true, canceled: enhanceCancelled, total: chunks.length, skipped, namedSpeakers, changed: false };
+            return {
+                ok: true, canceled: enhanceCancelled, total: chunks.length, skipped,
+                namedSpeakers, speakerNamingFailed, changed: false,
+            };
         }
 
         writeFileAtomic(filePath, updated);
@@ -2554,7 +2566,7 @@ async function runEnhanceJob(filePath, sender) {
         // user stopped the rest would be its own kind of loss.
         return {
             ok: true, canceled: enhanceCancelled, total: chunks.length, skipped, applied: done,
-            namedSpeakers, changed: proofread !== original, content: updated,
+            namedSpeakers, speakerNamingFailed, changed: proofread !== original, content: updated,
         };
     } catch (err) {
         return { ok: false, error: err.message };
@@ -3396,8 +3408,6 @@ function spawnHelperWithJsonStdout(onEvent) {
 }
 
 ipcMain.handle('record:platformOK', () => process.platform === 'darwin');
-
-ipcMain.handle('record:getFolder', () => RECORDINGS_FOLDER);
 
 ipcMain.handle('record:start', async (_e, opts) => {
     if (process.platform !== 'darwin') {
@@ -4660,6 +4670,12 @@ function onMeetingEnded(slot) {
         autoStopTimer = null;
         autoStopSlot = null;
         closePromptWindow();
+        // The conferencing app's own input device can report idle-then-active
+        // seconds after we stop, once it finally notices the mic released —
+        // same late flip that caused the original bug this cooldown avoids
+        // re-triggering on: a spurious "call just started" right after a call
+        // that just ended.
+        callMonitor.cooldownUntil = Date.now() + PROMPT_COOLDOWN_MS;
         triggerAutoStop([slot]);
     }, AUTOSTOP_COUNTDOWN_SEC * 1000);
 }
@@ -4693,7 +4709,10 @@ ipcMain.on('prompt:stopNow', () => {
     if (autoStopTimer) { clearTimeout(autoStopTimer); autoStopTimer = null; }
     autoStopSlot = null;
     closePromptWindow();
-    if (slot) triggerAutoStop([slot]);
+    if (slot) {
+        callMonitor.cooldownUntil = Date.now() + PROMPT_COOLDOWN_MS;
+        triggerAutoStop([slot]);
+    }
 });
 
 // "✕" — hide the overlay only. The countdown keeps running and stops us in the
