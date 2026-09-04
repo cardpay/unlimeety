@@ -1975,7 +1975,7 @@ ipcMain.handle('transcripts:list', () => {
                     // `head` verbatim as well as the parsed fields: the card's info
                     // panel shows every header line, and this whitelist has never
                     // covered all of them (older extension builds wrote `Started:`).
-                    return { filename: f, filePath, createdAt, mtime: stat.mtimeMs, hasSummary, summaryOutdated, hasAudio, hasSpokenTurns, readFailed: false, audioPath: audioPaths[0] || null, header: head, ...info };
+                    return { filename: f, filePath, createdAt, mtime: stat.mtimeMs, hasSummary, summaryOutdated, hasAudio, hasSpokenTurns, readFailed: false, audioPath: audioPaths[0] || null, audioPaths, header: head, ...info };
                 } catch (err) {
                     // Everything below is a fabricated default, not a finding —
                     // the read, or the summary/audio lookup after it, never
@@ -1984,12 +1984,20 @@ ipcMain.handle('transcripts:list', () => {
                     // known to fail. Logged because the flag says only that
                     // something failed, never what.
                     console.warn('transcripts:list: could not describe', filePath, err);
+                    // audioPaths is the one exception to "fabricated, not a
+                    // finding": path existence doesn't depend on the read that
+                    // just failed, and mergeMeetings needs it to keep this
+                    // transcript's own wav from also double-carding as an
+                    // untranscribed recording. hasAudio itself stays the
+                    // fabricated default — nothing here asserts that finding.
+                    const audioPaths = findRelatedAudioPaths(filePath);
                     return {
                         filename: f, filePath,
                         createdAt: stat.birthtimeMs || stat.mtimeMs,
                         mtime: stat.mtimeMs,
                         hasSummary: false, hasAudio: false, hasSpokenTurns: false, readFailed: true,
                         title: f, generated: null, participants: [],
+                        audioPath: audioPaths[0] || null, audioPaths,
                     };
                 }
             })

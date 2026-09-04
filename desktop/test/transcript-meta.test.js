@@ -357,6 +357,36 @@ for (const empty of ['', '   \n\n  ', null, undefined]) {
         'a wav a transcript already claims must not get a second card of its own',
     );
 
+    // A legacy-stem recording can pair with more than one wav (Source: header
+    // plus a direct-stem match, say) — every one of them must be claimed, not
+    // just the first, or the others double-card as their own recordings.
+    const multiWav1 = `${REC}/Daily.wav`;
+    const multiWav2 = `${REC}/Daily-20260821-090000.wav`;
+    const multi = mergeMeetings(
+        [{ filename: 'Daily.txt', filePath: `${TXT}/Daily.txt`,
+           createdAt: Date.parse('2026-08-20T09:00:00.000Z'),
+           hasAudio: true, audioPath: multiWav1, audioPaths: [multiWav1, multiWav2], participants: [] }],
+        [
+            { filename: 'Daily.wav', filePath: multiWav1, createdAt: 1, size: 1, hasTranscript: false },
+            { filename: 'Daily-20260821-090000.wav', filePath: multiWav2, createdAt: 1, size: 1, hasTranscript: false },
+        ],
+    );
+    assert.deepStrictEqual(multi.map((m) => m.id), [`${TXT}/Daily.txt`],
+        'every related wav must be claimed, not just the first — a second one must not get its own card');
+
+    // A transcript whose read failed still claims its own wav: main.js computes
+    // audioPaths independently of whether the read succeeded (see
+    // transcripts:list's catch branch), so the identity survives even though
+    // every other field on this row is a fabricated default.
+    const readFailedWav = `${REC}/Broken.wav`;
+    const readFailed = mergeMeetings(
+        [{ filename: 'Broken.txt', filePath: `${TXT}/Broken.txt`, readFailed: true,
+           audioPaths: [readFailedWav], participants: [] }],
+        [{ filename: 'Broken.wav', filePath: readFailedWav, createdAt: 1, size: 1, hasTranscript: false }],
+    );
+    assert.deepStrictEqual(readFailed.map((m) => m.id), [`${TXT}/Broken.txt`],
+        'a read-failed transcript must still keep its own wav from double-carding');
+
     // A transcript with no audio claims nothing, so an unrelated recording is
     // still listed.
     assert.strictEqual(
@@ -389,6 +419,54 @@ for (const empty of ['', '   \n\n  ', null, undefined]) {
     assert.strictEqual((html.match(/class="meta-key"/g) || []).length, 2,
         'a keyless row renders its value alone, with no empty label column');
     assert.strictEqual(meetingMetaPanelHtml([]), '', 'no rows, no markup');
+}
+
+// ─── buildTranscriptViewHtml: the PARTIAL warning's wiring ──────────────────
+// transcriptMetaHtml (above) is already covered on its own; what has no
+// coverage is the glue in renderTranscriptView that decides whether to slice
+// a header off the content and call it at all — deleting that one call used
+// to leave this whole suite green. Uses the REAL transcriptMetaHtml already
+// bound above, not a stub, so deleting the wiring line fails this test.
+const { buildTranscriptViewHtml } = new Function(
+    'escHtml', 'fmtTc', 'parseSegments', 'transcriptMetaHtml', 'NOTE_LABEL',
+    `${region('app.js', 'transcript view')}
+     return { buildTranscriptViewHtml };`,
+)(
+    escHtml,
+    (sec) => { const m = Math.floor(sec / 60), s = Math.floor(sec % 60); return `${m}:${s.toString().padStart(2, '0')}`; },
+    // A minimal stand-in with the real contract: [t|null, label, speaker|null, text].
+    // parseSegments' own parsing logic is not what this test is about.
+    (content) => (content.includes('[0:05] Alice:')
+        ? [{ t: 5, label: '0:05', speaker: 'Alice', text: 'hello there' }]
+        : []),
+    transcriptMetaHtml,
+    'Note',
+);
+
+{
+    const content = [
+        'Meeting: Q3 planning',
+        'Status: PARTIAL — transcription was interrupted, re-run it for the full text',
+        '',
+        '[0:05] Alice: hello there',
+    ].join('\n');
+
+    const carded = buildTranscriptViewHtml(content, true);
+    assert.ok(carded.includes('tv-meta-warn'), 'the PARTIAL warning must reach the transcript view');
+    assert.ok(carded.includes('transcription was interrupted'), 'with its real text');
+    assert.ok(!carded.includes('tv-meta-rows'), 'carded: header rows stay off, only the warning shows');
+    assert.ok(carded.includes('hello there'), 'segments still render alongside the warning');
+
+    const uncarded = buildTranscriptViewHtml(content, false);
+    assert.ok(uncarded.includes('tv-meta-rows'), 'uncarded: header rows render inline too');
+
+    const noHeader = buildTranscriptViewHtml('[0:05] Alice: hello there', true);
+    assert.ok(!noHeader.includes('tv-meta'), 'no header text before the first timecode — nothing to warn about');
+    assert.ok(noHeader.includes('hello there'), 'segments render on their own');
+
+    const noTimecodes = buildTranscriptViewHtml('just plain pasted text', true);
+    assert.ok(noTimecodes.includes('tv-plain'), 'no bracketed timecode at all falls back to a plain block');
+    assert.ok(!noTimecodes.includes('tv-meta'), 'and never calls into the header path');
 }
 
 console.log('transcript-meta: all checks passed');
