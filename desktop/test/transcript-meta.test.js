@@ -11,14 +11,13 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+const { findRegion } = require('./lib/find-region');
 
 const RENDERER = path.join(__dirname, '..', 'renderer');
 
 function region(file, name) {
     const src = fs.readFileSync(path.join(RENDERER, file), 'utf-8');
-    const m = src.match(
-        new RegExp(`\\n[ \\t]*// ── ${name}[\\s\\S]*?\\n[ \\t]*// ── end ${name} ──`),
-    );
+    const m = findRegion(src, name);
     assert.ok(m, `"${name}" region markers not found in renderer/${file}`);
     return m[0];
 }
