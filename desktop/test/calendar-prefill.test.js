@@ -94,6 +94,25 @@ function load(events, asked = [], out = {}) {
     // A nameless event can prefill nothing, so it is not the pick either.
     assert.strictEqual(currentEvent([ev('', -10, 20)]), null);
     assert.strictEqual(currentEvent([ev('  ', -10, 20), soon]), soon);
+
+    // Overrun grace: a meeting that ran past its scheduled end still counts as
+    // "the one that was on" for a while, so the title survives between the
+    // overrun and pressing Start.
+    const justEnded = ev('Daily Sync', -35, -5); // ended 5 min ago
+    assert.strictEqual(currentEvent([justEnded]), justEnded,
+        'a meeting that ended 5 min ago is still within the overrun grace window');
+    assert.strictEqual(currentEvent([past]), null,
+        'past ended 60 min ago — well outside the grace window, unchanged from before');
+    // Ranked below both a truly ongoing event and an upcoming one inside the
+    // cap — a back-to-back next meeting, or one still running, must win.
+    assert.strictEqual(currentEvent([justEnded, soon]), soon,
+        'an upcoming meeting inside the cap outranks one that just ended');
+    assert.strictEqual(currentEvent([justEnded, ongoing]), ongoing,
+        'a truly ongoing meeting outranks one that just ended');
+    // Among several that ended within the grace window, the most recent wins.
+    const endedEarlier = ev('Earlier', -60, -12);
+    assert.strictEqual(currentEvent([endedEarlier, justEnded]), justEnded,
+        'the more recently ended meeting is the better guess, same spirit as ongoing\'s shortest-wins');
 }
 
 // ─── autoPrefill: refresh replaces its own value, never the user's ──────────

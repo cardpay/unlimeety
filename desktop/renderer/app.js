@@ -1014,6 +1014,15 @@ function parseSegments(content) {
   return segments;
 }
 
+// An Enhance-bound entry keeps the address it was read from as a trailing
+// annotation — "Полина Зорина (Beta) <p.zorina@example.com>" — so a wrong
+// binding only mispairs a name next to a still-recoverable address instead of
+// destroying it (see transcript-enhance.js's renameParticipantsLine). Neither
+// consumer below wants that annotation: a rename suggestion must not offer to
+// rename someone's speaker chip to a string containing their email, and a
+// manual rename must recognise the entry by its display name alone.
+const HEADER_PARTICIPANT_ANNOTATION_RE = /\s*<[^<>]*>$/;
+
 // Names listed on the transcript's "Participants:" header line (used as
 // rename suggestions). Reads only the header block (up to the first blank line).
 function headerParticipants(content) {
@@ -1021,7 +1030,7 @@ function headerParticipants(content) {
     if (line === "") break;
     if (line.startsWith("Participants: ")) {
       return line.slice("Participants: ".length)
-        .split(",").map(s => s.trim()).filter(Boolean);
+        .split(",").map(s => s.trim().replace(HEADER_PARTICIPANT_ANNOTATION_RE, "")).filter(Boolean);
     }
   }
   return [];
@@ -1050,7 +1059,13 @@ function renameSpeakerInText(content, oldName, newName) {
       if (line.startsWith("Participants: ")) {
         const mapped = line.slice("Participants: ".length)
           .split(",").map(s => s.trim())
-          .map(n => (n === oldName ? newName : n)).filter(Boolean);
+          .map(n => {
+            const annotation = (n.match(HEADER_PARTICIPANT_ANNOTATION_RE) || [""])[0];
+            const display = annotation ? n.slice(0, -annotation.length) : n;
+            // The address survives a manual rename too — only the display
+            // name changes, same reasoning as the automated pass that wrote it.
+            return display === oldName ? newName + annotation : n;
+          }).filter(Boolean);
         const seen = new Set(); const out = [];
         for (const n of mapped) {
           const k = n.toLowerCase();
@@ -2869,12 +2884,20 @@ function partitionBullets(lines) {
   const bullets = [];
   const before = [];
   const after = [];
+  // No preset asks for nesting, but a model can still indent a sub-point —
+  // rendering stays flat (a real nested <ul> is a bigger change), but an
+  // indented line must not count as its own item in the section's badge.
+  let topLevelCount = 0;
   for (const raw of lines || []) {
     const m = String(raw).match(RAIL_BULLET_RE);
-    if (m) { bullets.push(m[1].trim()); continue; }
+    if (m) {
+      bullets.push(m[1].trim());
+      if (!/^[ \t]/.test(raw)) topLevelCount++;
+      continue;
+    }
     (bullets.length ? after : before).push(raw);
   }
-  return { bullets, before: before.join("\n").trim(), after: after.join("\n").trim() };
+  return { bullets, before: before.join("\n").trim(), after: after.join("\n").trim(), topLevelCount };
 }
 
 // A letter or a digit, in any script — used where a prefix match has to stop at
@@ -2923,22 +2946,26 @@ function railBullet(tone) {
 }
 
 // Shared body of every list section: the prose the model wrote above the list,
-// the list, then the prose below it. Nothing in a section is silently discarded.
-function railListSection(heading, items, before, after) {
+// the list, then the prose below it. Nothing in a section is silently
+// discarded. `count` defaults to the item count for callers with no nesting
+// concept of their own; renderBulletSection/renderDatedSection/renderMapSection
+// pass partitionBullets' topLevelCount instead, so an indented sub-bullet
+// (flattened into its own <li> for now, same as ever) does not inflate it.
+function railListSection(heading, items, before, after, count = items.length) {
   const md = (t) => (t ? `<div class="rail-md">${renderMarkdown(t)}</div>` : "");
-  return railSection(heading, md(before) + `<ul class="rail-list">${items.join("")}</ul>` + md(after), items.length);
+  return railSection(heading, md(before) + `<ul class="rail-list">${items.join("")}</ul>` + md(after), count);
 }
 
 function renderBulletSection(heading, lines, tone) {
-  const { bullets, before, after } = partitionBullets(lines);
+  const { bullets, before, after, topLevelCount } = partitionBullets(lines);
   if (!bullets.length) return renderPlainSection(heading, lines);
   const items = bullets.map((t) => `<li>${railBullet(tone)}<span class="rail-li-text">${renderMarkdownInline(t)}</span></li>`);
-  return railListSection(heading, items, before, after);
+  return railListSection(heading, items, before, after, topLevelCount);
 }
 
 // "— *Jun 30*" on a milestone becomes the same due pill an action item gets.
 function renderDatedSection(heading, lines) {
-  const { bullets, before, after } = partitionBullets(lines);
+  const { bullets, before, after, topLevelCount } = partitionBullets(lines);
   if (!bullets.length) return renderPlainSection(heading, lines);
   const items = bullets.map((b) => {
     const { text, due } = splitDue(b);
@@ -2946,7 +2973,7 @@ function renderDatedSection(heading, lines) {
       + (due ? `<span class="rail-due-pill">${escapeHtml(due)}</span>` : "")
       + `</li>`;
   });
-  return railListSection(heading, items, before, after);
+  return railListSection(heading, items, before, after, topLevelCount);
 }
 
 // "Alpha → Anna (introduced at 00:02)" and "slow deploys → CI runs everything".
@@ -2965,7 +2992,7 @@ function parseMapRow(text) {
 }
 
 function renderMapSection(heading, lines) {
-  const { bullets, before, after } = partitionBullets(lines);
+  const { bullets, before, after, topLevelCount } = partitionBullets(lines);
   if (!bullets.length) return renderPlainSection(heading, lines);
   const items = bullets.map((b) => {
     const row = parseMapRow(b);
@@ -2980,7 +3007,7 @@ function renderMapSection(heading, lines) {
       + (row.note ? `<span class="rail-map-note">${renderMarkdownInline(row.note)}</span>` : "")
       + `</span></li>`;
   });
-  return railListSection(heading, items, before, after);
+  return railListSection(heading, items, before, after, topLevelCount);
 }
 
 // Chip verdicts: match a leading phrase, but only when the line actually ends

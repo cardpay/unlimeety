@@ -180,6 +180,16 @@ function labels(html) {
     const bad = section("What didn't go well", '- Staging drifted\n- Alerts too noisy');
     assert.match(bad, /rail-section-count">2</);
 
+    // No preset asks for nesting, but a model can still indent a sub-point.
+    // partitionBullets flattens it into its own <li> (a real nested <ul> is a
+    // bigger change) — but the badge must count it as part of its parent, not
+    // inflate to "2" for what reads as one item.
+    const nested = section('Strengths', '- Roadmap\n  - Q3 slip');
+    assert.match(nested, /rail-section-count">1</,
+        'an indented sub-bullet must not inflate the section count badge');
+    assert.strictEqual((nested.match(/<li>/g) || []).length, 2,
+        'both lines still render as their own row — only the badge changed');
+
     // A lead-in sentence stays above the list; a closing note stays below it.
     const mixed = section('Strengths', 'Overall strong.\n\n- Ships fast\n\nWorth a second look.');
     const iList = mixed.indexOf('<ul');
