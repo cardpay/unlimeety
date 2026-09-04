@@ -72,6 +72,10 @@ let contextMenu = null;               // { x, y, meetingId } | null
 // queue (jobsApi), and the cards read it through activeJobFor. The two Sets
 // that used to sit here were declared, checked, and never added to.
 function deriveStatus(m) {
+  // Checked first: every other flag on this row is a fabricated default, not
+  // a finding (see the field-list comment above) — none of them may drive
+  // the pill. `failed` was already a defined status/pill with no caller.
+  if (m.readFailed) return "failed";
   if (m.hasSummary) return m.summaryOutdated ? "outdated" : "summarized";
   if (m.hasTranscript) return "transcribed";
   return "audio_only";
@@ -1603,39 +1607,41 @@ function modelWorthRedoing(id) {
   return variant !== "" && !/^large-v3( \d+mb)?$/.test(variant);
 }
 
-// The chips answer "what is still waiting", not "what did I already do", so
-// every branch below is a queue of work left to do on that meeting.
-function meetingMatchesFilter(m, filter) {
-  if (filter === "all") return true;
-  if (filter === "audio") return m.hasAudio === true;
-  // A queue never lists work whose action is known to fail. On a read failure
-  // every flag the queues read is the fallback's fabricated default — the
-  // summary and audio checks never even ran — so all three exclude the row. It
-  // still shows under All, which is the branch above.
-  if (m.readFailed === true) return false;
-  // The one queue an audio-only row belongs to, and the only queue that is not
-  // about improving a transcript that already exists.
-  // A queue also excludes a row already being worked on — same job-in-flight
-  // check the menu item disables on (activeJobFor), so a queue never asks the
-  // user to start what is already running.
-  if (filter === "transcribe") {
-    return m.hasTranscript === false && !activeJobFor("transcribe", m.id);
-  }
+// One source of truth per work-queue chip: its match predicate and its
+// empty-state line. computeFilterCounts, the count-loop in renderMeetings and
+// FILTER_EMPTY_TEXT all derive from this instead of separately restating the
+// same four keys — previously five places spelled the filter set, and ~90
+// lines of test existed only to police the drift between them. "all" and the
+// dormant "audio" (no chip yet — see deferred-work.md) stay special-cased in
+// meetingMatchesFilter itself, since neither is a queue of work with an empty
+// state or a count-loop entry.
+const FILTERS = {
+  // The one queue an audio-only row belongs to, and the only one that is not
+  // about improving a transcript that already exists. A queue also excludes a
+  // row already being worked on — same job-in-flight check the menu item
+  // disables on (activeJobFor), so a queue never asks the user to start what
+  // is already running.
+  transcribe: {
+    match: (m) => m.hasTranscript === false && !activeJobFor("transcribe", m.id),
+    empty: "Nothing to transcribe",
+  },
   // Re-transcribable: either a weak model, or an interrupted/partial run —
   // incomplete text is worth re-running regardless of which model produced
   // it, large-v3 included. Gated on hasAudio too, same as the menu item.
-  if (filter === "retranscribe") {
-    return m.hasAudio === true && (m.interrupted === true || modelWorthRedoing(m.model))
-      && !activeJobFor("transcribe", m.audioPath || m.id);
-  }
+  retranscribe: {
+    match: (m) => m.hasAudio === true && (m.interrupted === true || modelWorthRedoing(m.model))
+      && !activeJobFor("transcribe", m.audioPath || m.id),
+    empty: "Nothing to re-transcribe",
+  },
   // enhanceAttemptedAt: proofreading rejected every part on an earlier run —
   // a re-run hits the same rejection, so it must not sit in the queue forever.
   // interrupted: a partial's text is about to be replaced by the full
   // re-transcription — proofreading it now is wasted work.
-  if (filter === "enhance") {
-    return !m.enhancedAt && !m.enhanceAttemptedAt && !m.interrupted && m.hasSpokenTurns === true
-      && !activeJobFor("enhance", m.id);
-  }
+  enhance: {
+    match: (m) => !m.enhancedAt && !m.enhanceAttemptedAt && !m.interrupted && m.hasSpokenTurns === true
+      && !activeJobFor("enhance", m.id),
+    empty: "Nothing to enhance",
+  },
   // The hasTranscript gate is what keeps un-transcribed recordings out: they
   // have no summary either, so `!m.hasSummary` alone would sweep every one of
   // them into a queue whose action they cannot run. A summary that predates a
@@ -1643,11 +1649,24 @@ function meetingMatchesFilter(m, filter) {
   // too — it exists on disk, but no longer reflects the current transcript.
   // interrupted: same reasoning as enhance above — summarizing a partial is
   // wasted work once the full re-transcription replaces its text.
-  if (filter === "summarize") {
-    return m.hasTranscript === true && !m.interrupted && (!m.hasSummary || m.summaryOutdated === true)
-      && !activeJobFor("summarize", m.id);
-  }
-  return true;
+  summarize: {
+    match: (m) => m.hasTranscript === true && !m.interrupted && (!m.hasSummary || m.summaryOutdated === true)
+      && !activeJobFor("summarize", m.id),
+    empty: "Nothing to summarize",
+  },
+};
+
+// The chips answer "what is still waiting", not "what did I already do", so
+// every FILTERS entry is a queue of work left to do on that meeting.
+function meetingMatchesFilter(m, filter) {
+  if (filter === "all") return true;
+  if (filter === "audio") return m.hasAudio === true;
+  // A queue never lists work whose action is known to fail. On a read failure
+  // every flag the queues read is the fallback's fabricated default — the
+  // summary and audio checks never even ran — so every queue excludes the
+  // row. It still shows under All, which is the branch above.
+  if (m.readFailed === true) return false;
+  return FILTERS[filter] ? FILTERS[filter].match(m) : true;
 }
 
 function meetingMatchesSearch(m, q) {
@@ -1672,13 +1691,14 @@ function highlightSnippet(snippet, q) {
 }
 
 // What the placeholder says when nothing is visible. Read by renderMeetings only;
-// the three queue lines are the "you are done" case, not the "nothing here" one.
+// the queue lines (from FILTERS) are the "you are done" case, not the "nothing
+// here" one. `all` is unreachable in practice (filter "all" matches every
+// meeting, so a non-empty library with no search query can never be empty
+// under it) but is kept as the deliberate fallback emptyStateText()'s tests
+// pin it as, rather than falling through to the generic "No matches".
 const FILTER_EMPTY_TEXT = {
   all: "No meetings yet",
-  transcribe: "Nothing to transcribe",
-  retranscribe: "Nothing to re-transcribe",
-  enhance: "Nothing to enhance",
-  summarize: "Nothing to summarize",
+  ...Object.fromEntries(Object.keys(FILTERS).map((key) => [key, FILTERS[key].empty])),
 };
 
 function emptyStateText() {
@@ -1698,13 +1718,13 @@ function markActiveChip(filter) {
 }
 
 function computeFilterCounts(list) {
-  const counts = { all: list.length, audio: 0, transcribe: 0, retranscribe: 0, enhance: 0, summarize: 0 };
+  const counts = { all: list.length, audio: 0 };
+  for (const key of Object.keys(FILTERS)) counts[key] = 0;
   for (const m of list) {
     if (meetingMatchesFilter(m, "audio")) counts.audio++;
-    if (meetingMatchesFilter(m, "transcribe")) counts.transcribe++;
-    if (meetingMatchesFilter(m, "retranscribe")) counts.retranscribe++;
-    if (meetingMatchesFilter(m, "enhance")) counts.enhance++;
-    if (meetingMatchesFilter(m, "summarize")) counts.summarize++;
+    for (const key of Object.keys(FILTERS)) {
+      if (meetingMatchesFilter(m, key)) counts[key]++;
+    }
   }
   return counts;
 }
@@ -1761,14 +1781,12 @@ function renderMeetings() {
 
   // Update filter chip counts (off the unfiltered/unsearched meeting list).
   const counts = computeFilterCounts(meetings);
-  for (const kind of ["all", "transcribe", "retranscribe", "enhance", "summarize"]) {
+  for (const kind of ["all", ...Object.keys(FILTERS)]) {
     const el = document.querySelector(`.filter-count[data-count="${kind}"]`);
     // `?? 0` so a kind/chip mismatch shows a wrong number rather than painting
     // the literal string "undefined" into the chip.
     if (el) el.textContent = String(counts[kind] ?? 0);
   }
-
-  renderSelectionBar();
 
   // Apply filter + search. The open meeting stays pinned against the filter
   // (not the search box) — finishing Enhance on the meeting you are reading
@@ -1777,6 +1795,18 @@ function renderMeetings() {
     (m) => meetingMatchesSearch(m, searchQuery)
       && (m.id === activeMeetingId || meetingMatchesFilter(m, activeFilter)),
   );
+
+  // The batch selection is pruned to what a filter or search change still
+  // shows — Delete/Transcribe read straight from this set, and silently
+  // acting on a row the user can no longer see is worse than losing the
+  // selection. Before renderSelectionBar so its count already reflects it.
+  if (selectedRecordings.size) {
+    const visibleIds = new Set(visible.map((m) => m.id));
+    for (const id of Array.from(selectedRecordings)) {
+      if (!visibleIds.has(id)) selectedRecordings.delete(id);
+    }
+  }
+  renderSelectionBar();
 
   if (!visible.length) {
     // "No meetings yet" is a lie over a full library whose active queue simply
@@ -1928,13 +1958,18 @@ function buildMeetingCard(m) {
       </div>` : ""}
     <div class="meeting-card-row3">
       ${statusPillHtml(status)}
-      <div class="artifact-chips">
+      ${m.readFailed
+        // Every flag below is a fabricated default on a readFailed row (see
+        // the field-list comment above), not a finding — a real audio/summary
+        // chip here would be lying. One honest badge instead.
+        ? `<span class="artifact-chip artifact-chip--error" title="This transcript could not be read from disk">${iconSvg("info", { size: 11 })} Couldn't read</span>`
+        : `<div class="artifact-chips">
         ${modelChipHtml(m)}
         <span class="artifact-chip" data-kind="audio" data-present="${m.hasAudio ? "true" : "false"}" title="Audio">${iconSvg("mic", { size: 11 })}</span>
         <span class="artifact-chip" data-kind="transcript" data-present="${m.hasTranscript ? "true" : "false"}" title="Transcript">${iconSvg("text", { size: 11 })}</span>
         <span class="artifact-chip" data-kind="enhance" data-present="${m.enhancedAt ? "true" : "false"}" title="${escapeHtml(enhancedChipTitle(m.enhancedAt))}">${iconSvg("check", { size: 11 })}</span>
         <span class="artifact-chip" data-kind="summary" data-present="${m.hasSummary ? "true" : "false"}" title="Summary">${iconSvg("sparkle", { size: 11 })}</span>
-      </div>
+      </div>`}
     </div>
   `;
 
@@ -2546,7 +2581,7 @@ const STATUS_LABELS = {
   transcribed: "Transcribed",
   summarized: "Summarized",
   outdated: "Outdated",
-  failed: "Failed",
+  failed: "Couldn't read",
 };
 
 function statusPillHtml(status) {
