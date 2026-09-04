@@ -1830,11 +1830,19 @@ function parseTranscriptHeaderMain(content) {
     const info = {
         title: null, generated: null, recordedAt: null, language: null,
         participants: [], source: null, model: null, enhancedAt: null,
-        enhanceAttemptedAt: null,
+        enhanceAttemptedAt: null, interrupted: false,
     };
     for (const line of content.split('\n')) {
         if (line === '') break;
         if (line.startsWith('Meeting: '))         info.title       = line.slice(9).trim();
+        // Only value ever written is "PARTIAL … " (see the interrupted-run
+        // write site) — a cut-short transcript, the clearest re-transcribe
+        // candidate there is. Consumed by meetingMatchesFilter in
+        // renderer/app.js, via deriveMeetingFromTranscript's copy of this
+        // field. renderer/app.js's own parseTranscriptMeta independently
+        // checks the same "PARTIAL" prefix for the card's warning banner —
+        // unlinked, update both if the written text ever changes.
+        else if (line.startsWith('Status: '))     info.interrupted = /^PARTIAL\b/.test(line.slice(8).trim());
         else if (line.startsWith('Generated: '))  info.generated   = line.slice(11).trim();
         else if (line.startsWith('Recorded-At: ')) info.recordedAt = line.slice(13).trim();
         else if (line.startsWith('Language: '))   info.language    = line.slice(10).trim();
