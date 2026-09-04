@@ -242,6 +242,14 @@ for (const empty of ['', '   \n\n  ', null, undefined]) {
         'the card shows every header line main.js sent, whitelisted keys or not',
     );
     assert.strictEqual(byKey(meetingMetaRows(m))['Model'], 'MODEL(openai_whisper-large-v3)');
+    assert.strictEqual(m.interrupted, false, 'not present on item — must default to false, not undefined');
+    // The exact field meetingMatchesFilter's retranscribe/enhance/summarize
+    // branches key on — a copy step dropped here would leave the filter logic
+    // in renderer/app.js correct but permanently unreachable.
+    assert.strictEqual(
+        deriveMeetingFromTranscript({ ...item, interrupted: true }).interrupted, true,
+        'transcripts:list\'s parsed Status: field must survive into the meeting record',
+    );
 
     // What the Chrome extension writes: no Model, no Source. The chip must
     // still appear, with the fields that transcript does have.

@@ -112,6 +112,10 @@ function deriveMeetingFromTranscript(item) {
     model: item.model || undefined,
     enhancedAt: item.enhancedAt || undefined,
     enhanceAttemptedAt: item.enhanceAttemptedAt || undefined,
+    // A cut-short run (<stem>.partial.txt) — the clearest re-transcribe
+    // candidate there is, and not worth enhancing/summarizing before the
+    // full run replaces its text. See meetingMatchesFilter.
+    interrupted: Boolean(item.interrupted),
     // Whether the transcript holds anything Enhance would act on, decided in
     // main by the very predicate the Enhance job uses. False on an unreadable
     // transcript, so the "To enhance" filter leaves it out.
@@ -1111,6 +1115,10 @@ function parseTranscriptMeta(header) {
     const m = /^([A-Za-z][\w-]*):[ \t]*(.*)$/.exec(text);
     if (!m || m[2].startsWith("//")) { rows.push({ key: "", value: text }); continue; }
     const value = m[2].trim();
+    // Same "PARTIAL" prefix main.js's parseTranscriptHeaderMain checks for
+    // deriveMeetingFromTranscript's `interrupted` field — two independent
+    // regexes on one hardcoded value, unlinked. A changed write site
+    // (main.js's Status: line) needs both updated by hand.
     if (m[1] === "Status" && /^PARTIAL\b/.test(value)) { warn = value; continue; }
     rows.push({ key: m[1], value: metaValue(m[1], value) });
   }
@@ -1587,16 +1595,19 @@ function meetingMatchesFilter(m, filter) {
   if (filter === "transcribe") {
     return m.hasTranscript === false && !activeJobFor("transcribe", m.id);
   }
-  // Weak model AND re-transcribable: the Re-transcribe menu item is gated on
-  // hasAudio too, so without it the queue would list meetings you cannot act on.
+  // Re-transcribable: either a weak model, or an interrupted/partial run —
+  // incomplete text is worth re-running regardless of which model produced
+  // it, large-v3 included. Gated on hasAudio too, same as the menu item.
   if (filter === "retranscribe") {
-    return m.hasAudio === true && modelWorthRedoing(m.model)
+    return m.hasAudio === true && (m.interrupted === true || modelWorthRedoing(m.model))
       && !activeJobFor("transcribe", m.audioPath || m.id);
   }
   // enhanceAttemptedAt: proofreading rejected every part on an earlier run —
   // a re-run hits the same rejection, so it must not sit in the queue forever.
+  // interrupted: a partial's text is about to be replaced by the full
+  // re-transcription — proofreading it now is wasted work.
   if (filter === "enhance") {
-    return !m.enhancedAt && !m.enhanceAttemptedAt && m.hasSpokenTurns === true
+    return !m.enhancedAt && !m.enhanceAttemptedAt && !m.interrupted && m.hasSpokenTurns === true
       && !activeJobFor("enhance", m.id);
   }
   // The hasTranscript gate is what keeps un-transcribed recordings out: they
@@ -1604,8 +1615,10 @@ function meetingMatchesFilter(m, filter) {
   // them into a queue whose action they cannot run. A summary that predates a
   // later Enhance/Re-transcribe (summaryOutdated) belongs back in the queue
   // too — it exists on disk, but no longer reflects the current transcript.
+  // interrupted: same reasoning as enhance above — summarizing a partial is
+  // wasted work once the full re-transcription replaces its text.
   if (filter === "summarize") {
-    return m.hasTranscript === true && (!m.hasSummary || m.summaryOutdated === true)
+    return m.hasTranscript === true && !m.interrupted && (!m.hasSummary || m.summaryOutdated === true)
       && !activeJobFor("summarize", m.id);
   }
   return true;
@@ -2035,11 +2048,16 @@ function openMeetingMenu(x, y, m) {
   // fallback's fabricated defaults, so Summarize would fail on the same read —
   // and each reason is spelled out, because a control that greys out without
   // saying why just looks broken.
+  // Same reasoning as meetingMatchesFilter's queue exclusion: a partial's text
+  // is about to be replaced by the full re-transcription, so working on it
+  // now — from the menu, not just the queue chip — is wasted work.
   const summarizeReason = noTranscript ? "Not transcribed yet"
     : m.readFailed ? "Transcript could not be read"
+    : m.interrupted ? "Transcription is incomplete — re-transcribe first"
     : "";
   const enhanceReason = noTranscript ? "Not transcribed yet"
     : m.readFailed ? "Transcript could not be read"
+    : m.interrupted ? "Transcription is incomplete — re-transcribe first"
     : enhancing ? "Enhance is already running on this transcript"
     : !m.hasSpokenTurns ? "No spoken turns to enhance"
     : "";
@@ -4993,9 +5011,27 @@ settingsProviderRadios.forEach((r) =>
 const settingsThemeRadios = document.querySelectorAll('input[name="settings-theme"]');
 const lightThemeMQ = window.matchMedia("(prefers-color-scheme: light)");
 
+// Same try/catch-with-fallback shape as readFormatPref() above — a storage
+// backend that refuses reads/writes must not stop the theme from applying
+// live, only from surviving a reload.
+function readThemePref() {
+  try {
+    return localStorage.getItem("uds-theme") || "dark";
+  } catch (_) {
+    return "dark";
+  }
+}
+function writeThemePref(pref) {
+  try {
+    localStorage.setItem("uds-theme", pref);
+  } catch (_) {
+    // Unpersisted — theme-init.js's own guard falls back to dark on reload.
+  }
+}
+
 function applyTheme(pref) {
   // pref: 'light' | 'dark' | 'system'
-  localStorage.setItem("uds-theme", pref);
+  writeThemePref(pref);
   const effective = pref === "system" ? (lightThemeMQ.matches ? "light" : "dark") : pref;
   document.documentElement.dataset.theme = effective;
   // The floating notes window is a separate document and only resolves this
@@ -5011,7 +5047,7 @@ settingsThemeRadios.forEach((r) =>
 
 // While 'system' is selected, follow OS appearance changes live.
 lightThemeMQ.addEventListener("change", () => {
-  if ((localStorage.getItem("uds-theme") || "dark") === "system") applyTheme("system");
+  if (readThemePref() === "system") applyTheme("system");
 });
 
 // ─── Date & time format (view preferences) ──────────────────────────────────
@@ -5107,7 +5143,7 @@ async function openSettingsModal() {
   settingsProviderRadios.forEach((r) => {
     r.checked = r.value === provider;
   });
-  const theme = localStorage.getItem("uds-theme") || "dark";
+  const theme = readThemePref();
   settingsThemeRadios.forEach((r) => {
     r.checked = r.value === theme;
   });
