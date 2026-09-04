@@ -898,7 +898,7 @@ body.mode-record #btn-ask-ai {
 }
 
 .meeting-more {
-    display: none;
+    display: inline-flex;
     background: transparent;
     border: none;
     color: var(--text-muted);
@@ -912,12 +912,10 @@ body.mode-record #btn-ask-ai {
     transition: background 0.15s, color 0.15s;
 }
 
-.meeting-card.active .meeting-more { display: inline-flex; }
-
 /* Sits against the title rather than at the row's far edge — `margin-right:
-   auto` keeps it there, so it does not shift sideways when the ⋯ button
-   appears on the active card. Unlike ⋯ it is always shown: ⋯ is reachable by
-   right-click anywhere on the card, this is the only way to the panel. */
+   auto` keeps it there regardless of the ⋯ button beside it. Both are always
+   shown now, but ⋯ is also reachable by right-click anywhere on the card;
+   this is the only way to the info panel. */
 .meeting-info {
     display: inline-flex;
     align-items: center;
