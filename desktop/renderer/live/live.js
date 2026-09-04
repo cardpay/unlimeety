@@ -281,12 +281,6 @@
         if (recordPanel) recordPanel.classList.toggle('hidden', name !== 'record');
         document.body.classList.toggle('mode-live',   name === 'live');
         document.body.classList.toggle('mode-record', name === 'record');
-        // Clear the record-phase marker when leaving the Record tab so any
-        // record-phase-specific CSS (e.g. hidden sidebars) does not leak into
-        // other tabs.
-        if (name !== 'record') {
-            delete document.body.dataset.recordPhase;
-        }
     }
 
     openScreenSettingsBtn?.addEventListener('click', () => {

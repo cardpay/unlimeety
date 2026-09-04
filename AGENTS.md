@@ -27,11 +27,12 @@ WhisperKit/SpeakerKit helper, and a Chrome extension. `README.md` covers usage, 
 ## Running and verifying
 
 - Run every npm command from `desktop/`; the repository root has no `package.json`.
-- `npm test` (`node --test`, under a second) covers the pure modules (`glossary`,
-  `summary-frontmatter`, `transcript-enhance`, `job-queue`) plus renderer logic sliced out of
-  `renderer/app.js` into a `vm` sandbox (`library-filters`, `transcript-meta`, `meeting-date-format`,
-  `rail-sections`, `speaker-naming`, `renderer-globals`). `main.js` has no tests, and anything in
-  `renderer/` that needs a real DOM does not either — verify those by launching the app.
+- `npm test` (`node --test`, under a second) runs every file in `desktop/test/`: pure modules
+  (`glossary`, `summary-frontmatter`, `transcript-enhance`, `job-queue`), renderer logic sliced out of
+  `renderer/app.js` and other renderer scripts into a `vm` sandbox, source-text checks against
+  renderer markup/CSS, and the Chrome extension's content script. `main.js` has no tests, and
+  anything that needs a real DOM or browser does not either — verify those by launching the app (or
+  `npm run check:layout` for layout).
 - Verify locally before pushing; there is no CI.
 - Node >= 18. The Live tab additionally needs Apple Silicon on macOS 14.2+ and Xcode command line
   tools for `swift build`.

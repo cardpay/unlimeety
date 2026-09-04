@@ -3397,8 +3397,6 @@ function spawnHelperWithJsonStdout(onEvent) {
 
 ipcMain.handle('record:platformOK', () => process.platform === 'darwin');
 
-ipcMain.handle('record:getFolder', () => RECORDINGS_FOLDER);
-
 ipcMain.handle('record:start', async (_e, opts) => {
     if (process.platform !== 'darwin') {
         return { ok: false, error: 'Recording is macOS-only.' };

@@ -325,10 +325,6 @@
     // then — wrong for anyone whose persisted language is not Russian.
     paintLangSegs([tsLangSeg, ...langSegs], state.batchSettings.language);
 
-    // Phase marker on <body>, for phase-specific styling. live.js clears it
-    // when the user leaves this tab.
-    document.body.dataset.recordPhase = state.phase;
-
     // ─── Platform gating ─────────────────────────────────────────────────
     (async () => {
         const ok = await api.platformOK();
@@ -388,7 +384,6 @@
     // ─── Show/hide sections ──────────────────────────────────────────────
     function showSection(name) {
         state.phase = name;
-        document.body.dataset.recordPhase = name;
         setupSection.classList.toggle('hidden',      name !== 'idle');
         recordingSection.classList.toggle('hidden',  name !== 'recording');
         tsSection.classList.toggle('hidden',         name !== 'transcribeSettings');

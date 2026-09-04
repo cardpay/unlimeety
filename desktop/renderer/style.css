@@ -1428,12 +1428,6 @@ body.mode-record #btn-ask-ai {
     letter-spacing: 0;
 }
 
-.rail-brief {
-    font-size: 12.5px;
-    line-height: 1.55;
-    color: var(--text-primary);
-}
-
 .rail-list { list-style: none; }
 
 .rail-list li {
