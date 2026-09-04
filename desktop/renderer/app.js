@@ -59,6 +59,10 @@ const summaryWarnings = new Map();
 //   hasSpokenTurns  — the body holds turns Enhance would act on
 //   readFailed      — the transcript could not be read, so every flag above is
 //                     a fabricated default rather than a finding
+//   audioPath / audioPaths — the one exception on a readFailed row: path
+//                     existence doesn't depend on the read that just failed,
+//                     so these stay real (hasAudio itself does not — nothing
+//                     here asserts that finding)
 
 let meetings = [];
 let activeMeetingId = null;
@@ -98,6 +102,11 @@ function deriveMeetingFromTranscript(item) {
     date: isNaN(date.getTime()) ? new Date() : date,
     durationSec: undefined,
     audioPath: item.audioPath || undefined,
+    // Every wav main.js could relate to this transcript, not just the first —
+    // a legacy-stem recording can have more than one, and mergeMeetings needs
+    // all of them to dedup correctly. Falls back to the single audioPath so a
+    // fixture or an older caller that only supplies that still works.
+    audioPaths: Array.isArray(item.audioPaths) ? item.audioPaths : (item.audioPath ? [item.audioPath] : []),
     transcriptPath: item.filePath,
     summaryPath: undefined,
     participants: Array.isArray(item.participants) ? item.participants : [],
@@ -155,6 +164,10 @@ function deriveMeetingFromRecording(item) {
     // so an audio-only row is not left with nothing but a timestamp.
     sizeBytes: Number(item.size) || 0,
     audioPath: item.filePath,
+    // Its own wav, and only that — a recording with no transcript can't have
+    // been related to a second one. Kept for shape-parity with the transcript
+    // twin's audioPaths, so a generic consumer of either union member is safe.
+    audioPaths: [item.filePath],
     transcriptPath: null,
     summaryPath: undefined,
     participants: [],
@@ -186,8 +199,11 @@ function mergeMeetings(transcriptRows, recordingRows) {
   // A legacy recording is "<base>-YYYYMMDD-HHMMSS.wav" while its transcript is
   // "<base>.txt", so `record:list` reports hasTranscript false for a wav that
   // `transcripts:list` already claims as its audio. Without this check that
-  // recording gets a second, transcript-less card.
-  const claimed = new Set(fromTranscripts.map((m) => m.audioPath).filter(Boolean));
+  // recording gets a second, transcript-less card. Every related wav counts,
+  // not just the first — a legacy-stem recording can pair with more than
+  // one — and a transcript whose read failed still claims its own wav, since
+  // audioPaths is computed independently of whether the read succeeded.
+  const claimed = new Set(fromTranscripts.flatMap((m) => m.audioPaths));
   const fromRecordings = (recordingRows || [])
     .filter((r) => r && !r.hasTranscript && !claimed.has(r.filePath))
     .map(deriveMeetingFromRecording)
@@ -1139,7 +1155,12 @@ function meetingMetaPanelHtml(rows) {
 }
 // ── end transcript meta ──
 
-function renderTranscriptView(content) {
+// ── transcript view (extracted verbatim by test/transcript-meta.test.js) ──
+// Pure markup-building, split out of renderTranscriptView so the PARTIAL
+// warning's wiring (does a header even reach transcriptMetaHtml?) has
+// something to run without a DOM — deleting that one call used to leave the
+// whole test suite green.
+function buildTranscriptViewHtml(content, carded) {
   const firstTcMatch = /^\[\d[^\]]*\]/m.exec(content);
   let html = "";
   if (!firstTcMatch) {
@@ -1151,7 +1172,6 @@ function renderTranscriptView(content) {
     // A transcript in the library carries its header on its card; one opened
     // from elsewhere has no card, so it keeps the rows inline.
     if (header) {
-      const carded = meetings.some((mm) => mm.id === state.filePath);
       html += transcriptMetaHtml(header, { inlineRows: !carded });
     }
     for (const seg of parseSegments(content)) {
@@ -1174,7 +1194,13 @@ function renderTranscriptView(content) {
               `</div>`;
     }
   }
-  transcriptView.innerHTML = html;
+  return html;
+}
+// ── end transcript view ──
+
+function renderTranscriptView(content) {
+  const carded = meetings.some((mm) => mm.id === state.filePath);
+  transcriptView.innerHTML = buildTranscriptViewHtml(content, carded);
 }
 
 function showTranscriptView() {
