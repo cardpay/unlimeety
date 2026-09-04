@@ -190,6 +190,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-recordings-in-meetings-list.md`
   summary: `record:deleteTranscript` and `record:deleteSummary`, plus both preload methods, now have zero renderer callers — the Record-tab card menu was their only one.
   evidence: `grep -rn 'deleteTranscript\|deleteSummary' desktop/renderer/` returns only the library's `transcripts:*` equivalents. The handlers (`main.js:3543`, `main.js:3570`) still exist and are still reachable over IPC. Removing them is a main-process change, which this spec's `Ask First` list reserves. Found by blind-hunter review, 2026-08-26.
+  resolved: Re-confirmed zero renderer callers still held and removed both `ipcMain.handle('record:deleteTranscript', ...)`/`record:deleteSummary` handlers and their `preload.js` bridge methods together, so `test/record-auto-transcribe.test.js`'s "every channel preload invokes has a handler in main" check has nothing orphaned on either side to catch.
 
 - source_spec: `_bmad-output/implementation-artifacts/spec-recordings-in-meetings-list.md`
   summary: `document.body.dataset.recordPhase` is still written by `record.js` and cleared by `live.js`, but no CSS rule reads it any more.

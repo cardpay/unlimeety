@@ -1021,6 +1021,15 @@ ipcMain.handle('summary:load', (_e, transcriptPath, folder) => {
 
 // ─── IPC: Summarizer settings ─────────────────────────────────────────────────
 
+// Shared by the settings sanitizer and ollamaOptions() below: a positive
+// whole number, or '' for "not set". Capped well above any real model's
+// context window so a stray extra digit doesn't sail through unchecked.
+const MAX_OLLAMA_CONTEXT_TOKENS = 2_000_000;
+function parsePositiveInt(value, max) {
+    const n = Number(value);
+    return Number.isInteger(n) && n > 0 && n <= max ? n : '';
+}
+
 const DEFAULT_SUMMARIZER = {
     provider: 'claude-code', // 'claude-code' | 'openrouter' | 'ollama' | 'openai-compatible'
     openrouter: {
@@ -1031,6 +1040,7 @@ const DEFAULT_SUMMARIZER = {
     ollama: {
         baseUrl: 'http://localhost:11434',
         model: 'llama3.1',
+        contextTokens: '', // blank = don't send `options.num_ctx`, keep Ollama's own default
     },
     openaiCompatible: {
         apiKey: '',
@@ -1116,6 +1126,7 @@ ipcMain.handle('settings:setSummarizer', (_e, summarizer) => {
         ollama: {
             baseUrl: String(summarizer.ollama?.baseUrl || DEFAULT_SUMMARIZER.ollama.baseUrl).trim().replace(/\/+$/, ''),
             model: String(summarizer.ollama?.model || DEFAULT_SUMMARIZER.ollama.model).trim(),
+            contextTokens: parsePositiveInt(summarizer.ollama?.contextTokens, MAX_OLLAMA_CONTEXT_TOKENS),
         },
         openaiCompatible: {
             ...encryptApiKey(oaiKey),
@@ -1429,6 +1440,16 @@ async function runOpenAICompat(content, promptInstruction, config, onAbort) {
     }
 }
 
+// Ollama defaults to a small context window (2048-4096 tokens) regardless of
+// what the chosen model actually supports, silently truncating a large prompt
+// instead of erroring. `contextTokens` is a user-set escape hatch (Settings ->
+// Ollama) for whoever's model can take a bigger window; unset, this sends no
+// `options` at all and Ollama's own default behavior is unchanged.
+function ollamaOptions(config) {
+    const n = parsePositiveInt(config?.contextTokens, MAX_OLLAMA_CONTEXT_TOKENS);
+    return n ? { options: { num_ctx: n } } : {};
+}
+
 async function runOllama(content, promptInstruction, config, onAbort) {
     const { baseUrl, model } = config;
     if (!model) return { ok: false, error: 'Ollama model is not set.' };
@@ -1441,6 +1462,7 @@ async function runOllama(content, promptInstruction, config, onAbort) {
             body: JSON.stringify({
                 model,
                 stream: false,
+                ...ollamaOptions(config),
                 messages: [
                     { role: 'system', content: promptInstruction },
                     { role: 'user', content },
@@ -1749,7 +1771,7 @@ async function runChatOllama(transcriptContent, messages, config) {
         const res = await fetchWithTimeout(`${baseUrl}/api/chat`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ model, stream: false, messages: [systemMsg, ...messages] }),
+            body: JSON.stringify({ model, stream: false, ...ollamaOptions(config), messages: [systemMsg, ...messages] }),
         }, 600_000);
         if (!res.ok) {
             const text = await res.text().catch(() => '');
@@ -3193,6 +3215,12 @@ ipcMain.handle('live:saveTranscript', async (_e, payload) => {
         // A failed save is still the end of the session — don't make a pending
         // Quit sit out its whole timeout waiting for a save that won't come.
         noteSessionFlushed('live');
+        // Otherwise the wav stays keyed to this outputPath forever: record:list
+        // excludes whatever it points at as "still being written", so a save
+        // that throws would hide an intact, playable recording from the
+        // library for the rest of the process's life.
+        live.outputPath = null;
+        mainWindow?.webContents.send('record:listChanged');
         return { ok: false, error: err.message };
     }
 });
@@ -3459,12 +3487,14 @@ ipcMain.handle('record:start', async (_e, opts) => {
         recordSendToRenderer({ type: 'recorderExited', code });
         recorder.proc = null;
         recorder.outputPath = null;
+        mainWindow?.webContents.send('record:listChanged');
         cancelAutoStop('record');
     });
     recorder.proc.on('error', (err) => {
         recordSendToRenderer({ type: 'error', message: `helper spawn error: ${err.message}` });
         recorder.proc = null;
         recorder.outputPath = null;
+        mainWindow?.webContents.send('record:listChanged');
     });
 
     recorder.proc.stdin.write(JSON.stringify({
@@ -3494,6 +3524,9 @@ ipcMain.handle('record:stop', async () => {
     // this too, but it runs asynchronously and a Transcribe click right after
     // Stop & save would otherwise hit the "Stop recording before transcribing"
     // guard. Synchronously nulling here closes that race.
+    // No broadcast needed here: the persistent on('exit') listener registered
+    // in record:start runs before this await resolves (it's the same 'exit'
+    // event) and already nulled both fields and sent record:listChanged.
     recorder.proc = null;
     recorder.outputPath = null;
     noteSessionFlushed('record');
@@ -3533,6 +3566,10 @@ ipcMain.handle('record:list', () => {
             .filter(f => f.toLowerCase().endsWith('.wav'))
             .map(f => {
                 const filePath = path.join(RECORDINGS_FOLDER, f);
+                // A wav still being written (Record or Live tab, either one) is
+                // not a library row yet — no card to select/delete out from
+                // under the helper process still holding it open.
+                if (filePath === recorder.outputPath || filePath === live.outputPath) return null;
                 try {
                     const stat = fs.statSync(filePath);
                     if (!stat.isFile()) return null;
@@ -3677,64 +3714,6 @@ ipcMain.handle('record:deleteMany', async (_e, paths) => {
         return { ok: false, error: errors[0].error, errors };
     }
     return { ok: true, deleted, errors };
-});
-
-// Delete only the transcript paired with a given recording. The audio file
-// and any summary stay on disk.
-ipcMain.handle('record:deleteTranscript', async (_e, wavPath) => {
-    if (typeof wavPath !== 'string' || !wavPath.startsWith(RECORDINGS_FOLDER)) {
-        return { ok: false, error: 'Refusing to operate on a path outside the recordings folder.' };
-    }
-    const transcriptPath = recordingTranscriptPath(wavPath);
-    if (!fs.existsSync(transcriptPath)) {
-        return { ok: false, error: 'No transcript found for this recording.' };
-    }
-    const choice = dialog.showMessageBoxSync(mainWindow, {
-        type: 'warning',
-        buttons: ['Delete', 'Cancel'],
-        defaultId: 1,
-        cancelId: 1,
-        message: 'Delete the transcript?',
-        detail: 'Only the .txt transcript will be removed. The audio file and summary (if any) are kept.',
-    });
-    if (choice !== 0) return { ok: false, canceled: true };
-    try {
-        fs.unlinkSync(transcriptPath);
-        return { ok: true };
-    } catch (err) {
-        return { ok: false, error: err.message };
-    }
-});
-
-// Delete only the summary paired with a given recording. The audio file and
-// transcript stay on disk.
-ipcMain.handle('record:deleteSummary', async (_e, wavPath) => {
-    if (typeof wavPath !== 'string' || !wavPath.startsWith(RECORDINGS_FOLDER)) {
-        return { ok: false, error: 'Refusing to operate on a path outside the recordings folder.' };
-    }
-    const transcriptPath = recordingTranscriptPath(wavPath);
-    if (!fs.existsSync(transcriptPath)) {
-        return { ok: false, error: 'No transcript — no summary to delete.' };
-    }
-    const summaryPath = findExistingSummaryPath(transcriptPath);
-    if (!summaryPath) {
-        return { ok: false, error: 'No summary found for this recording.' };
-    }
-    const choice = dialog.showMessageBoxSync(mainWindow, {
-        type: 'warning',
-        buttons: ['Delete', 'Cancel'],
-        defaultId: 1,
-        cancelId: 1,
-        message: 'Delete the summary?',
-        detail: 'Only the summary file will be removed. The audio file and transcript are kept.',
-    });
-    if (choice !== 0) return { ok: false, canceled: true };
-    try {
-        fs.unlinkSync(summaryPath);
-        return { ok: true };
-    } catch (err) {
-        return { ok: false, error: err.message };
-    }
 });
 
 ipcMain.handle('record:rename', async (_e, wavPath, newTitle) => {

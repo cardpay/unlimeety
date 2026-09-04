@@ -1193,6 +1193,10 @@
             <label class="modal-label" for="settings-ol-model">Model</label>
             <input type="text" id="settings-ol-model" class="modal-input" placeholder="llama3.1" />
           </div>
+          <div class="modal-row">
+            <label class="modal-label" for="settings-ol-ctx">Context size (tokens)</label>
+            <input type="number" id="settings-ol-ctx" class="modal-input" min="1" max="2000000" step="1" placeholder="leave blank for Ollama's default" />
+          </div>
         </div>
 
         <div id="settings-section-openai" class="settings-section hidden">

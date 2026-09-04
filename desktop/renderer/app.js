@@ -4277,56 +4277,6 @@ function renderFrontmatterTable(rows) {
   return `<table class="fm-table"><tbody>${cells}</tbody></table>`;
 }
 
-// Render a markdown table (e.g. the interview Scorecard) into modal styling.
-function renderModalTable(lines) {
-  const rows = [];
-  for (const l of lines || []) {
-    const t = l.trim();
-    if (!t.startsWith("|")) continue;
-    if (/^\|[-:| ]+\|/.test(t)) continue; // separator row
-    rows.push(t.replace(/^\||\|$/g, "").split("|").map((c) => c.trim()));
-  }
-  if (!rows.length) return "";
-  const [header, ...body] = rows;
-  const ths = header.map((h) => `<th>${renderMarkdownInline(h)}</th>`).join("");
-  const trs = body
-    .map((r) => `<tr>${r.map((c) => `<td>${renderMarkdownInline(c)}</td>`).join("")}</tr>`)
-    .join("");
-  return `<table class="smr-table"><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
-}
-
-function renderModalSection(sec) {
-  const heading = `<h3 class="smr-section-heading">${escapeHtml(sec.heading)}</h3>`;
-  if (sec.slug === "action_items") {
-    const items =
-      typeof parseActionItems === "function"
-        ? parseActionItems(sec.lines)
-        : null;
-    if (items?.length) {
-      const lis = items
-        .map((it) => {
-          const who = it.who ? `<strong>${escapeHtml(it.who)}</strong> — ` : "";
-          const what = renderMarkdownInline(it.what || "");
-          const due = it.due
-            ? ` <em style="color:var(--text-muted)">(due: ${escapeHtml(it.due)})</em>`
-            : "";
-          return `<li><span class="smr-action-checkbox">☐</span> ${who}${what}${due}</li>`;
-        })
-        .join("");
-      return `<section class="smr-section">${heading}<ul class="smr-list">${lis}</ul></section>`;
-    }
-  }
-  // Markdown tables (e.g. the interview Scorecard) get table styling.
-  if ((sec.lines || []).some((l) => l.trim().startsWith("|"))) {
-    const table = renderModalTable(sec.lines);
-    if (table) return `<section class="smr-section">${heading}${table}</section>`;
-  }
-  // Everything else: full markdown — paragraphs, ### sub-headings, lists,
-  // blockquotes, and inline **bold** / *italic* / `code`.
-  const body = renderMarkdown((sec.lines || []).join("\n").trim());
-  return `<section class="smr-section">${heading}<div class="smr-md">${body}</div></section>`;
-}
-
 function renderModalSummary(md, subtitleText) {
   const subtitleEl = document.getElementById("modal-result-subtitle");
   if (subtitleEl) subtitleEl.textContent = subtitleText || "";
@@ -4344,9 +4294,9 @@ function renderModalSummary(md, subtitleText) {
     if (!parsed.fallback) structured = parsed;
   }
   if (structured) {
-    for (const sec of structured.sections) {
-      html += renderModalSection(sec);
-    }
+    // Same 41-kind section renderer the rail uses (status pills, people
+    // avatars, recommendation chips, etc.), not a second flat implementation.
+    html += buildStructuredHtml(structured);
   } else {
     html += `<pre class="modal-result-text" style="white-space:pre-wrap;margin:0">${escapeHtml(body)}</pre>`;
   }
@@ -5013,6 +4963,7 @@ const settingsOrModel = document.getElementById("settings-or-model");
 const settingsOrUrl = document.getElementById("settings-or-url");
 const settingsOlUrl = document.getElementById("settings-ol-url");
 const settingsOlModel = document.getElementById("settings-ol-model");
+const settingsOlCtx = document.getElementById("settings-ol-ctx");
 const settingsOaiUrl = document.getElementById("settings-oai-url");
 const settingsOaiKey = document.getElementById("settings-oai-key");
 const settingsOaiModel = document.getElementById("settings-oai-model");
@@ -5173,6 +5124,7 @@ async function openSettingsModal() {
   settingsOrUrl.value = cfg?.openrouter?.baseUrl || "";
   settingsOlUrl.value = cfg?.ollama?.baseUrl || "";
   settingsOlModel.value = cfg?.ollama?.model || "";
+  settingsOlCtx.value = cfg?.ollama?.contextTokens || "";
   settingsOaiUrl.value = cfg?.openaiCompatible?.baseUrl || "";
   settingsOaiKey.value = cfg?.openaiCompatible?.apiKey || "";
   settingsOaiModel.value = cfg?.openaiCompatible?.model || "";
@@ -5207,6 +5159,18 @@ async function saveSettings() {
     settingsError.classList.remove("hidden");
     return;
   }
+  if (provider === "ollama" && settingsOlCtx.value.trim()) {
+    // Mirrors main.js's parsePositiveInt/MAX_OLLAMA_CONTEXT_TOKENS — whole
+    // number only, so a value isn't silently floored after save with no
+    // indication it changed.
+    const n = Number(settingsOlCtx.value.trim());
+    if (!(Number.isInteger(n) && n > 0 && n <= 2000000)) {
+      settingsError.textContent =
+        "Context size must be a whole number between 1 and 2,000,000.";
+      settingsError.classList.remove("hidden");
+      return;
+    }
+  }
   if (provider === "openai-compatible") {
     if (!settingsOaiUrl.value.trim()) {
       settingsError.textContent = "OpenAI-compatible provider requires a base URL.";
@@ -5240,6 +5204,7 @@ async function saveSettings() {
     ollama: {
       baseUrl: settingsOlUrl.value.trim(),
       model: settingsOlModel.value.trim(),
+      contextTokens: settingsOlCtx.value.trim(),
     },
     openaiCompatible: {
       apiKey: settingsOaiKey.value.trim(),
