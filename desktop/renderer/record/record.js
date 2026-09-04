@@ -1444,7 +1444,7 @@
             : baseTitle;
     }
     function formatRelativeWhen(epochMs) {
-        const time = new Date(epochMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const time = formatClockTime(new Date(epochMs));
         const bucket = formatRelativeDay(epochMs);
         const word = bucket === 'today' ? 'today' : bucket === 'earlier' ? 'earlier' : 'older';
         return `${word} · ${time}`;

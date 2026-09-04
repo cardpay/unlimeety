@@ -73,18 +73,22 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-meeting-card-date-format.md`
   summary: The Record and Live tabs still format timestamps with their own `toLocaleTimeString` calls and ignore the new date-order / clock preferences.
   evidence: `desktop/renderer/record/record.js` and `desktop/renderer/live/live.js` both call `toLocaleTimeString` directly. Once a user picks 12-hour or month-first in Settings, the Transcripts sidebar follows it and those two tabs do not — a visible inconsistency inside one window. Deliberately out of scope for this spec ("Never: reformatting timestamps outside the Transcripts sidebar"), but worth a follow-up.
+  resolved: Taken as the follow-up it was flagged for. Added `formatClockTime(date)` next to `formatMeetingStamp` in `renderer/app.js` (time only, same `uds-time-format` preference, no date order needed) and pointed both call sites at it: `record.js`'s `formatRelativeWhen` (recording history rows) and `live.js`'s `pushDiag` (diagnostics timestamp). Verified live over CDP that it renders `15:30` / `3:30 PM` for the same instant depending on the stored preference.
 
 - source_spec: `_bmad-output/implementation-artifacts/spec-transcript-meta-info-icon.md`
   summary: `renderer/app.js` still hard-codes the header keys it treats specially (`Model`, `Status`, the `META_LABELS` relabel) with no link to the authoritative writer parser at `main.js:1738-1760`.
   evidence: The date handling was moved to a value-shape test so it needs no sync, but a new header key added in main.js still lands in the meta panel with a raw label and no signal, and neither file points at the other.
+  resolved: Minimal fix, matching the entry's own bar ("no signal"): added a cross-reference comment at each list — `parseTranscriptHeaderMain` (main.js) now names `META_LABELS`/`metaValue()` as the unlinked display-side list, and `META_LABELS` (renderer/app.js) names `parseTranscriptHeaderMain` back. No behavior change — `parseTranscriptMeta` already has no whitelist, so an unlisted key already rendered (just undecorated); this only makes the two lists discoverable from each other.
 
 - source_spec: `_bmad-output/implementation-artifacts/spec-transcript-meta-info-icon.md`
   summary: `desktop/app.js` is an untracked stale copy of `renderer/app.js` that still emits `<div class="tv-header">`, a class whose CSS no longer exists.
   evidence: Nothing loads it (`renderer/index.html` loads `renderer/app.js`, and package.json build.files has no top-level app.js), so editing it by mistake produces silently dead markup.
+  resolved: Moot in this checkout — `desktop/app.js` is untracked, so it never existed in this worktree to begin with (`find . -name app.js` under `desktop/` finds only `renderer/app.js`). Whoever hits this again should just delete their own local copy; there is nothing in git to remove.
 
 - source_spec: `_bmad-output/implementation-artifacts/spec-transcript-meta-info-icon.md`
   summary: The project instructions (AGENTS.md, symlinked as CLAUDE.md) say `npm test` covers only glossary, summary-frontmatter, transcript-enhance and job-queue; the suite now has nine files.
   evidence: Already stale before this change (renderer-globals, speaker-naming, meeting-date-format were missing too); left alone here because a concurrent session is editing the same tree.
+  resolved: Reworded to describe the test categories instead of enumerating files by name, so it can't drift the same way again — the count was stale before this entry too, and would go stale again the next time someone adds a `test/*.test.js` file.
 
 - source_spec: `_bmad-output/implementation-artifacts/spec-transcript-meta-info-icon.md`
   summary: `main.js` writes `Generated:` as `new Date().toLocaleString()`, so the meta panel shows it verbatim next to a house-formatted `Recorded` — two date formats in one panel.
@@ -117,6 +121,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-library-workflow-filters.md`
   summary: The work queues do not exclude a meeting that already has a transcribe or enhance job in flight, so it stays counted as pending while its menu item is disabled.
   evidence: `activeJobFor(type, filePath)` (`renderer/app.js:3423`) is what the menu items gate on, but `meetingMatchesFilter` has no access to job state and `renderMeetings` is not re-run on queue events. Wiring it in means coupling the sidebar render to the job queue's change broadcasts — worth doing deliberately, not as a review patch.
+  resolved: Done exactly as scoped — `meetingMatchesFilter` now calls `activeJobFor` for each of the three job-backed queues (transcribe/retranscribe checking `m.id`/`m.audioPath`, enhance and summarize checking `m.id`), and `onQueueChanged` calls `renderMeetings()` on every broadcast so a job starting or finishing moves a row in or out live. `test/library-filters.test.js`'s existing `activeJobFor: () => null` sandbox stub meant every pre-existing assertion kept passing unchanged; added new cases for all three exclusions. Verified live over CDP that a real `onQueueChanged` call re-renders with no exception.
 
 - source_spec: `_bmad-output/implementation-artifacts/spec-library-workflow-filters.md`
   summary: An interrupted transcription's `<stem>.partial.txt` shows in the library as an ordinary meeting and never reaches `To re-transcribe`, even though incomplete text is exactly what needs re-running.
@@ -129,6 +134,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-library-workflow-filters.md`
   summary: A transcript the user just gave spoken turns to keeps `To enhance` and the Enhance menu item out of date until something re-lists the library — the renderer's `meetings[]` is never refreshed, and no main-side cache invalidation can fix that.
   evidence: The folder watcher suppresses the app's own writes (`main.js:1946-1947` against `lastSelfWrite`), by design, so autosave does not churn the sidebar — and therefore `transcripts:changed` never fires and `loadLibrary` never re-runs. The stale value lives in the renderer, not in main's cache: `writeFileAtomic` renames a fresh temp file and `writeTranscriptFile` uses `writeFileSync`, so mtime always moves and the cache would have re-scanned on the next list anyway (byte length now guards it too). `stampSelfWrite`'s cache eviction was added regardless — it closes the write-that-preserves-mtime case — but it cannot refresh a renderer that never asks again. Making it immediate means a debounced re-list after save, or a renderer-side predicate over the open editor's text; the second would duplicate the very predicate this spec deliberately kept in one place. Attribution corrected after the implementer pushed back on the original diagnosis, which blamed the cache.
+  resolved: Took the first of the two options this entry named — a debounced re-list, not a duplicated renderer-side predicate. `saveFile()` now calls `scheduleLibraryRefresh()` on a successful write, a separate 4s debounce from autosave's own 1s one (so steady typing doesn't re-scan the whole folder every autosave, only once things go quiet).
 
 - source_spec: `_bmad-output/implementation-artifacts/spec-library-workflow-filters.md`
   summary: The filter set is now spelled in five places, and roughly 90 lines of the new test exist only to police the drift between them; one table driving chips, matching, counts and empty-state text would delete both the duplication and the guard.
@@ -137,6 +143,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-library-workflow-filters.md`
   summary: Acting on a work queue makes the open meeting's card vanish from under the user — finishing Enhance on the meeting you are reading removes it from the active `To enhance` queue mid-session.
   evidence: `renderMeetings` filters purely on `meetingMatchesFilter` (`renderer/app.js:1456-1459`), with no exemption for `activeMeetingId`. Leaving the queue is the correct outcome for the item; the card disappearing while its transcript is open in the editor is the jarring part. Keeping the active meeting pinned regardless of the filter would fix it, at the cost of a row that does not match the chip.
+  resolved: Applied verbatim — the `visible` list in `renderMeetings` now keeps `m.id === activeMeetingId` regardless of `meetingMatchesFilter`, pinned against the filter only (not the search box — typing in search still hides it, which reads as a deliberate user action rather than a job finishing out from under them).
 
 - source_spec: `_bmad-output/implementation-artifacts/spec-transcript-chrome-declutter.md`
   summary: A modal opened by ⌘N/⌘O while the ⋯ meeting menu is up renders underneath it, with the menu's click overlay still swallowing pointer events.
@@ -150,6 +157,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-transcript-chrome-declutter.md`
   summary: The marked-region reader `region()` is copy-pasted into both `test/transcript-meta.test.js` and `test/meeting-date-format.test.js`.
   evidence: Both files carry the same regex-and-assert helper. One shared two-line module under `desktop/test/` would cover both, and any third file that needs it.
+  resolved: The actual duplicate turned out to be `test/rail-sections.test.js`, not `meeting-date-format.test.js` (which never had a `region()` function, just an inline one-off regex) — the entry named the wrong second file. Factored the regex-matching core into `test/lib/find-region.js`; both `transcript-meta.test.js` and `rail-sections.test.js` now call it, keeping their own `assert.ok`/error-message wrapping (which differ slightly) at the call site.
 
 - source_spec: `_bmad-output/implementation-artifacts/spec-transcript-chrome-declutter.md`
   summary: `desktop/app.js` is an untracked, byte-identical pre-change copy of `renderer/app.js` that nothing loads.
@@ -165,6 +173,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-summary-rail-all-presets.md`
   summary: `.rail-brief` in `desktop/renderer/style.css` has had no consumer for some time.
   evidence: The deleted `brief` branch emitted `rail-brief-md`, which never had a rule at all; `.rail-brief` was already dead before this change and was left untouched to keep the diff to the work at hand.
+  resolved: Removed. `grep -rn 'rail-brief' renderer/` found only the CSS definition, no consumer.
 
 - source_spec: `_bmad-output/implementation-artifacts/spec-recordings-in-meetings-list.md`
   summary: The dedup that stops a wav getting a second card cannot see a transcript whose read failed, nor a transcript paired with more than one wav, so a legacy-stem recording can still be double-carded.
@@ -185,10 +194,12 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-recordings-in-meetings-list.md`
   summary: `document.body.dataset.recordPhase` is still written by `record.js` and cleared by `live.js`, but no CSS rule reads it any more.
   evidence: The only rule that ever did was `body[data-record-phase="recording"] .record-sidebar`, deleted with the sidebar. `grep -rn 'record-phase' desktop/renderer/` now finds the writes and the comments, no selector. Removing it touches three files for a harmless attribute, so it was left in place with its comment corrected rather than ripped out mid-review.
+  resolved: Removed from all three sites (`record.js`'s two writes, `live.js`'s clear) as a standalone cleanup — confirmed nothing reads it first.
 
 - source_spec: `_bmad-output/implementation-artifacts/spec-recordings-in-meetings-list.md`
   summary: The Record tab has no way to open the transcribe-settings screen with an empty batch, so model, language and diarization defaults are only editable once at least one recording is picked.
   evidence: `#record-sb-settings` was the only such entry point and went out with the sidebar; the remaining callers of `enterTranscribeSettings` (the import button, and the library's `sendToTranscribeSettings`) always pass a non-empty batch. Listed under this spec's `Ask First`, and the human chose to delete the sidebar entirely with that consequence stated. Re-adding an entry point to the Record idle screen closes it. Decided on 2026-09-03: a settings icon button on the Record tab that opens the transcribe-settings screen with an empty batch — not a text link, and not gated on a selection.
+  resolved: Built exactly to the recorded decision — a gear-icon `#record-btn-settings` button next to "Import audio file…" that calls `enterTranscribeSettings([])`. The screen already handled an empty batch cleanly (its own "No recordings selected" placeholder, `ts-btn-transcribe` disabled at `n === 0`); only the entry point was missing. Verified live over CDP: clicking it opens the screen with `batchCount: "0"` and the Transcribe button disabled.
 
 - source_spec: `_bmad-output/implementation-artifacts/spec-recordings-in-meetings-list.md`
   summary: The `audio` branch in `meetingMatchesFilter` and its `counts.audio` are still computed for a chip that does not exist.
@@ -217,6 +228,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-record-live-parity.md`
   summary: `record:getFolder` and its `recordApi.getFolder` bridge have no callers.
   evidence: `main.js:3281` and `preload.js:131` exist; `grep -rn 'getFolder' desktop/renderer/` finds no call. Pre-existing — the deleted "SAVE TO" row displayed a hard-coded `~/Downloads/Meet_Transcripts` string (itself wrong: recordings go to `RECORDINGS_FOLDER`, `~/Downloads/Meet_Recordings`, `main.js:12`) and never called the handler. Either wire it or drop both ends.
+  resolved: Dropped both ends, not wired — nothing in the current UI needs it, and it's a pure read with no Ask-First flag (unlike `deleteTranscript`/`deleteSummary` below, left alone for that reason). `test/renderer-globals.test.js`'s "every channel preload invokes has a handler in main" check still passes since both sides were removed together.
 
 - source_spec: `_bmad-output/implementation-artifacts/spec-recording-summary-filename-date-suffix.md`
   summary: `defaultRecordingStem`/`defaultSummaryBase` (`desktop/main.js`) have no unit test pinning their filename format, so a future edit could flip the title/timestamp order back without any test failing.
@@ -233,6 +245,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-panel-windows-theme.md`
   summary: An open floating panel keeps its theme until it is reopened — no `theme:changed` broadcast reaches the notes widget when the user flips the theme, or when the OS appearance changes under the `system` preference.
   evidence: Excluded by this spec's Never list ("no live theme-change subscription — panels read the theme at load"), and `panel-theme.css` now names the ceiling in a `ponytail:` comment. It is a real annoyance only for the notes widget, which `main.js:4335` creates once and keeps for a whole meeting; the prompt is transient. `main.js` already broadcasts over `for (const win of [notesWindow, mainWindow])`, and `app.js:4988-4990` already listens for the OS change for the main window, so both halves of the fix exist — they just are not wired to the panels.
+  resolved: Already fixed by the time this session found it — stale entry, not touched now. `ipcMain.on('theme:changed', ...)` relays to `notesWindow`, a `themeApi.notifyChanged()`/`onChanged()` preload bridge exists, `app.js`'s `applyTheme()` calls `notifyChanged()` (from both the Settings radio handler and the `lightThemeMQ` OS-appearance listener), and `notes.js` calls `themeApi.onChanged(() => window.__themeInit.apply())`. Traced end to end; the prompt window remains deliberately excluded per its own comment ("transient enough... deliberately left out of scope"), matching this entry's own read that only the notes widget mattered.
   
 - source_spec: `_bmad-output/implementation-artifacts/spec-panel-windows-theme.md`
   summary: The main window's own `uds-theme` storage access is unguarded, so the try/catch added to `theme-init.js` does not close the exposure app-wide.
@@ -264,6 +277,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-stale-calendar-prefill.md`
   summary: `state.calendarParticipants = []` after a recording stops sits inside `if (auto)` (`desktop/renderer/record/record.js:876`), so a stop too short to queue keeps the finished session's guest list.
   evidence: Pre-existing gate, not introduced here — `autoTranscribeArgs` returns `null` for a sub-second recording or a missing path, and the clear has always been in the branch that only runs when a transcribe job is actually queued. This spec moved its own `calPrefill?.refresh()` out of that branch (the title names the next WAV either way) but left the participants clear where it was rather than changing behaviour the spec did not name. Both resets belong to "the session ended".
+  resolved: Moved next to `calPrefill?.refresh()`, exactly where this entry pointed — `state.calendarParticipants = []` now runs unconditionally in `recordSaved`, before the `if (auto)` branch, so a stop too short to queue clears the guest list too.
 
 - source_spec: `_bmad-output/implementation-artifacts/spec-enhance-speaker-naming-context.md`
   summary: The speaker-naming pass sends up to 120000 characters of evidence with no regard for the configured provider's context window, and `runOllama` declares no `num_ctx`, so a small local model silently truncates the prompt instead of erroring — reinstating the very sampling bug this spec fixed, invisibly.
@@ -272,6 +286,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-enhance-speaker-naming-context.md`
   summary: A failed speaker-naming pass tells the user nothing — it only `console.warn`s and leaves the placeholders — while the proofreading pass in the same job has user-facing fail-fast text naming the likely cause ("A model with a larger context window usually fixes this").
   evidence: Verified by code trace at `desktop/main.js:2398` (warn, then continue with `namedSpeakers = 0`) against the proofreading fail-fast at `desktop/main.js:2452`. Pre-existing asymmetry, not introduced by this spec, but its consequence changed: naming now sends by far the largest prompt in the app and is the likeliest step to exhaust a context window, and the symptom a user sees — placeholders left unnamed — is indistinguishable from "the model could not work the names out", which is the exact confusion that led to this spec being written in the first place.
+  resolved: `runEnhanceJob` now computes `speakerNamingFailed` (placeholders existed, none got named) and returns it on both `ok:true` paths; the header panel's enhance status line shows ", speaker naming failed" instead of silently matching "nothing needed naming". Does not touch the underlying context-window limit itself — see the entry above (`num_ctx`/context budget), which remains open and is the more likely root cause of a naming failure worth surfacing.
 
 - source_spec: `_bmad-output/implementation-artifacts/spec-enhance-speaker-naming-context.md`
   summary: `renameParticipantsLine` replaces the participant entry a name bound to, so a wrong binding permanently destroys that person's email address — the transcript is rewritten in place with no backup.
@@ -284,7 +299,9 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-autostop-prompt-survives-mic-release.md`
   summary: An auto-stop can be followed seconds later by a spurious "Looks like a call just started" prompt when the conferencing app's input device finally goes idle.
   evidence: Same late device-state flip that caused the original bug; `micActive` has no cooldown set when an auto-stop completes (desktop/main.js triggerAutoStop path), only when the user dismisses a call prompt.
+  resolved: Both auto-stop completion paths — the 15s countdown's `setTimeout` and `prompt:stopNow` — now set `callMonitor.cooldownUntil = Date.now() + PROMPT_COOLDOWN_MS`, the same cooldown `prompt:dismiss` already used. `main.js` has no tests; verified by code trace and `node -c` only.
 
 - source_spec: none
   summary: A meeting card only shows its ⋯ menu button while that card is the selected one, so every action behind the menu is two clicks away and invisible until the user commits to a row.
   evidence: Reported by the user on 2026-09-03. The button must be visible on every meeting card in the list, selected or not.
+  resolved: `.meeting-more` is now `display: inline-flex` unconditionally in `style.css` — the `.meeting-card.active .meeting-more` rule that gated it is gone. Verified live over CDP: computed `display` is `inline-flex` with no `.active` ancestor.
