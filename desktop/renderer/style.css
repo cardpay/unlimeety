@@ -1151,6 +1151,21 @@ body.mode-record #btn-ask-ai {
     color: var(--saved);
 }
 
+/* One honest badge replacing all four artifact chips on a readFailed row —
+   text, not an icon-only square, since "which artifacts exist" cannot be
+   answered here at all. */
+.artifact-chip--error {
+    width: auto;
+    height: 18px;
+    padding: 0 6px;
+    gap: 4px;
+    opacity: 1;
+    font-size: 11px;
+    background: rgba(248, 113, 113, 0.14);
+    border-color: rgba(248, 113, 113, 0.3);
+    color: var(--danger);
+}
+
 /* Which model produced the transcript. Text, not a glyph — the whole point is
    *which* one. Tiered by weight rather than hue: the row already spends its
    colors on the artifact chips, and "accurate model vs fast model" reads fine as
