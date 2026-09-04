@@ -154,7 +154,7 @@ function saveTranscriptForTab(tabId) {
   if (data.startedAt) {
     textContent += `Recorded-At: ${new Date(data.startedAt).toISOString()}\n`;
   }
-  textContent += `Generated: ${new Date().toLocaleString()}\n`;
+  textContent += `Generated: ${new Date().toISOString()}\n`;
   if (participants.length > 0) {
     textContent += `Participants: ${participants.join(', ')}\n`;
   }

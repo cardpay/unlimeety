@@ -91,10 +91,12 @@ const byKey = (rows) => Object.fromEntries(rows.map((r) => [r.key, r.value]));
 }
 
 // ─── Dates: ISO shape only ──────────────────────────────────────────────────
-// `Generated` is written with toLocaleString() (main.js x3, the extension's
-// background.js), so its shape follows the writer's locale. Handing that to
-// new Date() either fails or silently reparses a US-looking string as a
-// different instant, and a bare "2026" would be inflated into a full timestamp.
+// `Generated` is now written with toISOString() (main.js x3, the extension's
+// background.js), but every transcript written before that change still has
+// its old toLocaleString() shape on disk — this must keep tolerating both.
+// Handing a locale string to new Date() either fails or silently reparses a
+// US-looking string as a different instant, and a bare "2026" would be
+// inflated into a full timestamp.
 {
     for (const raw of ['24.08.2026, 18:14:00', '24/08/2026, 18:14', '2026', 'whenever']) {
         const { rows } = parseTranscriptMeta(`Generated: ${raw}`);

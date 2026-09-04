@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, Tray, nativeImage, screen, dialog, ipcMain, shell, systemPreferences, clipboard, safeStorage } = require('electron');
+const { app, BrowserWindow, Menu, Tray, nativeImage, screen, dialog, ipcMain, shell, systemPreferences, clipboard, safeStorage, nativeTheme } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -328,7 +328,14 @@ function createWindow() {
                 ? path.join(__dirname, 'build', 'icon.png')
                 : path.join(__dirname, 'build', 'icon.icns'),
         titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
-        backgroundColor: '#0f0f13',
+        // Main only ever knows the OS-level scheme here — the actual `uds-theme`
+        // preference (which can override it to light/dark regardless of the OS)
+        // lives in the renderer's localStorage, unreachable before first paint.
+        // This is a best-effort pre-paint color, not the final answer: it matches
+        // 'system' exactly and gets the common case for an explicit choice too
+        // (most people who pick light/dark also run their OS the same way); the
+        // renderer repaints correctly regardless once theme-init.js runs.
+        backgroundColor: nativeTheme.shouldUseDarkColors ? '#0f0f13' : '#faf9f6',
         webPreferences: {
             preload: path.join(__dirname, 'preload.js'),
             contextIsolation: true,
@@ -2312,7 +2319,7 @@ ipcMain.handle('transcripts:create', async (_e, payload) => {
         const language = typeof payload?.language === 'string' ? payload.language.trim() : '';
 
         const headerLines = [`Meeting: ${title}`];
-        headerLines.push(`Generated: ${new Date().toLocaleString()}`);
+        headerLines.push(`Generated: ${new Date().toISOString()}`);
         if (participants.length) headerLines.push(`Participants: ${participants.join(', ')}`);
         if (language) headerLines.push(`Language: ${language}`);
         const content = headerLines.join('\n') + '\n\n' + body.replace(/\s+$/, '') + '\n';
@@ -3181,7 +3188,7 @@ ipcMain.handle('live:saveTranscript', async (_e, payload) => {
 
         const headerLines = [`Meeting: ${title}`];
         if (recordedAtIso) headerLines.push(`Recorded-At: ${recordedAtIso}`);
-        headerLines.push(`Generated: ${new Date().toLocaleString()}`);
+        headerLines.push(`Generated: ${new Date().toISOString()}`);
         // Which model produced this text. Live runs on whatever the user picked
         // for the session — usually a light one, since it has to keep up with
         // speech; the re-transcription queued below then rewrites this same file
@@ -4106,7 +4113,7 @@ async function runRecordTranscribeJob(opts, sendEvent) {
         const headerLines = [`Meeting: ${title}`];
         if (interrupted) headerLines.push('Status: PARTIAL — transcription was interrupted, re-run it for the full text');
         if (recordedAtIso) headerLines.push(`Recorded-At: ${recordedAtIso}`);
-        headerLines.push(`Generated: ${new Date().toLocaleString()}`);
+        headerLines.push(`Generated: ${new Date().toISOString()}`);
         headerLines.push(`Model: ${model}`);
         if (participants.length) headerLines.push(`Participants: ${participants.join(', ')}`);
         // WhisperKit's own answer when it was told to detect the language
