@@ -281,12 +281,6 @@
         if (recordPanel) recordPanel.classList.toggle('hidden', name !== 'record');
         document.body.classList.toggle('mode-live',   name === 'live');
         document.body.classList.toggle('mode-record', name === 'record');
-        // Clear the record-phase marker when leaving the Record tab so any
-        // record-phase-specific CSS (e.g. hidden sidebars) does not leak into
-        // other tabs.
-        if (name !== 'record') {
-            delete document.body.dataset.recordPhase;
-        }
     }
 
     openScreenSettingsBtn?.addEventListener('click', () => {
@@ -322,7 +316,7 @@
     // Rolling window of the last ~80 helper-stderr lines.
     const diagBuffer = [];
     function pushDiag(line) {
-        const stamp = new Date().toLocaleTimeString();
+        const stamp = formatClockTime(new Date());
         diagBuffer.push(`${stamp}  ${line}`);
         if (diagBuffer.length > 80) diagBuffer.shift();
         if (!diagPanel) return;

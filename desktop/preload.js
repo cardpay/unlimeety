@@ -130,7 +130,6 @@ contextBridge.exposeInMainWorld('queueApi', {
 // saved recordings. Independent of the Live namespace above.
 contextBridge.exposeInMainWorld('recordApi', {
     platformOK:         ()       => ipcRenderer.invoke('record:platformOK'),
-    getFolder:          ()       => ipcRenderer.invoke('record:getFolder'),
     start:              (opts)   => ipcRenderer.invoke('record:start', opts),
     stop:               ()       => ipcRenderer.invoke('record:stop'),
     openScreenSettings: ()       => ipcRenderer.invoke('record:openScreenSettings'),

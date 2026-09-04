@@ -39,6 +39,7 @@
     const titleInput        = $('record-title');
     const startBtn          = $('record-btn-start');
     const importBtn         = $('record-btn-import');
+    const settingsBtn       = $('record-btn-settings');
     const setupError        = $('record-setup-error');
     const openScreenSettingsBtn = $('record-open-screen-settings');
     const micStatusEl       = $('record-mic-status');
@@ -325,10 +326,6 @@
     // then — wrong for anyone whose persisted language is not Russian.
     paintLangSegs([tsLangSeg, ...langSegs], state.batchSettings.language);
 
-    // Phase marker on <body>, for phase-specific styling. live.js clears it
-    // when the user leaves this tab.
-    document.body.dataset.recordPhase = state.phase;
-
     // ─── Platform gating ─────────────────────────────────────────────────
     (async () => {
         const ok = await api.platformOK();
@@ -388,7 +385,6 @@
     // ─── Show/hide sections ──────────────────────────────────────────────
     function showSection(name) {
         state.phase = name;
-        document.body.dataset.recordPhase = name;
         setupSection.classList.toggle('hidden',      name !== 'idle');
         recordingSection.classList.toggle('hidden',  name !== 'recording');
         tsSection.classList.toggle('hidden',         name !== 'transcribeSettings');
@@ -482,6 +478,15 @@
 
         state.outputPath = res.filePath;
         enterTranscribeSettings([res.filePath], { size: res.size || 0 });
+    });
+
+    // ─── Open transcribe settings with nothing queued ────────────────────
+    // The only way to reach model/language/diarization defaults without
+    // picking a recording first — the sidebar's own settings entry point went
+    // out with the sidebar.
+    settingsBtn?.addEventListener('click', () => {
+        state.outputPath = null;
+        enterTranscribeSettings([]);
     });
 
     // ─── Start recording ─────────────────────────────────────────────────
@@ -884,11 +889,12 @@
                 // too short to queue (autoTranscribeArgs → null) ends a session
                 // just the same.
                 calPrefill?.refresh();
+                // Calendar attendees belong to the session that just ended, queued
+                // or not — a stop too short to queue is still "the session ended".
+                // Consumed here, or recording #2 inherits recording #1's guest
+                // list into an unattended transcript header.
+                state.calendarParticipants = [];
                 if (auto) {
-                    // Calendar attendees belong to the session that just ended.
-                    // Consumed here, or recording #2 inherits recording #1's
-                    // guest list into an unattended transcript header.
-                    state.calendarParticipants = [];
                     const failed = (message) => {
                         setupError.textContent = message || 'Could not start transcription.';
                         setupError.classList.remove('hidden');
@@ -1438,7 +1444,7 @@
             : baseTitle;
     }
     function formatRelativeWhen(epochMs) {
-        const time = new Date(epochMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const time = formatClockTime(new Date(epochMs));
         const bucket = formatRelativeDay(epochMs);
         const word = bucket === 'today' ? 'today' : bucket === 'earlier' ? 'earlier' : 'older';
         return `${word} · ${time}`;
