@@ -1674,7 +1674,7 @@ function markActiveChip(filter) {
 function computeFilterCounts(list) {
   const counts = { all: list.length, audio: 0, transcribe: 0, retranscribe: 0, enhance: 0, summarize: 0 };
   for (const m of list) {
-    if (m.hasAudio) counts.audio++;
+    if (meetingMatchesFilter(m, "audio")) counts.audio++;
     if (meetingMatchesFilter(m, "transcribe")) counts.transcribe++;
     if (meetingMatchesFilter(m, "retranscribe")) counts.retranscribe++;
     if (meetingMatchesFilter(m, "enhance")) counts.enhance++;

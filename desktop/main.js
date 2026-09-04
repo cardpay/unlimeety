@@ -4603,11 +4603,35 @@ async function currentCalendarTitle() {
             e.type === 'calendarEvents' ? { ok: true, events: Array.isArray(e.events) ? e.events : [] } : null);
         if (!res.ok) return '';
         const now = Date.now();
-        const hit = res.events.find((ev) => {
+        // Same two-phase shape as renderer/calendar-picker.js's currentEvent()
+        // — not the same code (main has no access to renderer modules), but
+        // it must stay the same shape: an all-day/multi-day entry ("PTO",
+        // "Sprint 42") is "ongoing" from midnight to midnight and would
+        // otherwise beat the real meeting to the pick, an untitled event
+        // can't prefill anything, and among several *ongoing* overlaps the
+        // shortest wins (a multi-hour block must not outrank the actual call
+        // happening inside it) — but an ongoing event always outranks a
+        // merely-upcoming one regardless of duration, and among upcoming
+        // candidates the EARLIEST start wins, not the shortest one. Merging
+        // both phases into one predicate + one tie-break would silently
+        // prefer a short meeting starting later over a long one starting
+        // sooner. Check both if this ever changes.
+        const MAX_MEETING_MS = 6 * 3600 * 1000;
+        let ongoing = null, ongoingLen = Infinity;
+        let next = null;
+        for (const ev of res.events) {
             const s = Date.parse(ev.start), end = Date.parse(ev.end);
-            return Number.isFinite(s) && Number.isFinite(end) && s <= now + 5 * 60000 && end >= now;
-        });
-        return hit?.title ? String(hit.title) : '';
+            if (!Number.isFinite(s) || !Number.isFinite(end)) continue;
+            if (end - s > MAX_MEETING_MS) continue;
+            if (!String(ev.title || '').trim()) continue;
+            if (s <= now && now <= end) {
+                if (!ongoing || end - s < ongoingLen) { ongoing = ev; ongoingLen = end - s; }
+            } else if (s > now && s <= now + 5 * 60000 && (!next || s < Date.parse(next.start))) {
+                next = ev;
+            }
+        }
+        const hit = ongoing || next;
+        return hit ? String(hit.title) : '';
     } catch {
         return '';
     }

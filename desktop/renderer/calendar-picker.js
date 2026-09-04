@@ -105,6 +105,10 @@
   // relevant. Never an event that already ended: the old fallback returned
   // index 0 in that case, i.e. the OLDEST event in the window, which is how a
   // meeting that had already finished ended up pre-selected.
+  // main.js's currentCalendarTitle() independently reimplements this same
+  // shape (all-day cap, non-empty title, shortest-overlap-wins) for the
+  // auto-record prefill, since main has no access to this module — keep both
+  // in sync if the picking logic here ever changes.
   function currentEvent(events) {
     const now = Date.now();
     let ongoing = null;

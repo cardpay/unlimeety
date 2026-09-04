@@ -99,6 +99,11 @@
 
   // Ongoing event (now within [start,end]); otherwise the next upcoming one.
   // maxUpcomingMin caps how far ahead an upcoming event counts (null = no cap).
+  // Unlike calendar-picker.js's currentEvent() and main.js's
+  // currentCalendarTitle(), this has no duration cap or title check, so an
+  // all-day/multi-day entry can still win here — a known, separate gap, not
+  // yet ported over (this feeds the "smart banner" live recommendation, a
+  // different decision than a one-time title prefill).
   function pickEvent(events, maxUpcomingMin) {
     const list = Array.isArray(events) ? events : [];
     const now = Date.now();
