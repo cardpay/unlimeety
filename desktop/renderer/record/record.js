@@ -39,6 +39,7 @@
     const titleInput        = $('record-title');
     const startBtn          = $('record-btn-start');
     const importBtn         = $('record-btn-import');
+    const settingsBtn       = $('record-btn-settings');
     const setupError        = $('record-setup-error');
     const openScreenSettingsBtn = $('record-open-screen-settings');
     const micStatusEl       = $('record-mic-status');
@@ -477,6 +478,15 @@
 
         state.outputPath = res.filePath;
         enterTranscribeSettings([res.filePath], { size: res.size || 0 });
+    });
+
+    // ─── Open transcribe settings with nothing queued ────────────────────
+    // The only way to reach model/language/diarization defaults without
+    // picking a recording first — the sidebar's own settings entry point went
+    // out with the sidebar.
+    settingsBtn?.addEventListener('click', () => {
+        state.outputPath = null;
+        enterTranscribeSettings([]);
     });
 
     // ─── Start recording ─────────────────────────────────────────────────
