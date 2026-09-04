@@ -148,7 +148,9 @@ const SLICED = [
     'highlightSnippet', 'buildMeetingCard',
 ];
 vm.runInNewContext(
-    [sliceConst(appSrc, 'FILTER_EMPTY_TEXT'), sliceConst(appSrc, 'STATUS_LABELS'),
+    // FILTERS first: FILTER_EMPTY_TEXT's own initializer reads it, and
+    // meetingMatchesFilter reads it at call time.
+    [sliceConst(appSrc, 'FILTERS'), sliceConst(appSrc, 'FILTER_EMPTY_TEXT'), sliceConst(appSrc, 'STATUS_LABELS'),
      ...SLICED.map((n) => sliceFunction(appSrc, n, 'renderer/app.js'))]
         .join('\n'),
     sandbox,
@@ -307,6 +309,10 @@ for (const q of ['retranscribe', 'enhance', 'summarize']) {
     assert.strictEqual(meetingMatchesFilter(readFailed, q), false,
         `read-failed meeting must not enter the ${q} queue`);
 }
+// The status pill must not present the fabricated defaults as findings —
+// `failed` was already a defined pill with nothing driving it.
+assert.strictEqual(sandbox.deriveStatus(readFailed), 'failed',
+    'a read failure must not derive as "transcribed" from its fabricated hasTranscript default');
 
 // Counts come off the whole list, and an exhausted queue reads 0 rather than
 // falling back to the total.
@@ -555,6 +561,15 @@ assert.ok(/checked/.test(buildMeetingCard(asCard(recording({})))._html),
     'a selected recording must repaint as checked');
 sandbox.selectedRecordings.clear();
 
+// A read-failed row: one honest badge, never the four fabricated artifact
+// chips (hasAudio/hasTranscript/enhancedAt/hasSummary are all defaults here,
+// not findings).
+const failedCard = cardHtml({ readFailed: true, status: 'failed', hasAudio: false, hasSummary: false });
+assert.ok(/artifact-chip--error/.test(failedCard) && /Couldn't read/.test(failedCard),
+    'a read-failed card shows the error badge');
+assert.ok(!/data-kind="audio"/.test(failedCard) && !/data-kind="transcript"/.test(failedCard),
+    'a read-failed card must not render the fabricated artifact chips');
+
 // Size stands in for the duration record:list does not report. Below a megabyte
 // the MB form read "0.0 MB", which is what an empty file looks like.
 assert.strictEqual(formatMeetingSize(0), '');
@@ -680,25 +695,20 @@ for (const chip of chipTags) {
     assert.ok(chip.count === chip.filter, `chip '${chip.filter}' has no matching .filter-count span`);
 }
 
-const matchesSrc = sliceFunction(appSrc, 'meetingMatchesFilter', 'renderer/app.js');
-for (const chip of chips) {
-    if (chip === 'all') continue;
-    assert.ok(matchesSrc.includes(`filter === "${chip}"`),
-        `chip '${chip}' has no branch in meetingMatchesFilter — it would silently show everything`);
-}
-
-// Anchored to the count loop itself, so renaming the loop variable or moving the
-// list elsewhere fails here rather than silently stopping the check.
-const kindList = /for \(const kind of \[([^\]]+)\]\)\s*\{\s*(?:\/\/[^\n]*\n\s*)*const el = document\.querySelector\(`\.filter-count/
-    .exec(appSrc);
-assert.ok(kindList, "renderMeetings' .filter-count kind list could not be found");
-const kinds = kindList[1].split(',').map((s) => s.trim().replace(/^"|"$/g, ''));
-// Equal as sets, both directions: a kind with no chip paints nothing, and a chip
-// with no kind keeps the placeholder 0 forever — the mutation that killed the
-// To enhance count while the suite stayed green.
+// meetingMatchesFilter, the count-loop in renderMeetings and FILTER_EMPTY_TEXT
+// all derive from one FILTERS table now (see renderer/app.js), so there is
+// exactly one remaining place drift can enter: FILTERS itself vs the chip row
+// in index.html. Checking that directly is both simpler and stronger than
+// grepping for a per-filter branch that no longer exists.
 assert.deepStrictEqual(
-    [...kinds].sort(), [...chips].sort(),
-    "the chip row and renderMeetings' count list must name the same filters");
+    [...Object.keys(sandbox.FILTERS)].sort(), [...chips.filter((c) => c !== 'all')].sort(),
+    'FILTERS must have exactly one entry per non-"all" chip in index.html — a mismatch either shows ' +
+    'everything for a chip with no entry, or leaves a table entry unreachable');
+// Confirms the count-loop still derives its kind list from FILTERS rather than
+// a separately-typed literal, which is what made the two driftable in the
+// first place.
+assert.ok(/for \(const kind of \["all", \.\.\.Object\.keys\(FILTERS\)\]\)/.test(appSrc),
+    "renderMeetings' count-loop must derive its kind list from FILTERS, not a separate literal");
 // `?? 0` in that loop turns a missing counter into a permanent, silent 0, so the
 // counts object has to cover every chip on its own.
 const counted = computeFilterCounts([meeting({})]);
