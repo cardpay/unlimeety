@@ -187,7 +187,7 @@
 
 - source_spec: `_bmad-output/implementation-artifacts/spec-recordings-in-meetings-list.md`
   summary: The Record tab has no way to open the transcribe-settings screen with an empty batch, so model, language and diarization defaults are only editable once at least one recording is picked.
-  evidence: `#record-sb-settings` was the only such entry point and went out with the sidebar; the remaining callers of `enterTranscribeSettings` (the import button, and the library's `sendToTranscribeSettings`) always pass a non-empty batch. Listed under this spec's `Ask First`, and the human chose to delete the sidebar entirely with that consequence stated. Re-adding a `Settings…` link to the Record idle screen would close it.
+  evidence: `#record-sb-settings` was the only such entry point and went out with the sidebar; the remaining callers of `enterTranscribeSettings` (the import button, and the library's `sendToTranscribeSettings`) always pass a non-empty batch. Listed under this spec's `Ask First`, and the human chose to delete the sidebar entirely with that consequence stated. Re-adding an entry point to the Record idle screen closes it. Decided on 2026-09-03: a settings icon button on the Record tab that opens the transcribe-settings screen with an empty batch — not a text link, and not gated on a selection.
 
 - source_spec: `_bmad-output/implementation-artifacts/spec-recordings-in-meetings-list.md`
   summary: The `audio` branch in `meetingMatchesFilter` and its `counts.audio` are still computed for a chip that does not exist.
@@ -201,6 +201,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-record-live-parity.md`
   summary: Recordings that end without a live Record renderer — a quit during Stop & save, or a helper-crash salvage — are never auto-queued, because the submit lives in the renderer.
   evidence: `record:stop` (`main.js:3352`), the `proc.on('exit')` salvage (`main.js:3329`) and the `before-quit` SIGTERM all produce a transcribable wav, but the queueing decision is taken in `record.js`'s `recordSaved` handler, which needs the renderer alive and the language it holds. Live does the equivalent in main (`main.js:3064`) because main already knows its language. Degrades gracefully — the wav still appears under "To transcribe" in the Meetings list — so it is a gap, not a loss. Closing it means main owning the language (a persisted setting or a renderer-pushed value), which is a design change beyond this story.
+  resolved: Closed as intended behaviour — the user reviewed it on 2026-09-03 and accepted the degrade: the wav still lands under "To transcribe" in the Meetings list, which is enough for the salvage and quit paths. Not to be re-raised unless the queueing decision moves into main for other reasons.
 
 - source_spec: `_bmad-output/implementation-artifacts/spec-record-live-parity.md`
   summary: Neither setup screen ever shows real permission state, though main can read it.
@@ -278,6 +279,11 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-enhance-speaker-naming-context.md`
   summary: A speaker can be named with the right given name and a stranger's surname when both come from one `initial.surname` participant address, because an initial cannot distinguish two given names that share it.
   evidence: Observed live on `Unified onboarding 15-04 01-09-26.txt` and confirmed by the user, who is the injured party: the pass answered `Валерий Шило` for `Iota`, taking the surname from `v.shilo@unlimit.com` — that address belongs to Виктор Шило, while Валерий is the recorder, whose own address is absent from the `Participants:` line entirely. The given name is not invented (the transcript really does address that speaker as "Валерий"); only the pairing is. The summarize pass makes the identical pairing error on the same file, so this is a model-level judgement rather than a gap in the attestation code, and no mechanical rule separates `Валерий Шило` from `Виктор Шило` against `v.shilo@`. The user was offered the safe alternative (write only the given name unless the surname is also spoken) and explicitly accepted the risk instead — "с этим можно жить, норм ошибка" — so this is a recorded ceiling, not an open bug. Revisit only if the participant list ever carries full given names, or if a speaker's turns can be correlated with the address that names them.
+
 - source_spec: `_bmad-output/implementation-artifacts/spec-autostop-prompt-survives-mic-release.md`
   summary: An auto-stop can be followed seconds later by a spurious "Looks like a call just started" prompt when the conferencing app's input device finally goes idle.
   evidence: Same late device-state flip that caused the original bug; `micActive` has no cooldown set when an auto-stop completes (desktop/main.js triggerAutoStop path), only when the user dismisses a call prompt.
+
+- source_spec: none
+  summary: A meeting card only shows its ⋯ menu button while that card is the selected one, so every action behind the menu is two clicks away and invisible until the user commits to a row.
+  evidence: Reported by the user on 2026-09-03. The button must be visible on every meeting card in the list, selected or not.
