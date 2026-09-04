@@ -1698,9 +1698,12 @@ function renderMeetings() {
 
   renderSelectionBar();
 
-  // Apply filter + search.
+  // Apply filter + search. The open meeting stays pinned against the filter
+  // (not the search box) — finishing Enhance on the meeting you are reading
+  // should not make its card vanish out from under you mid-session.
   const visible = meetings.filter(
-    (m) => meetingMatchesFilter(m, activeFilter) && meetingMatchesSearch(m, searchQuery),
+    (m) => meetingMatchesSearch(m, searchQuery)
+      && (m.id === activeMeetingId || meetingMatchesFilter(m, activeFilter)),
   );
 
   if (!visible.length) {
@@ -4381,7 +4384,11 @@ function jobStatusText(job) {
   if (job.type === "enhance") {
     const named = job.result?.namedSpeakers
       ? `, ${job.result.namedSpeakers} speaker${job.result.namedSpeakers > 1 ? "s" : ""} named`
-      : "";
+      // Distinct from silence: placeholders were left unnamed on purpose,
+      // not indistinguishable from "nothing needed naming".
+      : job.result?.speakerNamingFailed
+        ? ", speaker naming failed"
+        : "";
     return (job.result?.changed === false ? "Nothing to fix" : "Enhanced") + named;
   }
   if (job.type === "summarize") return "Summary generated";

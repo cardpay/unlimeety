@@ -68,6 +68,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-universal-job-queue.md`
   summary: The Record tab's own recordings context menu (`renderer/record/record.js`'s `openRecordingMenu`) still has no Enhance action — only the library's meeting menu (`renderer/app.js`'s `openMeetingMenu`) does, exactly as CLAUDE.md's own "Known pitfalls" note already flags.
   evidence: Confirmed by code trace while implementing `spec-universal-job-queue.md` — both menus were touched (their transcribe/enhance-based item-disabling now reads the job queue instead of local booleans), but neither gained or lost any menu item. `openRecordingMenu`'s item list (Rename…, (Re-)Transcribe…, Delete audio/transcript/summary) still has no Enhance entry. Out of scope for this spec; still open.
+  resolved: Moot — `spec-recordings-in-meetings-list.md` deleted the Record tab's own recordings sidebar and `openRecordingMenu` with it (`grep -rn openRecordingMenu` now finds nothing); recordings without a transcript are ordinary rows in the Meetings list, and every action on them goes through the one `openMeetingMenu`, which already has Enhance. There is no second menu left to lack it.
 
 - source_spec: `_bmad-output/implementation-artifacts/spec-meeting-card-date-format.md`
   summary: The Record and Live tabs still format timestamps with their own `toLocaleTimeString` calls and ignore the new date-order / clock preferences.
