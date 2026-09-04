@@ -197,4 +197,49 @@ assert.deepStrictEqual(
     + '— left side is what it declares, right side is what they reference',
 );
 
+// ─── 4. panel-theme.css's light values match theme-light.css's own ──────────
+// panel-theme.css's own header comment says its light block borrows these
+// values from theme-light.css — because the panels are locked-down `file://`
+// documents that cannot link theme-light.css directly (see SHARED's header),
+// the values are copied as literals instead, with nothing enforcing the
+// mapping. Re-tune a token in theme-light.css and this is what would silently
+// leave the panels on the stale color (deferred-work.md, "panel-theme.css
+// copies its light values ... with nothing enforcing the mapping").
+//
+// Not every --panel-* light value has a theme-light.css counterpart: some are
+// panel-specific (--panel-bg is a plain white card, not a named token) and one
+// is a documented deliberate deviation (--panel-focus-border uses a solid
+// --accent, not the alpha --border-focus, per its own comment above) — both
+// are correctly absent from this map, not omissions.
+const themeLight = decls(block(
+    stripComments(read('theme-light.css')), /:root\s*\[\s*data-theme\s*=\s*"light"\s*\]\s*\{/,
+    'theme-light.css :root[data-theme="light"]',
+));
+const PANEL_TO_THEME_LIGHT = {
+    '--panel-border': '--border-strong',
+    '--panel-title': '--text-primary',
+    '--panel-muted': '--text-secondary',
+    '--panel-hover': '--bg-hover',
+    '--panel-primary': '--rec',
+    '--panel-primary-hover': '--danger',
+    '--panel-primary-fg': '--accent-fg',
+    '--panel-ghost-text': '--text-secondary',
+    '--panel-ghost-border': '--border-strong',
+    '--panel-row-border': '--border',
+    '--panel-note-time': '--text-secondary',
+    '--panel-note-text': '--text-primary',
+    '--panel-input-bg': '--bg-elevated',
+    '--panel-input-border': '--border-strong',
+    '--panel-dim': '--text-muted',
+};
+for (const [panelProp, themeProp] of Object.entries(PANEL_TO_THEME_LIGHT)) {
+    assert.ok(themeLight.has(themeProp),
+        `theme-light.css no longer declares \`${themeProp}\` — ${SHARED}'s \`${panelProp}\` `
+        + 'has nothing to be checked against; update this map if the token was renamed');
+    assert.strictEqual(norm(light.get(panelProp)), norm(themeLight.get(themeProp)),
+        `${SHARED}'s \`${panelProp}\` (${light.get(panelProp)}) has drifted from theme-light.css's `
+        + `\`${themeProp}\` (${themeLight.get(themeProp)}) — re-copy the value, or update both `
+        + 'together next time.');
+}
+
 console.log('panel-theme: all checks passed');
