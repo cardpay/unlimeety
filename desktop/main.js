@@ -783,9 +783,20 @@ function meetingDateParts(transcriptPath, mtimeMs) {
     return dateParts(mtimeMs);
 }
 
+// Dotted — kept only for the legacy lookups below (dateFirstSummaryBase,
+// titleFirstDottedSummaryBase), which reconstruct exactly what earlier writer
+// shapes put on disk. The current writer (defaultSummaryBase) uses the dashed
+// formatter next to it instead.
 function formatDateDdMmYy(transcriptPath, mtimeMs) {
     const { y, mo, d } = meetingDateParts(transcriptPath, mtimeMs);
     return `${d}.${mo}.${y.slice(-2)}`;
+}
+
+// Matches recordingTimestamp()'s date portion — the two were dot vs dash for
+// no reason and sat visually apart for a recording and its own summary.
+function formatDateDashedYy(transcriptPath, mtimeMs) {
+    const { y, mo, d } = meetingDateParts(transcriptPath, mtimeMs);
+    return `${d}-${mo}-${y.slice(-2)}`;
 }
 
 function legacySummaryBase(transcriptPath) {
@@ -793,6 +804,17 @@ function legacySummaryBase(transcriptPath) {
 }
 
 function defaultSummaryBase(transcriptPath, info, mtimeMs) {
+    const rawTitle = info?.title || legacySummaryBase(transcriptPath);
+    const shortName = sanitizeFilenameChars(stripMeetPrefix(rawTitle));
+    if (!shortName) return legacySummaryBase(transcriptPath);
+    return `${shortName} ${formatDateDashedYy(transcriptPath, mtimeMs)}`;
+}
+
+// Summaries written between the date-suffix reorder and the dot→dash swap
+// used this title-first + dotted shape — exactly what defaultSummaryBase used
+// to produce. Kept only so findExistingSummaryPath can still locate those
+// files; new summaries are never written this way.
+function titleFirstDottedSummaryBase(transcriptPath, info, mtimeMs) {
     const rawTitle = info?.title || legacySummaryBase(transcriptPath);
     const shortName = sanitizeFilenameChars(stripMeetPrefix(rawTitle));
     if (!shortName) return legacySummaryBase(transcriptPath);
@@ -869,6 +891,7 @@ function findExistingSummaryPath(transcriptPath, folderOverride) {
     if (safeOverride) candidates.push(path.join(dir, safeOverride + '.summary.md'));
     const { info, mtimeMs } = readTranscriptInfoSync(transcriptPath);
     candidates.push(path.join(dir, defaultSummaryBase(transcriptPath, info, mtimeMs) + '.summary.md'));
+    candidates.push(path.join(dir, titleFirstDottedSummaryBase(transcriptPath, info, mtimeMs) + '.summary.md'));
     candidates.push(path.join(dir, dateFirstSummaryBase(transcriptPath, info, mtimeMs) + '.summary.md'));
     candidates.push(path.join(dir, legacySummaryBase(transcriptPath) + '.summary.md'));
     for (const p of candidates) {

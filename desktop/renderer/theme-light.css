@@ -53,7 +53,10 @@
     /* Text — warm near-black ramp */
     --text-primary: #20201c;
     --text-secondary: #5a574f;
-    --text-muted: #837f74;
+    /* Was #837f74 (~4.0:1 on --bg-base) — under the 4.5:1 AA floor. This darker
+       step clears it with headroom: 5.36:1 on --bg-base, 4.94:1 on
+       --bg-elevated (the two surfaces it actually sits on). */
+    --text-muted: #6b675c;
 
     /* Status — darkened to 600-level so they pass AA on light surfaces */
     --dirty: #c27803;        /* warning-600 */

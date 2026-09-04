@@ -504,6 +504,18 @@ function displaySpeaker(name, label) {
     return `${name} (${label})`;
 }
 
+/// Same written form, plus the address it was bound from (when known), kept
+/// rather than discarded — a wrong binding then only mispairs a name next to
+/// a still-recoverable address instead of destroying it. `address` is looked
+/// up by label (see addressFor in renameParticipantsLine below), not read off
+/// whichever raw entry triggered this call: the same person can appear twice
+/// in Participants: (the placeholder listed verbatim AND their address), and
+/// both must annotate identically or the dedup below stops collapsing them.
+function displaySpeakerAnnotated(name, label, address) {
+    const display = displaySpeaker(name, label);
+    return address ? `${display} <${address}>` : display;
+}
+
 /// Mechanical: only the speaker part of a marker changes, and only for labels
 /// the map resolved.
 function renameSpeakers(blocks, map) {
@@ -521,11 +533,13 @@ function renameSpeakers(blocks, map) {
 /// says "Beta" is a transcript that contradicts itself.
 ///
 /// Two entries can be the same person — the placeholder diarization produced and
-/// the address the calendar listed. Both become the same `Name (Label)` string
-/// and the dedupe below collapses them, so the address a name was read off is
-/// replaced by that name rather than left standing beside it. `body` is what
-/// says which parts were spoken, and therefore which entry a name leaned on; a
-/// caller with no body still gets the placeholder rewrite.
+/// the address the calendar listed. Both become the same `Name (Label) <address>`
+/// string and the dedupe below collapses them into one. The address is kept,
+/// annotated rather than replaced outright: a wrong binding then only mispairs
+/// a name next to a still-recoverable address instead of destroying it. `body`
+/// is what says which parts were spoken, and therefore which entry a name
+/// leaned on; a caller with no body still gets the placeholder rewrite, with
+/// no address to annotate.
 function renameParticipantsLine(header, map, body = '') {
     if (!map || !map.size) return header;
     return String(header || '').split('\n').map((line) => {
@@ -539,12 +553,22 @@ function renameParticipantsLine(header, map, body = '') {
             const { entry } = attestation(name, body, entries);
             if (entry && !bound.has(entry)) bound.set(entry, label);
         }
+        // label → the one address-shaped entry bound to it, so every entry
+        // resolving to the same label (the placeholder listed verbatim AND its
+        // address, when both are in the header) annotates identically — not
+        // just whichever entry happened to trigger the lookup.
+        const addressFor = new Map();
+        for (const entry of entries) {
+            if (!/@/.test(entry)) continue;
+            const label = bound.get(entry);
+            if (label && !addressFor.has(label)) addressFor.set(label, entry);
+        }
         const seen = new Set();
         const names = entries
             .map((entry) => {
-                if (map.has(entry)) return displaySpeaker(map.get(entry), entry);
+                if (map.has(entry)) return displaySpeakerAnnotated(map.get(entry), entry, addressFor.get(entry));
                 const label = bound.get(entry);
-                return label ? displaySpeaker(map.get(label), label) : entry;
+                return label ? displaySpeakerAnnotated(map.get(label), label, addressFor.get(label)) : entry;
             })
             .filter((entry) => {
                 const key = entry.toLowerCase();

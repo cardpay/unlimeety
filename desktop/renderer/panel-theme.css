@@ -89,5 +89,5 @@
        0.55 alpha lands near 2:1, under the 3:1 non-text minimum, where dark
        had a solid #5a5aef. */
     --panel-focus-border: #6b45e8;
-    --panel-dim: #837f74;
+    --panel-dim: #6b675c; /* theme-light.css's --text-muted, re-tuned for AA */
 }
