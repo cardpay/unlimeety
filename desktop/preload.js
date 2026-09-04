@@ -138,8 +138,6 @@ contextBridge.exposeInMainWorld('recordApi', {
     watch:              ()       => ipcRenderer.invoke('record:watch'),
     delete:             (p)      => ipcRenderer.invoke('record:delete', p),
     deleteMany:         (paths)  => ipcRenderer.invoke('record:deleteMany', paths),
-    deleteTranscript:   (p)      => ipcRenderer.invoke('record:deleteTranscript', p),
-    deleteSummary:      (p)      => ipcRenderer.invoke('record:deleteSummary', p),
     rename:             (p, t)   => ipcRenderer.invoke('record:rename', p, t),
     showInFinder:       (p)      => ipcRenderer.invoke('record:showInFinder', p),
     pickAudioFile:      ()       => ipcRenderer.invoke('record:pickAudioFile'),
