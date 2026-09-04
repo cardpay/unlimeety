@@ -889,11 +889,12 @@
                 // too short to queue (autoTranscribeArgs → null) ends a session
                 // just the same.
                 calPrefill?.refresh();
+                // Calendar attendees belong to the session that just ended, queued
+                // or not — a stop too short to queue is still "the session ended".
+                // Consumed here, or recording #2 inherits recording #1's guest
+                // list into an unattended transcript header.
+                state.calendarParticipants = [];
                 if (auto) {
-                    // Calendar attendees belong to the session that just ended.
-                    // Consumed here, or recording #2 inherits recording #1's
-                    // guest list into an unattended transcript header.
-                    state.calendarParticipants = [];
                     const failed = (message) => {
                         setupError.textContent = message || 'Could not start transcription.';
                         setupError.classList.remove('hidden');
