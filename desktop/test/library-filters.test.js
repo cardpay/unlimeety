@@ -165,7 +165,7 @@ const {
 // gates on it, so a fixture without it models nothing that exists on disk.
 const meeting = (over) => ({
     hasAudio: false, hasTranscript: true, hasSummary: false, hasSpokenTurns: false,
-    model: null, enhancedAt: null, enhanceAttemptedAt: null, readFailed: false, ...over,
+    model: null, enhancedAt: null, enhanceAttemptedAt: null, interrupted: false, readFailed: false, ...over,
 });
 
 // An un-transcribed recording. Every queue flag is false as a finding, not as a
@@ -216,6 +216,14 @@ assert.strictEqual(
 assert.strictEqual(
     meetingMatchesFilter(meeting({ model: null, hasAudio: true }), 'retranscribe'),
     false, 'unknown model is not evidence of a weak model');
+// Interrupted overrides modelWorthRedoing: incomplete text is worth re-running
+// even from the best model — large-v3 proper would otherwise never qualify.
+assert.strictEqual(
+    meetingMatchesFilter(meeting({ model: 'openai_whisper-large-v3', hasAudio: true, interrupted: true }), 'retranscribe'),
+    true, 'a partial large-v3 transcript is still the clearest re-transcribe candidate there is');
+assert.strictEqual(
+    meetingMatchesFilter(meeting({ model: 'openai_whisper-large-v3', hasAudio: false, interrupted: true }), 'retranscribe'),
+    false, 'interrupted does not bypass the hasAudio gate');
 // The in-flight guard checks audioPath (the transcribe job's own key), not id.
 sandbox.activeJobFor = (type, fp) => (type === 'transcribe' && fp === '/r/busy.wav' ? { id: 'j' } : null);
 assert.strictEqual(
@@ -262,10 +270,18 @@ assert.strictEqual(
     meetingMatchesFilter(meeting({ enhancedAt: null, hasSpokenTurns: true, id: '/t/busy.txt' }), 'enhance'),
     false, 'already being enhanced — must not stay in the queue too');
 sandbox.activeJobFor = () => null;
+// A partial's text is about to be replaced by the full re-transcription —
+// proofreading it now is wasted work.
+assert.strictEqual(
+    meetingMatchesFilter(meeting({ enhancedAt: null, hasSpokenTurns: true, interrupted: true }), 'enhance'),
+    false, 'an interrupted transcript must not enter To enhance');
 
 // To summarize
 assert.strictEqual(meetingMatchesFilter(meeting({ hasSummary: false }), 'summarize'), true);
 assert.strictEqual(meetingMatchesFilter(meeting({ hasSummary: true }), 'summarize'), false);
+assert.strictEqual(
+    meetingMatchesFilter(meeting({ hasSummary: false, interrupted: true }), 'summarize'),
+    false, 'an interrupted transcript must not enter To summarize either');
 sandbox.activeJobFor = (type, fp) => (type === 'summarize' && fp === '/t/busy.txt' ? { id: 'j' } : null);
 assert.strictEqual(
     meetingMatchesFilter(meeting({ hasSummary: false, id: '/t/busy.txt' }), 'summarize'),
@@ -794,5 +810,11 @@ assert.strictEqual(attempted.enhanceAttemptedAt, '2026-08-27T10:00:00.000Z',
     'the full timestamp must survive — a slice() length one off from the key would truncate it');
 const notAttempted = parseBox.parseTranscriptHeaderMain('Meeting: x\nEnhanced: 2026-08-27T10:00:00.000Z\n');
 assert.strictEqual(notAttempted.enhanceAttemptedAt, null, 'absent by default, not a guess');
+const partial = parseBox.parseTranscriptHeaderMain(
+    'Meeting: x\nStatus: PARTIAL — transcription was interrupted, re-run it for the full text\n',
+);
+assert.strictEqual(partial.interrupted, true, 'the only Status: value ever written must parse to interrupted');
+const complete = parseBox.parseTranscriptHeaderMain('Meeting: x\nGenerated: 2026-08-27T10:00:00.000Z\n');
+assert.strictEqual(complete.interrupted, false, 'no Status: line means not interrupted, not a guess');
 
 console.log('library-filters: all checks passed');
