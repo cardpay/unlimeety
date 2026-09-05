@@ -997,7 +997,7 @@ ipcMain.handle('summary:save', (_e, transcriptPath, text, folder) => {
     }
     try {
         const filePath = summaryFilePath(transcriptPath, folder || null);
-        fs.writeFileSync(filePath, text, 'utf-8');
+        writeFileAtomic(filePath, text);
         registerReadablePath(filePath); // summary may live outside managed folders
         return { ok: true, filePath, warning: frontmatterWarning(text) };
     } catch (err) {
@@ -1015,7 +1015,7 @@ ipcMain.handle('summary:overwrite', (_e, transcriptPath, text, folder) => {
     try {
         const filePath = findExistingSummaryPath(transcriptPath, folder || null)
             || summaryFilePath(transcriptPath, folder || null);
-        fs.writeFileSync(filePath, text, 'utf-8');
+        writeFileAtomic(filePath, text);
         registerReadablePath(filePath); // summary may live outside managed folders
         return { ok: true, filePath, warning: frontmatterWarning(text) };
     } catch (err) {
@@ -1902,6 +1902,21 @@ function setHeaderLine(content, key, value) {
     return content.replace(new RegExp(`^${key}: .*$`, 'm'), () => `${key}: ${value}`);
 }
 
+// Sanitizes a user-supplied value (title, participant name) before it goes
+// into a `Key: value` header line. Strips control/null bytes — including the
+// C1 range (\x80-\x9f), which covers NEL (U+0085): plain \s doesn't match it,
+// so without this it would otherwise survive both replaces below — which
+// could plant a fake `\nSource: /etc/passwd`-style line, and collapses runs
+// of whitespace — but never touches `:`, unlike sanitizeFilenameChars, since
+// header values routinely contain one (e.g. a timestamp) and this isn't
+// building a filename.
+function headerValue(v) {
+    return String(v)
+        .replace(/[\x00-\x1f\x7f-\x9f]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
 // Convert the diarizer's raw "S0"/"S1" speaker tags into the Greek phonetic
 // alphabet: S0 → Alpha, S1 → Beta, …, S23 → Omega. After Omega the letters
 // recycle with a numeric suffix: S24 → Alpha 2, S25 → Beta 2, etc.
@@ -1979,7 +1994,10 @@ ipcMain.handle('transcripts:list', () => {
         const items = fs.readdirSync(TRANSCRIPTS_FOLDER)
             .filter(f => {
                 if (!f.endsWith('.txt')) return false;
-                try { return fs.statSync(path.join(TRANSCRIPTS_FOLDER, f)).isFile(); } catch { return false; }
+                // lstatSync, not statSync: a symlink planted inside the
+                // transcripts folder must not be listed (and later read/acted
+                // on) as if it were a real transcript file.
+                try { return fs.lstatSync(path.join(TRANSCRIPTS_FOLDER, f)).isFile(); } catch { return false; }
             })
             .map(f => {
                 const filePath = path.join(TRANSCRIPTS_FOLDER, f);
@@ -2070,7 +2088,8 @@ ipcMain.handle('transcripts:search', (_e, query) => {
         if (!f.endsWith('.txt')) continue;
         const filePath = path.join(TRANSCRIPTS_FOLDER, f);
         let stat;
-        try { stat = fs.statSync(filePath); if (!stat.isFile()) continue; } catch { continue; }
+        // lstatSync — same symlink-skip as transcripts:list.
+        try { stat = fs.lstatSync(filePath); if (!stat.isFile()) continue; } catch { continue; }
         let entry = contentIndex.get(filePath);
         if (!entry || entry.mtime !== stat.mtimeMs) {
             try {
@@ -2142,7 +2161,17 @@ function findRelatedAudioPaths(transcriptPath) {
         try {
             const head = fs.readFileSync(transcriptPath, 'utf-8').slice(0, 512);
             const info = parseTranscriptHeaderMain(head);
-            if (info.source && fs.existsSync(info.source)) paths.push(info.source);
+            // A transcript's Source: line is attacker-controlled content (the
+            // file can be pasted, planted by the extension, or hand-edited) —
+            // never trust it as a filesystem path without the same read
+            // allow-list every other renderer-facing path goes through, and
+            // require an actual audio extension so it can't point at, say,
+            // another transcript's .txt.
+            if (
+                info.source &&
+                canReadPath(info.source) &&
+                AUDIO_EXTS.has(path.extname(info.source).toLowerCase())
+            ) paths.push(info.source);
         } catch { /* ignore */ }
 
         if (!fs.existsSync(RECORDINGS_FOLDER)) return paths;
@@ -2166,6 +2195,7 @@ function findRelatedAudioPaths(transcriptPath) {
 }
 
 ipcMain.handle('transcripts:getAudioPath', (_e, filePath) => {
+    if (!canReadPath(filePath)) return null;
     const paths = findRelatedAudioPaths(filePath);
     return paths[0] || null;
 });
@@ -2174,7 +2204,7 @@ ipcMain.handle('transcripts:delete', async (_e, filePath) => {
     // Match the *Only delete handlers: never operate on a renderer-supplied path
     // that lies outside the transcripts folder (defense-in-depth vs a compromised
     // renderer). The summary/audio it also removes are derived, not passed in.
-    if (typeof filePath !== 'string' || !filePath.startsWith(TRANSCRIPTS_FOLDER)) {
+    if (typeof filePath !== 'string' || !isPathInside(filePath, TRANSCRIPTS_FOLDER)) {
         return { ok: false, error: 'Refusing to operate on a path outside the transcripts folder.' };
     }
     const sumPath = findExistingSummaryPath(filePath);
@@ -2231,7 +2261,7 @@ ipcMain.handle('transcripts:openFile', async (_e, filePath) => {
 
 // Delete only the .txt transcript. Audio and summary stay on disk.
 ipcMain.handle('transcripts:deleteTranscriptOnly', async (_e, filePath) => {
-    if (typeof filePath !== 'string' || !filePath.startsWith(TRANSCRIPTS_FOLDER)) {
+    if (typeof filePath !== 'string' || !isPathInside(filePath, TRANSCRIPTS_FOLDER)) {
         return { ok: false, error: 'Refusing to operate on a path outside the transcripts folder.' };
     }
     if (!fs.existsSync(filePath)) {
@@ -2256,7 +2286,7 @@ ipcMain.handle('transcripts:deleteTranscriptOnly', async (_e, filePath) => {
 
 // Delete only the summary paired with a transcript. Transcript and audio stay.
 ipcMain.handle('transcripts:deleteSummaryOnly', async (_e, filePath) => {
-    if (typeof filePath !== 'string' || !filePath.startsWith(TRANSCRIPTS_FOLDER)) {
+    if (typeof filePath !== 'string' || !isPathInside(filePath, TRANSCRIPTS_FOLDER)) {
         return { ok: false, error: 'Refusing to operate on a path outside the transcripts folder.' };
     }
     const summaryPath = findExistingSummaryPath(filePath);
@@ -2283,7 +2313,7 @@ ipcMain.handle('transcripts:deleteSummaryOnly', async (_e, filePath) => {
 // Delete only the audio recording(s) paired with a transcript. Transcript and
 // summary stay on disk.
 ipcMain.handle('transcripts:deleteAudioOnly', async (_e, filePath) => {
-    if (typeof filePath !== 'string' || !filePath.startsWith(TRANSCRIPTS_FOLDER)) {
+    if (typeof filePath !== 'string' || !isPathInside(filePath, TRANSCRIPTS_FOLDER)) {
         return { ok: false, error: 'Refusing to operate on a path outside the transcripts folder.' };
     }
     const audioPaths = findRelatedAudioPaths(filePath);
@@ -2337,14 +2367,14 @@ ipcMain.handle('transcripts:create', async (_e, payload) => {
         if (!body.trim()) return { ok: false, error: 'Transcript content is empty' };
 
         const participants = Array.isArray(payload?.participants)
-            ? payload.participants.map(s => String(s).trim()).filter(Boolean)
+            ? payload.participants.map(s => headerValue(s)).filter(Boolean)
             : [];
         const language = typeof payload?.language === 'string' ? payload.language.trim() : '';
 
-        const headerLines = [`Meeting: ${title}`];
+        const headerLines = [`Meeting: ${headerValue(title)}`];
         headerLines.push(`Generated: ${new Date().toISOString()}`);
         if (participants.length) headerLines.push(`Participants: ${participants.join(', ')}`);
-        if (language) headerLines.push(`Language: ${language}`);
+        if (language) headerLines.push(`Language: ${headerValue(language)}`);
         const content = headerLines.join('\n') + '\n\n' + body.replace(/\s+$/, '') + '\n';
 
         if (!fs.existsSync(TRANSCRIPTS_FOLDER)) {
@@ -2657,11 +2687,13 @@ ipcMain.handle('transcripts:enhance', (_e, filePath) => {
 });
 
 ipcMain.handle('transcripts:rename', async (_e, filePath, newTitle) => {
-    if (typeof filePath !== 'string' || !filePath.startsWith(TRANSCRIPTS_FOLDER)) {
+    // The only one of the delete/rename handlers that also writes — needs
+    // canWritePath alongside the containment check (mirrors runEnhanceJob).
+    if (typeof filePath !== 'string' || !isPathInside(filePath, TRANSCRIPTS_FOLDER) || !canWritePath(filePath)) {
         return { ok: false, error: 'Refusing to operate on a path outside the transcripts folder.' };
     }
     if (!fs.existsSync(filePath)) return { ok: false, error: 'Transcript not found.' };
-    const trimmed = String(newTitle || '').trim();
+    const trimmed = headerValue(newTitle || '');
     if (!trimmed) return { ok: false, error: 'Title cannot be empty.' };
 
     try {
@@ -2750,6 +2782,18 @@ function liveModelDir() {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     return dir;
 }
+
+// Extensions AVAudioFile can decode on macOS — same list the
+// record:pickAudioFile dialog filter offers, shared here so
+// findRelatedAudioPaths's Source: gate and the picker can never drift apart.
+const AUDIO_EXTS = new Set(['.wav', '.mp3', '.m4a', '.mp4', '.aac', '.aif', '.aiff', '.caf', '.flac']);
+
+// Shape of a WhisperKit model directory name, wherever one is taken from
+// renderer-supplied input (live:start, live:downloadModel,
+// runRecordTranscribeJob, record:deleteModel) — a tight allow-list so an
+// oddly-typed value can't make a later path.join escape the model cache
+// directory.
+const WHISPER_MODEL_RE = /^openai_whisper-[A-Za-z0-9._-]+$/;
 
 function liveSendToRenderer(event) {
     if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -2955,6 +2999,14 @@ ipcMain.handle('live:start', async (_e, opts) => {
     }
     if (live.proc) return { ok: false, error: 'Live session already running.' };
 
+    // Renderer-supplied model name feeds a path.join in the swift helper's own
+    // model cache lookup — same allow-list as live:downloadModel/
+    // record:deleteModel. Falsy is left alone: it takes the built-in default
+    // below, which isn't attacker-controlled.
+    if (opts?.model && !WHISPER_MODEL_RE.test(String(opts.model))) {
+        return { ok: false, error: 'invalid model name' };
+    }
+
     const helper = liveHelperPath();
     if (!fs.existsSync(helper)) {
         return { ok: false, error: `Live helper binary not found at ${helper}. Run 'npm run build:helper' first.` };
@@ -3095,7 +3147,7 @@ ipcMain.handle('live:downloadModel', async (_e, modelName) => {
     if (process.platform !== 'darwin') return { ok: false, error: 'macOS only' };
     if (live.proc) return { ok: false, error: 'a live session is already running' };
 
-    if (typeof modelName !== 'string' || !/^openai_whisper-[A-Za-z0-9._-]+$/.test(modelName)) {
+    if (typeof modelName !== 'string' || !WHISPER_MODEL_RE.test(modelName)) {
         return { ok: false, error: 'invalid model name' };
     }
 
@@ -3159,7 +3211,7 @@ ipcMain.handle('live:downloadModel', async (_e, modelName) => {
 
 ipcMain.handle('live:saveTranscript', async (_e, payload) => {
     try {
-        const title = String(payload?.title || '').trim() || `Live recording — ${new Date().toLocaleString()}`;
+        const title = headerValue(String(payload?.title || '').trim() || `Live recording — ${new Date().toLocaleString()}`);
         const language = String(payload?.language || '').trim();
         const segments = Array.isArray(payload?.segments) ? payload.segments : live.segments;
         const sourceLabels = { mic: 'Me', system: null }; // null = use diarized speaker
@@ -3173,10 +3225,17 @@ ipcMain.handle('live:saveTranscript', async (_e, payload) => {
         // notes, and a speaker renamed onto it would have every turn written as
         // `[mm:ss] Note:` and fed to the summarizer as user-authored context.
         // Guarding at the writer covers every rename popover, present or future.
+        // Sanitized (not just filtered) here: a renamed speaker feeds both the
+        // transcript body and the Participants: header line below.
         const rawNames = (payload && payload.speakerNames && typeof payload.speakerNames === 'object')
             ? payload.speakerNames : {};
         const names = Object.fromEntries(
-            Object.entries(rawNames).filter(([, v]) => String(v).trim() !== NOTE_LABEL)
+            Object.entries(rawNames)
+                .filter(([, v]) => String(v).trim() !== NOTE_LABEL)
+                // v == null preserved as-is (not stringified to "null"/"undefined"):
+                // callers below do `names[speaker] || humanizeSpeakerLabel(...)`,
+                // and a real fallback there must stay reachable.
+                .map(([k, v]) => [k, v == null ? v : headerValue(v)])
         );
 
         // Build participant list from speakers actually seen.
@@ -3190,7 +3249,7 @@ ipcMain.handle('live:saveTranscript', async (_e, payload) => {
         // Names picked from the calendar event (if any) take precedence and are
         // merged ahead of the speaker labels (Me / S1 / S2), deduped case-insensitively.
         const calendarParticipants = Array.isArray(payload?.calendarParticipants)
-            ? payload.calendarParticipants.map(p => String(p).trim()).filter(Boolean)
+            ? payload.calendarParticipants.map(p => headerValue(p)).filter(Boolean)
             : [];
         const participants = mergeParticipants(calendarParticipants, speakerParticipants);
 
@@ -3218,7 +3277,7 @@ ipcMain.handle('live:saveTranscript', async (_e, payload) => {
         // with large-v3 and this line along with it.
         if (live.model) headerLines.push(`Model: ${live.model}`);
         if (participants.length) headerLines.push(`Participants: ${participants.join(', ')}`);
-        if (language) headerLines.push(`Language: ${language}`);
+        if (language) headerLines.push(`Language: ${headerValue(language)}`);
 
         const segBlocks = segments.map(seg => {
             const t = formatHms(seg.start);
@@ -3704,7 +3763,7 @@ function readNotesSidecar(wavPath) {
 }
 
 ipcMain.handle('record:delete', async (_e, filePath) => {
-    if (typeof filePath !== 'string' || !filePath.startsWith(RECORDINGS_FOLDER)) {
+    if (typeof filePath !== 'string' || !isPathInside(filePath, RECORDINGS_FOLDER)) {
         return { ok: false, error: 'Refusing to delete file outside recordings folder.' };
     }
     const choice = dialog.showMessageBoxSync(mainWindow, {
@@ -3732,7 +3791,7 @@ ipcMain.handle('record:deleteMany', async (_e, paths) => {
     if (!Array.isArray(paths)) {
         return { ok: false, error: 'Expected an array of recording paths.' };
     }
-    const targets = paths.filter(p => typeof p === 'string' && p.startsWith(RECORDINGS_FOLDER));
+    const targets = paths.filter(p => typeof p === 'string' && isPathInside(p, RECORDINGS_FOLDER));
     if (!targets.length) {
         return { ok: false, error: 'No valid recordings to delete.' };
     }
@@ -3763,11 +3822,11 @@ ipcMain.handle('record:deleteMany', async (_e, paths) => {
 });
 
 ipcMain.handle('record:rename', async (_e, wavPath, newTitle) => {
-    if (typeof wavPath !== 'string' || !wavPath.startsWith(RECORDINGS_FOLDER)) {
+    if (typeof wavPath !== 'string' || !isPathInside(wavPath, RECORDINGS_FOLDER)) {
         return { ok: false, error: 'Refusing to operate on a path outside the recordings folder.' };
     }
     if (!fs.existsSync(wavPath)) return { ok: false, error: 'Recording not found.' };
-    const trimmed = String(newTitle || '').trim();
+    const trimmed = headerValue(newTitle || '');
 
     try {
         const oldStem = path.basename(wavPath, '.wav');
@@ -3893,7 +3952,9 @@ ipcMain.handle('record:pickAudioFile', async () => {
     const result = await dialog.showOpenDialog(mainWindow, {
         title: 'Choose an audio file to transcribe',
         filters: [
-            { name: 'Audio Files', extensions: ['wav', 'mp3', 'm4a', 'mp4', 'aac', 'aif', 'aiff', 'caf', 'flac'] },
+            // Derived from the shared AUDIO_EXTS set (findRelatedAudioPaths's
+            // gate) so the picker and that gate can never drift apart.
+            { name: 'Audio Files', extensions: [...AUDIO_EXTS].map(e => e.slice(1)) },
             { name: 'All Files', extensions: ['*'] },
         ],
         properties: ['openFile'],
@@ -3933,6 +3994,9 @@ async function runRecordTranscribeJob(opts, sendEvent) {
         return { ok: false, error: 'Recording not found.' };
     }
     const model    = String(opts?.model || 'openai_whisper-large-v3_turbo');
+    // Same model-cache path.join concern as live:start/live:downloadModel/
+    // record:deleteModel — reject before it ever reaches the helper's stdin.
+    if (!WHISPER_MODEL_RE.test(model)) return { ok: false, error: 'invalid model name' };
     const language = String(opts?.language || 'ru');
 
     // Record-tab settings. Sanitised here; the Swift helper treats each as
@@ -4116,13 +4180,13 @@ async function runRecordTranscribeJob(opts, sendEvent) {
         const existingTitle = transcriptSnapshot
             ? parseTranscriptHeaderMain(transcriptSnapshot).title
             : null;
-        const title = existingTitle || path.basename(filePath, path.extname(filePath));
+        const title = headerValue(existingTitle || path.basename(filePath, path.extname(filePath)));
         const speakerParticipants = Array.from(new Set(
             finalSegments.map(s => humanizeSpeakerLabel(s.speaker)).filter(x => x && x !== '?' && x !== '…')
         ));
         // Calendar attendee names (if the picker supplied any) lead the list.
         const calendarParticipants = Array.isArray(opts?.participants)
-            ? opts.participants.map(p => String(p).trim()).filter(Boolean)
+            ? opts.participants.map(p => headerValue(p)).filter(Boolean)
             : [];
         const participants = mergeParticipants(calendarParticipants, speakerParticipants);
         // Source recording's creation time — let the transcript inherit it for
@@ -4146,7 +4210,7 @@ async function runRecordTranscribeJob(opts, sendEvent) {
         // that's what was requested and what belongs in the header, even if
         // WhisperKit's own reported language ever disagreed with it.
         const writtenLanguage = (language === 'auto' && detectedLanguage) || language;
-        if (writtenLanguage) headerLines.push(`Language: ${writtenLanguage}`);
+        if (writtenLanguage) headerLines.push(`Language: ${headerValue(writtenLanguage)}`);
         headerLines.push(`Source: ${filePath}`);
         const segBlocks = finalSegments.map(seg => {
             const t = formatHms(seg.start);
@@ -4284,7 +4348,7 @@ ipcMain.handle('record:deleteModel', async (_e, modelName) => {
     try {
         // Tight allow-list on the name shape so an oddly-typed value can't
         // make path.join escape the cache directory.
-        if (typeof modelName !== 'string' || !/^openai_whisper-[A-Za-z0-9._-]+$/.test(modelName)) {
+        if (typeof modelName !== 'string' || !WHISPER_MODEL_RE.test(modelName)) {
             return { ok: false, error: 'invalid model name' };
         }
         const dir = path.join(
