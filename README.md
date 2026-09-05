@@ -166,7 +166,7 @@ the follow-up, export or share it.
 - Drag & drop, double-click in Finder via the `unlimeety://` handler, dark theme by default.
 
 **Models**
-- Six Whisper variants, 99 languages each, from `tiny` (77 MB, ~20× realtime) to `large-v3` (2.9 GB,
+- Six Whisper variants, 99 languages each, from `tiny` (77 MB, ~20× realtime) to `large-v3` (3.1 GB,
   ~3×). Download and delete them from inside the app.
 - The Live tab deliberately offers only the three smallest — real-time cares about latency far more
   than the last few percent of accuracy. The Record tab defaults to the largest.
@@ -208,7 +208,7 @@ Open **System Settings → Privacy & Security**, find both items in the left rai
 
 ### Step 3. First launch — Whisper model download
 
-The first time you start a session, Unlimeety downloads the selected Whisper model into `~/Library/Application Support/Unlimeety/models/whisperkit/`. The **Live** tab defaults to `base` (147 MB); the **Record** tab defaults to `large-v3` (2.9 GB) since it transcribes offline and can afford the accuracy. This happens once per model; later sessions reuse the cache. A progress indicator is shown while it downloads — be on Wi-Fi for the first run.
+The first time you start a session, Unlimeety downloads the selected Whisper model into `~/Library/Application Support/Unlimeety/models/whisperkit/`. The **Live** tab defaults to `base` (147 MB); the **Record** tab defaults to `large-v3` (3.1 GB) since it transcribes offline and can afford the accuracy. This happens once per model; later sessions reuse the cache. A progress indicator is shown while it downloads — be on Wi-Fi for the first run.
 
 ### Step 4. Install the Chrome extension (optional — Google Meet only)
 
