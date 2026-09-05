@@ -13,21 +13,21 @@
 
 #gmt-transcriber-widget {
     /* Brand tokens — kept local so we never collide with Meet's vars */
-    --u-bg:        #111114;
-    --u-surface:   #18181d;
-    --u-elevated:  #22222a;
+    --u-bg:        #000000;
+    --u-surface:   #0C0C0C;
+    --u-elevated:  #171717;
     --u-hover:     #2a2a34;
     --u-border:    rgba(255, 255, 255, 0.08);
     --u-border-2:  rgba(255, 255, 255, 0.14);
-    --u-text:      #ededf0;
-    --u-text-2:    #8b8b94;
-    --u-text-3:    #5a5a63;
+    --u-text:      #FFFFFF;
+    --u-text-2:    #C7CDD6;
+    --u-text-3:    #838383;
 
-    --u-lime:      #c6f432;
-    --u-lime-2:    #a8d728;
-    --u-lime-fg:   #0a0d04;
+    --u-lime:      #C5F23D;
+    --u-lime-2:    #D3F168;
+    --u-lime-fg:   #000000;
     --u-lime-glow: rgba(198, 244, 50, 0.32);
-    --u-lime-dim:  rgba(198, 244, 50, 0.14);
+    --u-lime-dim:  rgba(197, 242, 61, 0.12);
 
     --u-rec:       #ff5b5b;
     --u-rec-dim:   rgba(255, 91, 91, 0.18);

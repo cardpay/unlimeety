@@ -27,27 +27,27 @@
 
     /* Card chrome — shared by both panels */
     --panel-bg: #1b1b22;
-    --panel-border: #2c2c36;
-    --panel-title: #f2f2f5;
-    --panel-muted: #9a9aa6;
+    --panel-border: #2B2B2B;
+    --panel-title: #FFFFFF;
+    --panel-muted: #C7CDD6;
     --panel-hover: #25252e;
     --panel-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
 
     /* prompt.html — Record / Stop now (red) and the ghost secondary */
     --panel-primary: #d7263d;
-    --panel-primary-hover: #e23950;
+    --panel-primary-hover: #F04438;
     --panel-primary-fg: #ffffff;
-    --panel-ghost-text: #c7c7d1;
-    --panel-ghost-border: #3a3a45;
+    --panel-ghost-text: #C7CDD6;
+    --panel-ghost-border: #2B2B2B;
 
     /* notes.html — note rows, the text input and its focus ring */
-    --panel-row-border: #24242c;
-    --panel-note-time: #7a8fb0;
-    --panel-note-text: #d6d6dd;
-    --panel-input-bg: #26262f;
-    --panel-input-border: #34343f;
+    --panel-row-border: #171717;
+    --panel-note-time: #C7CDD6;
+    --panel-note-text: #FFFFFF;
+    --panel-input-bg: #171717;
+    --panel-input-border: #2B2B2B;
     --panel-focus-border: #5a5aef;
-    --panel-dim: #6c6c78;
+    --panel-dim: #838383;
 }
 
 /* Values from theme-light.css: --bg-surface, --bg-elevated, --bg-hover,
@@ -61,11 +61,11 @@
        transparent window, so most of the 0 12px 32px shadow is clipped and the
        border is all that separates a white card from a bright desktop. Dark is
        unaffected — its border is opaque. */
-    --panel-border: rgba(28, 26, 22, 0.18);
-    --panel-title: #20201c;
+    --panel-border: #DFE3E8;
+    --panel-title: #0C0C0C;
     /* --text-secondary, not --text-muted: the prompt's countdown subtitle and
        the ✕ have to stay readable at 12px on white. */
-    --panel-muted: #5a574f;
+    --panel-muted: #444444;
     --panel-hover: #e7e5dd;
     --panel-shadow: 0 12px 32px rgba(28, 26, 22, 0.16), 0 2px 6px rgba(28, 26, 22, 0.06);
 
@@ -74,20 +74,20 @@
        would read as disabled against a white card. */
     --panel-primary-hover: #c62323;
     --panel-primary-fg: #ffffff;
-    --panel-ghost-text: #5a574f;
-    --panel-ghost-border: rgba(28, 26, 22, 0.18);
+    --panel-ghost-text: #444444;
+    --panel-ghost-border: #DFE3E8;
 
-    --panel-row-border: rgba(28, 26, 22, 0.10);
+    --panel-row-border: #EEF0F3;
     /* --text-secondary (≈7.3:1), not --text-muted (≈4.0:1, under the 4.5:1 AA
        floor): this carries the 12.5px note timestamp. Same reasoning as
        --panel-muted above. */
-    --panel-note-time: #5a574f;
-    --panel-note-text: #20201c;
+    --panel-note-time: #444444;
+    --panel-note-text: #0C0C0C;
     --panel-input-bg: #f1f0ea;
-    --panel-input-border: rgba(28, 26, 22, 0.18);
+    --panel-input-border: #DFE3E8;
     /* Solid --accent, not --border-focus: at 1px over --panel-input-bg the
        0.55 alpha lands near 2:1, under the 3:1 non-text minimum, where dark
        had a solid #5a5aef. */
-    --panel-focus-border: #6b45e8;
+    --panel-focus-border: #416BD6;
     --panel-dim: #6b675c; /* theme-light.css's --text-muted, re-tuned for AA */
 }
