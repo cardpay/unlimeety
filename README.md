@@ -10,7 +10,7 @@ local one too.
 
 [![Download Unlimeety for macOS](https://img.shields.io/badge/Download-Unlimeety--arm64.dmg-6C4CF1?style=for-the-badge)](https://github.com/cardpay/unlimeety/releases/latest/download/Unlimeety-arm64.dmg)
 
-![Unlimeety library: meetings grouped by date, transcript with speaker turns, and the summary rail with action items and decisions — demo data, light theme](docs/screenshot-library-light.png)
+![Unlimeety library: meetings grouped by date with work-queue filters, a transcript with speaker turns and a typed note, and the summary rail with action items and decisions — demo data, light theme](docs/screenshot-library-light.png)
 
 A small Chrome extension for Google Meet ships alongside it, but it is one capture path out of
 three — the desktop app is where the actual work happens.
@@ -45,9 +45,8 @@ A human stayed in exactly one role: product owner. Stating intent, using the res
   codebase for an open-source release — path traversal, IPC sender validation, key storage,
   the summary write path — and its critical and high findings were fixed before the first
   public commit.
-- **~22 300 lines of product code** (JavaScript, Swift, CSS, HTML), 239 commits over
-  four and a half months, from empty directory to a signed and Apple-notarized app in
-  daily use.
+- **~28 000 lines of product code** (JavaScript, Swift, CSS, HTML), plus ~5 900 more of
+  tests, from empty directory to a signed and Apple-notarized app in daily use.
 
 This is the part worth taking away: an AI-first engineering loop produced not a demo but a
 notarized desktop application with on-device ML, a real transcript library, and a
@@ -83,7 +82,7 @@ Three ways to get a transcript, all landing in the same library:
 | | Path | Use it for |
 |---|---|---|
 | 🎙 | **Live tab** | Any app — Zoom, Teams, Slack huddles, a browser tab, a room. Mic + system audio transcribed in real time, with live speaker diarization. |
-| ⏺ | **Record tab** | Records to `.wav` with no live transcription; on **Stop & save** a large-v3 diarized transcription starts on its own, in the language you picked while recording. Also imports existing audio files. |
+| ⏺ | **Record tab** | Records to `.wav` with no live transcription; on **Stop & save** a large-v3 diarized transcription starts on its own, in the language you picked while recording, and an Enhance pass follows it. Also imports existing audio files. |
 | 🧩 | **Chrome extension** | Google Meet only. Reuses Meet's own captions (no audio capture at all) and hands the file to the desktop app. |
 
 Whichever path you took, from there it's the same transcript: edit it, bind real names to speakers,
@@ -96,15 +95,18 @@ the follow-up, export or share it.
 
 **Live transcription & diarization**
 
-![Live tab: on-device Whisper model picker with size and quality, language selector, and separate microphone and system-audio toggles](docs/screenshot-live-light.png)
+![Live tab: on-device Whisper model picker with size and quality, seven-way language selector, and separate microphone and system-audio toggles](docs/screenshot-live-light.png)
 
 - Microphone and system audio captured together, each toggleable on its own, with live level meters.
 - Partial hypotheses appear greyed out and are re-decoded every ~700 ms, then finalized on ~1 s of
   silence — you read the text as it settles, not in chunks.
 - Speaker turns via SpeakerKit / pyannote 3.1, re-run every ~30 s while recording: placeholder `S?`
   labels resolve to real turns live, with one authoritative pass on **Stop**.
-- Speakers get readable phonetic names (Alpha, Bravo, …). Click a speaker chip to bind the real
-  name — it is written into both the transcript body and the `Participants:` header.
+- Speakers get readable Greek-alphabet names (Alpha, Beta, Gamma, …). Click a speaker chip to bind
+  the real name — it is written into both the transcript body and the `Participants:` header.
+- Language is a seven-way choice — Russian, English, Serbian, Spanish, German, French or
+  **Auto-detect** — shared by the Live tab, the Record tab and the transcribe-settings screen. Your
+  last choice is remembered; a fresh install starts on Auto-detect rather than guessing.
 - Every live session also writes a lossless `.wav`, paired with the transcript by filename.
 - VAD gating plus a hallucination blocklist, so silence doesn't produce `[music]` or "thanks for
   watching".
@@ -122,20 +124,35 @@ the follow-up, export or share it.
 - Offers to record from a floating panel that stays visible **above full-screen apps** — including a
   full-screen Zoom call. Title is pre-filled from the calendar event happening right now.
 - **Auto-stop when the meeting ends**: detects the call dropping and stops recording after a 15 s
-  grace period you can cancel. Both behaviours are on by default and switchable from the menu bar.
+  countdown you can cancel — armed only for a session capturing both microphone *and* system audio,
+  since that is what makes it an online call. Both behaviours are on by default; auto-stop is
+  switchable from the menu bar and from **Settings → Recording**, auto-detect from the menu bar.
+  Answering "Not now" mutes the prompt for five minutes.
 
 **Calendar-aware**
 - Reads the current event's title and participants to fill in the transcript header.
-- Suggests the right capture mode from the event's conferencing link: Meet/Zoom/Teams/Webex/Jitsi/
-  Whereby → Live tab, no link at all → Record tab for an in-person meeting. For Meet it also mentions
-  the Chrome extension as an alternative. It suggests; it never starts recording on its own.
+- Suggests the right capture mode from the event's conferencing link: Meet / Zoom / Teams / Webex /
+  Jitsi / Whereby / BlueJeans / GoToMeeting / Chime → Live tab, no link at all → Record tab for an
+  in-person meeting. For Meet it also mentions the Chrome extension as an alternative. It suggests;
+  it never starts recording on its own.
+- The title prefill re-reads the calendar every time you open the tab and clears itself once the
+  meeting is over — but only its own value, never a title you typed, and never on a calendar read
+  that failed. All-day and multi-day entries are skipped, so "PTO" cannot beat the real meeting
+  inside it; a meeting that ended in the last 15 minutes is still offered.
+- Which calendars are read is yours to pick, in **Settings → Calendars**.
 
 **Improving a transcript after the fact**
 - Re-transcribe any recording with a larger model straight from the library.
-- Batch-transcribe a whole selection of recordings in one go, with ETA per file.
-- Save named settings presets, and tune expected speaker count, merging of adjacent same-speaker
-  turns, initial prompt, temperature and the Silero VAD filter.
+- Batch-transcribe a whole selection of recordings in one go, with an ETA for the batch.
+- The transcribe-settings screen opens over the Meetings list rather than dragging you to another
+  tab, and closes with ✕, Cancel or Escape. Save named presets, and tune model, language, speaker
+  diarization and expected speaker count, merging of adjacent same-speaker turns, initial prompt,
+  temperature and the Silero VAD filter.
 - Rename speakers, edit text inline, or regenerate the summary.
+- The meeting's ⋯ menu carries Summarize, Enhance, Rename, Transcribe / Re-transcribe and three
+  separate deletes. An entry that cannot run is greyed out *and says why* on hover — "Not
+  transcribed yet", "No spoken turns to enhance", "Transcription is incomplete — re-transcribe
+  first".
 - **Enhance** (meeting menu, right-click a meeting) runs the configured summarizer model over the
   spoken text to fix recognition errors, punctuation and casing, and to restore domain terms from
   **Settings → Domain glossary** (one term per line; known mishearings after a tab, e.g.
@@ -148,36 +165,78 @@ the follow-up, export or share it.
 
 **Summarize, chat, share**
 
-![Summary result: Obsidian-ready YAML frontmatter with participants, then summary, topics and decisions — demo data](docs/screenshot-summary-light.png)
+![Summary result: Obsidian-ready YAML frontmatter with participants, then the summary and action items with their owners — demo data](docs/screenshot-summary-light.png)
 
 - Seven built-in prompt templates — Meeting, Daily, Interview, 1-1, Retro, Project, Negotiations —
   plus your own saved prompts.
 - The Meeting template emits Obsidian-ready YAML frontmatter and infers real names from what was
   actually said.
+- The summary rail draws every preset's sections structurally, not just the Meeting one — action
+  items with owner and due date, decisions, risks, blockers, timelines, status, scorecards; about
+  forty section kinds in all, each with its own layout. A heading it does not recognise (a custom
+  prompt's, or a translated one) falls back to plain Markdown instead of vanishing.
 - **Chat with the transcript** (⌘/) — including a live one that is still growing.
 - Draft the follow-up e-mail from summary + transcript.
-- Share to Email, Slack (converted to Slack markup), Telegram or clipboard.
-- Export PDF, DOCX, Markdown, plain text, and the `.wav`.
+- Share the summary to Email, Slack (converted to Slack markup), Telegram or the clipboard.
+- Export the transcript or the summary to PDF or DOCX; **Save As…** writes the plain-text `.txt`,
+  and the summary already lives on disk as Obsidian-ready Markdown.
 
 **Library**
-- Grouped by date, full-text search with snippets, live folder watching.
-- Filter by work left to do: `All`, `To re-transcribe` (has audio and came from a model less
-  accurate than `large-v3` — a transcript with no `Model:` line is never queued),
-  `To enhance` (has spoken turns, never enhanced), `To summarize` (no summary on disk).
-  A transcript that cannot be read appears under `All` only.
+- Grouped by date, full-text search with snippets, live folder watching. Recordings that have no
+  transcript yet are ordinary rows in the same list, not a second sidebar.
+- Filter by work left to do, each chip carrying its own count: `All`, `To transcribe` (audio with
+  no transcript), `To re-transcribe` (has audio and came from a model less accurate than
+  `large-v3` — a transcript with no `Model:` line is never queued), `To enhance` (has spoken turns,
+  never enhanced), `To summarize` (no summary on disk). A transcript that cannot be read appears
+  under `All` only, wearing a single **Couldn't read** badge instead of chips that would be guesses.
+- Each card shows which model produced the text and four present/absent chips — audio, transcript,
+  Enhance, summary — so one glance answers what a meeting still needs. The ⓘ button opens
+  **Transcript details**: every line of the file's header, including ones this app never wrote.
 - Delete granularly — just the audio, just the transcript, just the summary, or everything.
-- Drag & drop, double-click in Finder via the `unlimeety://` handler, dark theme by default.
+- Drag & drop, and double-click in Finder via the `unlimeety://` handler.
+
+**Job queue**
+
+![The Jobs panel open over the library: a running transcription with its progress, a queued Enhance, and a finished summary, each with cancel or dismiss](docs/screenshot-queue-light.png)
+
+- One queue owns every transcribe, enhance and summarize run. Submitting always succeeds — the app
+  never refuses work because it is busy.
+- Three independent lanes, one job at a time each, so an Enhance never waits behind a transcription.
+- The clock in the header counts what is queued or running and turns red when something failed.
+  Open it for the list: what is running and how far along, what is waiting, what failed and why —
+  with Cancel on anything live and ✕ to dismiss anything finished.
+
+**Appearance**
+
+![The same library in the dark theme, the shipped default](docs/screenshot-library-dark.png)
+
+- Dark, Light or System (follow the OS), in **Settings → Appearance** — alongside the date order
+  (day-first / month-first) and the 24- or 12-hour clock every card and header stamp uses.
+- Settings in full: Summarizer · Appearance · Calendars · Recording · Domain glossary, with the
+  running version at the foot.
 
 **Models**
-- Six Whisper variants, 99 languages each, from `tiny` (74 MB, ~20× realtime) to `large-v3` (2.9 GB,
-  ~3×). Download and delete them from inside the app.
+- Six Whisper variants, 99 languages each: `tiny` (74 MB, ~20× realtime), `base` (142 MB, ~12×),
+  `small` (480 MB, ~8×), `medium` and `large-v3 turbo` (1.5 GB, ~4× and ~6×) and `large-v3`
+  (2.9 GB, ~3×). Download and delete them from inside the app.
 - The Live tab deliberately offers only the three smallest — real-time cares about latency far more
-  than the last few percent of accuracy. The Record tab defaults to the largest.
+  than the last few percent of accuracy. Everywhere else the default is `large-v3`, and the
+  automatic run after **Stop & save** always uses it.
+
+**Notes while you record**
+- The Live tab opens a small floating note window that stays above full-screen apps; the Record tab
+  keeps the same list inline. Enter drops a note into the transcript as a `[mm:ss] Note:` line.
+- `Note` is a reserved label: it is never treated as a speaker, cannot be renamed, and is never sent
+  to the model during **Enhance**.
+- Notes are mirrored to a `<recording>.notes.json` sidecar, so they survive a re-transcription that
+  rewrites the transcript underneath them.
 
 **Odds and ends**
 - Lives in the menu bar: close the window and meeting detection keeps working.
-- Hotkeys: `⌘S` save, `⌘⇧S` save as, `⌘O` open, `⌘N` new, `⌘K` search, `⌘/` chat,
-  `⌘⏎` create + summarize.
+- Hotkeys: `⌘S` save, `⌘⇧S` save as, `⌘O` open, `⌘N` new, `⌘K` search the library,
+  `⌘F` find inside the open note, `⌘R` Record tab, `⌘/` chat, `⌘⏎` create + summarize.
+- `⌘F` searches the transcript *and* the summary rail at once, highlighting matches without touching
+  the DOM — so click-to-seek and the follow-along highlight keep working while you search.
 
 ---
 
@@ -211,7 +270,7 @@ Open **System Settings → Privacy & Security**, find both items in the left rai
 
 ### Step 3. First launch — Whisper model download
 
-The first time you start a session, Unlimeety downloads the selected Whisper model into `~/Library/Application Support/Unlimeety/models/whisperkit/`. The **Live** tab defaults to `base` (142 MB); the **Record** tab defaults to `large-v3` (2.9 GB) since it transcribes offline and can afford the accuracy. This happens once per model; later sessions reuse the cache. A progress indicator is shown while it downloads — be on Wi-Fi for the first run.
+The first time you start a session, Unlimeety downloads the selected Whisper model into `~/Library/Application Support/Unlimeety/models/whisperkit/`. The **Live** tab defaults to `base` (142 MB); everything that transcribes after the fact — the **Record** tab's automatic run and the transcribe-settings screen — uses `large-v3` (2.9 GB), since it is not racing speech and can afford the accuracy. This happens once per model; later sessions reuse the cache. A progress indicator is shown while it downloads — be on Wi-Fi for the first run.
 
 ### Step 4. Install the Chrome extension (optional — Google Meet only)
 
@@ -232,7 +291,7 @@ through the Live tab like any other call.
 Transcription is always local. The summarizer model is the one place a cloud service can be involved — and only if you pick one. It serves Summarize, Ask AI, follow-up drafts and **Enhance**, so with a cloud provider the transcript text of those runs leaves the Mac. Four providers, in **Settings → Summarizer**:
 
 - **Claude Code** *(default)* — uses the `claude` CLI installed on your machine. See [Claude Code docs](https://docs.anthropic.com/en/docs/claude-code/overview). If `claude` is not in `PATH`, the app will tell you so on the first run.
-- **Ollama** — fully local models, nothing leaves the Mac. Requires a running `ollama serve` at `http://localhost:11434` and a pulled model (default `llama3.1`).
+- **Ollama** — fully local models, nothing leaves the Mac. Requires a running `ollama serve` at `http://localhost:11434` and a pulled model (default `llama3.1`). The context window is yours to raise, so a small local model does not silently truncate a long transcript.
 - **OpenRouter** — paste an API key from [openrouter.ai](https://openrouter.ai/), pick a model (default `anthropic/claude-3.5-sonnet`).
 - **OpenAI-compatible** — any base URL that speaks the OpenAI API, for self-hosted or corporate gateways.
 
@@ -243,8 +302,10 @@ API keys are encrypted with Electron `safeStorage` (Keychain on macOS).
 **Capturing** — three independent paths:
 
 - **Live tab** (any app — Zoom, Teams, Meet, a browser, a room): open Unlimeety → **Live** tab → pick language and model → **Start**. Mic and system audio are transcribed and diarized locally; **Stop** saves the transcript plus the `.wav`. Or just wait: if auto-detect is on, Unlimeety offers to start recording the moment a call begins.
-- **Record tab**: records to `.wav` without live transcription, so it costs almost nothing while the call runs. Pick the transcription language on the recording screen — thirty seconds in you know which one it is. On **Stop & save** a large-v3 diarized transcription starts automatically and an Enhance pass follows; watch both in the queue panel. The batch settings screen is still there to re-run a recording with different settings, or to transcribe several at once. Also imports existing audio files.
-- **Chrome extension** (Google Meet only, uses Meet's captions): join a call → the **Unlimeety** panel appears bottom-right → pick a language (Russian / English / Serbian) → click **record**. On **Save** or when you leave the call, the transcript lands in `~/Downloads/Meet_Transcripts/` and opens in the desktop app.
+- **Record tab**: records to `.wav` without live transcription, so it costs almost nothing while the call runs. Pick the transcription language on the recording screen — thirty seconds in you know which one it is. On **Stop & save** a large-v3 diarized transcription starts automatically and an Enhance pass follows; watch both in the queue panel. There is deliberately no model picker here: the background run is always the most accurate one. The transcribe-settings screen is still there to re-run a recording with different settings, or to transcribe several at once. Also imports existing audio files.
+
+  ![The Record tab's start screen: language, microphone and system-audio toggles, an optional title with calendar prefill, and Start recording](docs/screenshot-record-light.png)
+- **Chrome extension** (Google Meet only, uses Meet's captions): join a call → the **Unlimeety** panel appears bottom-right → pick a language (Russian / English / Serbian) → click **record**. On **Save** or when you leave the call, the transcript lands in `~/Downloads/Meet_Transcripts/` and opens in the desktop app. Note that **Auto-start recording is on by default** — it begins the moment the call looks active, and switches Meet's captions on to do it. Untick it in the panel if you want the record button to be the only thing that ever starts a recording.
 
 **Then, in the app:** edit the transcript, bind real names to speakers, re-transcribe with a better
 model, **Summarize** into `<name>.summary.md` (YAML frontmatter + Markdown, Obsidian-friendly), chat
@@ -276,28 +337,43 @@ network requests. Useful when you'd rather not record audio at all — otherwise
 strictly more capable.
 
 Caption language: Russian, English or Serbian. Detects participants and attributes lines to them,
-auto-saves when you leave the call. The panel's Note field takes freeform notes while recording —
-Enter drops one into the transcript as a `[time] Note:` line, the same marker the desktop Live and
-Record tabs write, so a shared summarizer prompt recognizes either source.
+auto-saves when you leave the call. The panel is draggable and collapsible and has its own
+auto / light / dark theme toggle. Its Note field takes freeform notes while recording — Enter drops
+one into the transcript as a `[time] Note:` line, the same marker the desktop Live and Record tabs
+write, so a shared summarizer prompt recognizes either source. The field stays disabled until
+recording actually starts.
 
-**Saved file format** (the desktop app writes the same header, plus a `Model:` line naming the
-WhisperKit model that produced the text and, once **Enhance** has run over it, an `Enhanced:`
-timestamp — the Transcripts list shows both as chips on the meeting card):
+**Auto-start recording** is a checkbox in that panel, **on by default**: the extension starts
+recording as soon as a meeting looks active — which also switches Google Meet's captions on for you,
+since captions are what it reads. Turn it off and recording only ever starts from the record button.
+Ticking it back on mid-call applies from the next call, not the one you are in; turning it off never
+stops a recording already running.
+
+**Saved file format.** The extension writes:
 ```
 Meeting: Weekly sync
+Recorded-At: 2026-03-19T14:29:41.320Z
+Generated: 2026-03-19T14:52:06.885Z
 Participants: Alice, Bob, Carol
 Language: English
-Generated: 2026-03-19, 14:30:00
 
-[14:30:05] Alice:
+[2:29:41 PM] Alice:
 Let's start with the weekly tasks.
 
-[14:30:12] Bob:
+[2:29:48 PM] Bob:
 Sounds good, I have an update on the project.
 
-[14:30:20] Note:
+[2:29:56 PM] Note:
 ask Bob about the staging rollout date
 ```
+
+The desktop app writes the same header and adds provenance of its own — `Model:` naming the
+WhisperKit model that produced the text, `Enhanced:` once the proofreading pass has run over it
+(`Enhance-Attempted:` if it ran and rejected everything), `Source:` for the audio it came from, and
+`Status: PARTIAL …` on a transcription that was cut short. The card in the Meetings list turns those
+into chips, and the ⓘ panel shows them in full. Its turn timestamps are offsets into the recording
+(`[mm:ss]`, or `[hh:mm:ss]` past the hour) rather than wall-clock times, which is what makes every
+line clickable to seek the audio.
 
 ---
 
@@ -332,6 +408,8 @@ npm start          # or: npm run dev   (opens DevTools)
 The helper binary lives at `desktop/live-helper/.build/release/unlimeety-live`. Rebuild it with `npm run build:helper` after editing any `*.swift` file under `live-helper/Sources/`.
 
 `npm test` covers the pure modules and the renderer logic sliced out for a `vm` sandbox — no Electron, under a second. `npm run check:layout` is the separate geometry check for the Record and Live start screens and the shared "From calendar" popover: it launches its own Electron and drives it over CDP, so it needs a display and Node 22 or newer, and prints one PASS/FAIL line per case.
+
+`npm run screenshots` regenerates every image this README embeds. It builds an invented library — four meetings, one untranscribed recording, synthesized audio — under a scratch `$HOME`, launches its own Electron against it, and photographs six screens over CDP. Your own transcripts are never read and never appear; the two share their CDP plumbing in `scripts/cdp.mjs`, and it needs the same display and Node 22.
 
 ### Build the desktop app
 
@@ -379,12 +457,20 @@ unlimeety/
 │   ├── content.js             # Widget and caption capture
 │   └── content.css            # Widget styles
 └── desktop/                   # Electron app
-    ├── main.js                # Main process
+    ├── main.js                # Main process, every IPC handler
     ├── preload.js             # IPC bridge
+    ├── job-queue.js           # transcribe / enhance / summarize scheduler
+    ├── transcript-enhance.js  # the Enhance pass and its speaker naming
+    ├── glossary.js            # domain-glossary parsing
+    ├── summary-frontmatter.js # repairs the YAML models write
+    ├── live-helper/           # Swift: WhisperKit, SpeakerKit, mic + calendar
     ├── renderer/              # UI
     │   ├── index.html
     │   ├── app.js
+    │   ├── live/  record/  notes/  prompt/
     │   └── style.css
+    ├── scripts/               # check:layout, screenshots (Electron over CDP)
+    ├── test/                  # node --test, Electron-free
     └── package.json
 ```
 
@@ -394,8 +480,11 @@ unlimeety/
   on-device; the browser extension saves transcripts to local files only and makes no
   network requests.
 - **Cloud LLM providers are opt-in.** The default summarization provider is the local
-  `claude` CLI. If you configure a cloud provider (OpenRouter / OpenAI-compatible),
-  transcript text is sent to that provider's API over HTTPS.
+  `claude` CLI, and Ollama is fully local too. If you configure a cloud provider
+  (OpenRouter / OpenAI-compatible), transcript text is sent to that provider's API over
+  HTTPS — and that is true of every feature sharing the provider, not just Summarize:
+  **Enhance**, speaker naming, Ask AI and the follow-up draft all send transcript text
+  the same way. Your own `Note:` lines are the exception — Enhance never sends them.
 - **API key storage.** Provider API keys are encrypted with Electron `safeStorage`
   (Keychain on macOS, DPAPI on Windows). On Linux systems without a secret service,
   the key falls back to plaintext in the app's `config.json`.
@@ -404,8 +493,12 @@ unlimeety/
   checksum pinning is not implemented.
 - **Calendar access.** With calendar integration enabled, the app reads event titles,
   participant names, and — when a name is unavailable — participant e-mail addresses
-  to build the transcript header. This data stays local unless a cloud LLM provider
-  is configured.
+  to build the transcript header. Which calendars are read is yours to pick in
+  **Settings → Calendars**. This data stays local unless a cloud LLM provider is
+  configured.
+- **Meeting detection opens nothing.** Auto-detect asks Core Audio whether the default
+  input device is in use — a property query, not a capture — so it needs no microphone
+  permission of its own and can never hear the call it notices.
 
 ## License
 

@@ -17,27 +17,20 @@
 
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { writeSync } from 'node:fs';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import electron from 'electron';
+import {
+    connect, debugPort, evaluator, requireNode22, waitForRenderer, waitForTarget,
+} from './cdp.mjs';
 
-// Global WebSocket landed in Node 22. README says >= 18, which is right for
-// `npm test`; say so here rather than letting this die as "WebSocket is not
-// defined", which reads like an Electron fault.
-const NODE_MAJOR = Number(process.versions.node.split('.')[0]);
-if (NODE_MAJOR < 22) {
-    writeSync(2, 'check:layout needs Node >= 22 for the global WebSocket CDP client '
-        + `(running ${process.versions.node}). \`npm test\` still works on Node 18.\n`);
-    process.exit(1);
-}
+requireNode22('check:layout');
 
 const DESKTOP = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
-const PORT = 9871 + (process.pid % 100); // stay clear of a stray 9222 session
+const PORT = debugPort();
 const EXPECTED_ROWS = 23;
-const SEND_TIMEOUT_MS = 20_000;
 const EPS = 1.5; // sub-pixel layout slack
 
 const results = [];
@@ -56,79 +49,6 @@ async function row(name, fn) {
     } catch (err) {
         check(name, false, `threw: ${err.message}`);
     }
-}
-
-// ─── CDP plumbing ────────────────────────────────────────────────────────────
-
-async function waitForTarget(deadline, childExited) {
-    for (;;) {
-        if (childExited.done) throw new Error(`Electron exited early: ${childExited.done}`);
-        try {
-            const res = await fetch(`http://127.0.0.1:${PORT}/json/list`);
-            const page = (await res.json())
-                .find((t) => t.type === 'page' && t.url.includes('index.html'));
-            if (page?.webSocketDebuggerUrl) return page;
-        } catch { /* devtools endpoint not up yet */ }
-        if (Date.now() > deadline) {
-            throw new Error(`no Electron renderer on CDP port ${PORT} — already in use?`);
-        }
-        await new Promise((r) => setTimeout(r, 200));
-    }
-}
-
-function connect(wsUrl) {
-    const ws = new WebSocket(wsUrl);
-    const pending = new Map();
-    let id = 0;
-    let dead = null;
-    const killAll = (why) => {
-        dead = why;
-        for (const [, slot] of pending) slot.reject(new Error(why));
-        pending.clear();
-    };
-    ws.addEventListener('message', (ev) => {
-        const msg = JSON.parse(ev.data);
-        const slot = pending.get(msg.id);
-        if (!slot) return;
-        pending.delete(msg.id);
-        clearTimeout(slot.timer);
-        msg.error ? slot.reject(new Error(msg.error.message)) : slot.resolve(msg.result);
-    });
-    // Without these two, an Electron that dies mid-run leaves every in-flight
-    // request unsettled and the script hangs with no output at all.
-    ws.addEventListener('close', () => killAll('CDP socket closed'));
-    ws.addEventListener('error', () => killAll('CDP socket error'));
-    const open = new Promise((resolve, reject) => {
-        ws.addEventListener('open', resolve, { once: true });
-        ws.addEventListener('error', () => reject(new Error('CDP socket failed')), { once: true });
-    });
-    const send = (method, params = {}) => new Promise((resolve, reject) => {
-        if (dead) return reject(new Error(dead));
-        const n = ++id;
-        const timer = setTimeout(() => {
-            pending.delete(n);
-            reject(new Error(`${method} timed out after ${SEND_TIMEOUT_MS}ms`));
-        }, SEND_TIMEOUT_MS);
-        pending.set(n, { resolve, reject, timer });
-        ws.send(JSON.stringify({ id: n, method, params }));
-    });
-    return { open, send, close: () => ws.close() };
-}
-
-// Runs an async arrow body in the page and returns its value.
-function evaluator(cdp) {
-    return async (body) => {
-        const res = await cdp.send('Runtime.evaluate', {
-            expression: `(async () => { ${body} })()`,
-            awaitPromise: true,
-            returnByValue: true,
-        });
-        if (res.exceptionDetails) {
-            throw new Error(res.exceptionDetails.exception?.description
-                || res.exceptionDetails.text);
-        }
-        return res.result.value;
-    };
 }
 
 // ─── Page-side helpers, injected once ────────────────────────────────────────
@@ -523,7 +443,7 @@ try {
         childExited.done ??= `exit code ${code}${sig ? ` (${sig})` : ''}`;
     });
 
-    const target = await waitForTarget(Date.now() + 45_000, childExited);
+    const target = await waitForTarget(PORT, Date.now() + 45_000, childExited);
     // A stranger's Electron on a colliding port must not be driven silently.
     const expected = `file://${DESKTOP}/renderer/index.html`;
     if (target.url !== expected) {
@@ -536,14 +456,11 @@ try {
 
     // Renderer scripts are classic <script> tags; wait for the document, not just
     // the target, or the tab buttons are not wired up yet.
-    let ready = false;
-    for (let i = 0; i < 100 && !ready; i++) {
-        ready = await evaluate("return document.readyState === 'complete' "
-            + "&& !!document.querySelector('.tab-btn')");
-        if (!ready) await new Promise((r) => setTimeout(r, 200));
+    if (!(await waitForRenderer(evaluate))) {
+        check('renderer ready', false, 'document never finished loading in 20s');
+    } else {
+        await run(evaluate, cdp);
     }
-    if (!ready) check('renderer ready', false, 'document never finished loading in 20s');
-    else await run(evaluate, cdp);
 } catch (err) {
     check('harness', false, err.message);
 } finally {
