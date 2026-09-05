@@ -14,7 +14,7 @@
    ---------------------------------------------------------------------------
    Built on Unlimit Design System 3.0 light foundations:
      • surface  = soft warm off-white   (canvas) / white (panels)
-     • accent   = brand purple #6B45E8   (lime is reserved for dark only)
+     • accent   = brand navy #416BD6   (lime is reserved for dark only)
      • status   = 600-level tones for AA contrast on light
    ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -23,36 +23,36 @@
    of the UI automatically. The point-fixes in section 2 catch the literals. */
 :root[data-theme="light"] {
     /* Surfaces — warm off-white canvas, white raised panels, warm-gray fills */
-    --bg-base: #faf9f6;      /* editor / main canvas (the "paper")           */
+    --bg-base: #F7F8FA;      /* editor / main canvas (the "paper")           */
     --bg-surface: #ffffff;   /* sidebar · rail · status bar · cards (raised) */
     --bg-elevated: #f1f0ea;  /* input fills · chips · menus · hover cards     */
     --bg-hover: #e7e5dd;     /* button / row hover                            */
 
-    --border: rgba(28, 26, 22, 0.10);
-    --border-strong: rgba(28, 26, 22, 0.18);
-    --border-focus: rgba(107, 69, 232, 0.55);
+    --border: #EEF0F3;
+    --border-strong: #DFE3E8;
+    --border-focus: #416BD6;
 
-    /* Accent → brand purple (UDS: lime only on pure black) */
-    --accent: #6b45e8;       /* purple-500          */
-    --accent-2: #5733ce;     /* purple-600 (hover)  */
-    --accent-fg: #ffffff;    /* text on purple      */
-    --accent-dim: rgba(107, 69, 232, 0.10);
-    --accent-glow: rgba(107, 69, 232, 0.22);
+    /* Accent → brand navy (UDS: lime only on pure black) */
+    --accent: #416BD6;       /* navy-500          */
+    --accent-2: #3B5DB5;     /* navy-600 (hover)  */
+    --accent-fg: #ffffff;    /* text on navy      */
+    --accent-dim: #EFF3FD;
+    --accent-glow: rgba(65, 107, 214, 0.22);
 
-    /* Legacy "lime" aliases also resolve to purple on light so the rail CTA,
+    /* Legacy "lime" aliases also resolve to navy on light so the rail CTA,
        New button, active meeting card, etc. stay on-brand. */
-    --accent-lime: #6b45e8;
+    --accent-lime: #416BD6;
     --accent-lime-ink: #ffffff;
-    --accent-lime-soft: rgba(107, 69, 232, 0.10);
-    --accent-lime-border: rgba(107, 69, 232, 0.40);
+    --accent-lime-soft: #EFF3FD;
+    --accent-lime-border: rgba(65, 107, 214, 0.40);
 
     /* Integration glyphs keep their identity */
     --obsidian: #7c3aed;
     --todoist: #e44332;
 
     /* Text — warm near-black ramp */
-    --text-primary: #20201c;
-    --text-secondary: #5a574f;
+    --text-primary: #0C0C0C;
+    --text-secondary: #444444;
     /* Was #837f74 (~4.0:1 on --bg-base) — under the 4.5:1 AA floor. This darker
        step clears it with headroom: 5.36:1 on --bg-base, 4.94:1 on
        --bg-elevated (the two surfaces it actually sits on). */
@@ -81,15 +81,15 @@
     background: rgba(250, 249, 246, 0.82);
 }
 
-/* Primary button glow — soften the lime-era 18px halo into a purple lift */
+/* Primary button glow — soften the lime-era 18px halo into a navy lift */
 [data-theme="light"] .btn-primary {
-    box-shadow: 0 2px 10px rgba(107, 69, 232, 0.24);
+    box-shadow: 0 2px 10px rgba(65, 107, 214, 0.24);
 }
 [data-theme="light"] .btn-primary:hover {
-    box-shadow: 0 4px 16px rgba(107, 69, 232, 0.30);
+    box-shadow: 0 4px 16px rgba(65, 107, 214, 0.30);
 }
 
-/* Lime hover literals (#d6ff52) → purple pressed */
+/* Lime hover literals (#d6ff52) → navy pressed */
 [data-theme="light"] .meeting-new-btn:hover,
 [data-theme="light"] .btn-rail-primary:hover {
     background: var(--accent-2);
@@ -111,7 +111,7 @@
     box-shadow: 0 24px 80px rgba(28, 26, 22, 0.22);
 }
 
-/* Chat: user bubble is purple now → white ink, not #000 */
+/* Chat: user bubble is navy now → white ink, not #000 */
 [data-theme="light"] .chat-message--user .chat-bubble {
     color: #fff;
 }
@@ -129,7 +129,7 @@
     background: rgba(28, 26, 22, 0.05);
 }
 
-/* Ask-AI FAB: purple bg → white ink, soft shadow (was color:#000 + inky) */
+/* Ask-AI FAB: navy bg → white ink, soft shadow (was color:#000 + inky) */
 [data-theme="light"] .live-ask-ai-fab {
     color: #fff;
     box-shadow: 0 4px 12px rgba(28, 26, 22, 0.16), 0 1px 3px rgba(28, 26, 22, 0.08);
@@ -169,22 +169,22 @@
 
 /* Source card "checked" border literal */
 [data-theme="light"] .record-source-card:has(input:checked) {
-    border-color: rgba(107, 69, 232, 0.35);
+    border-color: rgba(65, 107, 214, 0.35);
 }
-/* Toggle knob reads white once the track turns purple */
+/* Toggle knob reads white once the track turns navy */
 [data-theme="light"] .record-source-card:has(input:checked) .record-source-switch::after {
     background: #fff;
 }
 
-/* Active model card lime literals → purple */
+/* Active model card lime literals → navy */
 [data-theme="light"] .ts-model-card.is-active {
-    border-color: rgba(107, 69, 232, 0.45);
-    box-shadow: inset 0 0 0 1px rgba(107, 69, 232, 0.2);
+    border-color: rgba(65, 107, 214, 0.45);
+    box-shadow: inset 0 0 0 1px rgba(65, 107, 214, 0.2);
 }
 
 /* "Transcription in progress" banner used undefined vars w/ dark fallbacks */
 [data-theme="light"] .record-trans-active-banner {
-    background: rgba(107, 69, 232, 0.06);
+    background: rgba(65, 107, 214, 0.06);
     border-bottom-color: var(--border);
     color: var(--text-secondary);
 }

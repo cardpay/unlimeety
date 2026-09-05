@@ -19,19 +19,22 @@
 
 :root {
     /* Tightened dark scale used by the meeting redesign. */
-    --bg-base: #0a0a0d;
-    --bg-surface: #13131a;
-    --bg-elevated: #1c1c25;
+    --bg-base: #000000;
+    --bg-surface: #0C0C0C;
+    --bg-elevated: #171717;
     --bg-hover: #262633;
+    /* Solid neutral/900+800 (border/subtle, border/default) read as flat black
+       against bg-base/bg-surface — the ramp's darkest steps sit within 23/255
+       of each other. A translucent white line stays visible regardless. */
     --border: rgba(255, 255, 255, 0.08);
     --border-strong: rgba(255, 255, 255, 0.16);
-    --border-focus: rgba(198, 244, 50, 0.55);
+    --border-focus: #416BD6;
 
     /* Unlimit lime accent — primary across the whole app. */
-    --accent: #c6f432;
-    --accent-2: #a8d728;
-    --accent-fg: #0a0d04;
-    --accent-dim: rgba(198, 244, 50, 0.14);
+    --accent: #C5F23D;
+    --accent-2: #D3F168;
+    --accent-fg: #000000;
+    --accent-dim: rgba(197, 242, 61, 0.12);
     --accent-glow: rgba(198, 244, 50, 0.28);
 
     /* Legacy lime aliases kept so .rail-*, .meeting-card.active, .btn-rail-primary still work. */
@@ -44,14 +47,14 @@
     --obsidian: #7c3aed;
     --todoist: #e44332;
 
-    --text-primary: #ededf0;
-    --text-secondary: #8b8b9e;
-    --text-muted: #52525f;
+    --text-primary: #FFFFFF;
+    --text-secondary: #C7CDD6;
+    --text-muted: #838383;
 
-    --dirty: #f59e0b;
-    --saved: #34d399;
-    --danger: #f87171;
-    --info: #60a5fa;
+    --dirty: #FFB020;
+    --saved: #34C759;
+    --danger: #F04438;
+    --info: #3B82F6;
     --rec: #ef4444;
 
     --radius-sm: 6px;
