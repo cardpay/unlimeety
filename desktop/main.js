@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, Tray, nativeImage, screen, dialog, ipcMain, shell, systemPreferences, clipboard, safeStorage } = require('electron');
+const { app, BrowserWindow, Menu, Tray, nativeImage, screen, dialog, ipcMain, shell, systemPreferences, clipboard, safeStorage, nativeTheme } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -6,9 +6,57 @@ const { execFile, spawn } = require('child_process');
 const { normalizeSummary, hasValidFrontmatter } = require('./summary-frontmatter');
 const glossary = require('./glossary');
 const enhance = require('./transcript-enhance');
+const { createJobQueue } = require('./job-queue');
 
 const TRANSCRIPTS_FOLDER = path.join(os.homedir(), 'Downloads', 'Meet_Transcripts');
 const RECORDINGS_FOLDER = path.join(os.homedir(), 'Downloads', 'Meet_Recordings');
+
+// ─── Job queue ─────────────────────────────────────────────────────────────
+// Single queue for every transcribe/enhance/summarize run. Lanes are
+// registered next to each executor below (runEnhanceJob, runRecordTranscribeJob,
+// runSummarizeJob); this just creates the (pure, Electron-free) scheduler and
+// wires its broadcast to the renderer. See job-queue.js for the scheduling
+// rules and spec-universal-job-queue.md for the design.
+const queue = createJobQueue();
+queue.onChange((jobs) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    mainWindow.webContents.send('queue:changed', jobs);
+});
+
+// Background-queue a bigger, more accurate re-transcription of `filePath` —
+// used by live:saveTranscript (its own session's wav) and record:autoQueueTranscribe.
+// Its own successful completion chains an Enhance pass; see runRecordTranscribeJob's
+// return. Replaces the old autoPipelineQueue: same large-v3/diarize-on defaults,
+// now a visible, cancelable job instead of a silent 2s-polled FIFO.
+// `participants` is optional so live:saveTranscript's two-argument call keeps
+// working; runRecordTranscribeJob is what sanitises and merges it into the
+// transcript's "Participants:" line.
+function queueAutoTranscribe(filePath, language, participants = []) {
+    return queue.submit('transcribe', filePath, {
+        title: path.basename(filePath),
+        extra: {
+            filePath,
+            model: 'openai_whisper-large-v3',
+            // Falling through to runRecordTranscribeJob's own `|| 'ru'` would
+            // transcribe an unattended recording as Russian on the strength of
+            // a missing field. Detection is the honest answer when nobody said.
+            language: language || 'auto',
+            participants,
+            diarize: true,
+            // numberOfSpeakers left undefined — auto-detect.
+            // Read by runRecordTranscribeJob to mark `transcriber.background` —
+            // the quit flush uses that to avoid popping the window back up for
+            // a job nobody's watching. See the flush's before-quit handler.
+            background: true,
+        },
+    });
+}
+
+// The header panel's only bridge: one snapshot on demand, one cancel-by-id,
+// plus the `queue:changed` broadcast wired above.
+ipcMain.handle('queue:list', () => queue.list());
+ipcMain.handle('queue:cancel', (_e, jobId) => ({ ok: queue.cancel(jobId) }));
+ipcMain.handle('queue:dismiss', (_e, jobId) => ({ ok: queue.dismiss(jobId) }));
 
 // ─── Config (persisted to userData/config.json) ───────────────────────────────
 
@@ -236,7 +284,15 @@ app.on('before-quit', (e) => {
     cancelAutoStop();     // whatever the countdown was going to do, we're doing now
     const saved = new Promise((resolve) => { quitFlushDone = resolve; });
     if (rendererAlive) {
-        showMainWindow();  // the user should see "Finalizing…", not a Quit that hangs
+        // A live/record session is something the user is watching finish, so
+        // pop the window back up for "Finalizing…". A `transcriber` slot on
+        // its own can also just be a background auto-queue job (see
+        // queueAutoTranscribe) that nobody started or is watching — showing
+        // the window for that alone would be a Quit that appears to hang for
+        // no reason the user can see.
+        if (pending.has('live') || pending.has('record') || !transcriber.background) {
+            showMainWindow();
+        }
         triggerAutoStop(['live', 'record']); // renderers run the same stop+save as their Stop buttons
     }
     // Closing the transcriber's stdin cancels its run — it can't be waited out
@@ -272,7 +328,14 @@ function createWindow() {
                 ? path.join(__dirname, 'build', 'icon.png')
                 : path.join(__dirname, 'build', 'icon.icns'),
         titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
-        backgroundColor: '#0f0f13',
+        // Main only ever knows the OS-level scheme here — the actual `uds-theme`
+        // preference (which can override it to light/dark regardless of the OS)
+        // lives in the renderer's localStorage, unreachable before first paint.
+        // This is a best-effort pre-paint color, not the final answer: it matches
+        // 'system' exactly and gets the common case for an explicit choice too
+        // (most people who pick light/dark also run their OS the same way); the
+        // renderer repaints correctly regardless once theme-init.js runs.
+        backgroundColor: nativeTheme.shouldUseDarkColors ? '#0f0f13' : '#faf9f6',
         webPreferences: {
             preload: path.join(__dirname, 'preload.js'),
             contextIsolation: true,
@@ -461,6 +524,9 @@ function writeFileAtomic(target, content) {
     // The watcher keys suppression off a single filename, and the temp file's
     // creation is an event of its own; stamp its name first, the target's after.
     lastSelfWrite = { name: path.basename(tmp), at: Date.now() };
+    // The rename below replaces the target's content without the watcher ever
+    // telling the renderer, so the cached spoken-turn flag has to go with it.
+    spokenTurnsIndex.delete(target);
     let fd;
     try {
         fd = fs.openSync(tmp, 'wx', mode);
@@ -492,7 +558,7 @@ function writeTranscriptFile(filePath, content) {
         // data is out, and the watcher event can only arrive afterwards. Timing
         // it from before would spend the suppression window on the write itself
         // — worst on exactly the large notes where the re-read hurts most.
-        lastSelfWrite = { name: path.basename(target), at: Date.now() };
+        stampSelfWrite(target);
         currentFilePath = target;
         isDirty = false;
         updateTitle();
@@ -717,9 +783,20 @@ function meetingDateParts(transcriptPath, mtimeMs) {
     return dateParts(mtimeMs);
 }
 
+// Dotted — kept only for the legacy lookups below (dateFirstSummaryBase,
+// titleFirstDottedSummaryBase), which reconstruct exactly what earlier writer
+// shapes put on disk. The current writer (defaultSummaryBase) uses the dashed
+// formatter next to it instead.
 function formatDateDdMmYy(transcriptPath, mtimeMs) {
     const { y, mo, d } = meetingDateParts(transcriptPath, mtimeMs);
     return `${d}.${mo}.${y.slice(-2)}`;
+}
+
+// Matches recordingTimestamp()'s date portion — the two were dot vs dash for
+// no reason and sat visually apart for a recording and its own summary.
+function formatDateDashedYy(transcriptPath, mtimeMs) {
+    const { y, mo, d } = meetingDateParts(transcriptPath, mtimeMs);
+    return `${d}-${mo}-${y.slice(-2)}`;
 }
 
 function legacySummaryBase(transcriptPath) {
@@ -727,6 +804,27 @@ function legacySummaryBase(transcriptPath) {
 }
 
 function defaultSummaryBase(transcriptPath, info, mtimeMs) {
+    const rawTitle = info?.title || legacySummaryBase(transcriptPath);
+    const shortName = sanitizeFilenameChars(stripMeetPrefix(rawTitle));
+    if (!shortName) return legacySummaryBase(transcriptPath);
+    return `${shortName} ${formatDateDashedYy(transcriptPath, mtimeMs)}`;
+}
+
+// Summaries written between the date-suffix reorder and the dot→dash swap
+// used this title-first + dotted shape — exactly what defaultSummaryBase used
+// to produce. Kept only so findExistingSummaryPath can still locate those
+// files; new summaries are never written this way.
+function titleFirstDottedSummaryBase(transcriptPath, info, mtimeMs) {
+    const rawTitle = info?.title || legacySummaryBase(transcriptPath);
+    const shortName = sanitizeFilenameChars(stripMeetPrefix(rawTitle));
+    if (!shortName) return legacySummaryBase(transcriptPath);
+    return `${shortName} ${formatDateDdMmYy(transcriptPath, mtimeMs)}`;
+}
+
+// Summaries written before the date-suffix reorder used date-then-title. Kept
+// only so findExistingSummaryPath can still locate those pre-existing files —
+// new summaries are never written in this order.
+function dateFirstSummaryBase(transcriptPath, info, mtimeMs) {
     const rawTitle = info?.title || legacySummaryBase(transcriptPath);
     const shortName = sanitizeFilenameChars(stripMeetPrefix(rawTitle));
     if (!shortName) return legacySummaryBase(transcriptPath);
@@ -774,6 +872,16 @@ function summaryDirAllowed(transcriptPath, folderOverride) {
     return false;
 }
 
+// A summary written before a later Enhance or Re-transcribe is stale: both
+// rewrite the transcript in place, so its mtime moving past the summary's is
+// exactly "this summary no longer reflects the text". Best-effort: a summary
+// that vanishes between the find and the stat just reads as not outdated,
+// same as "no summary" would.
+function isSummaryOutdated(summaryPath, transcriptMtimeMs) {
+    try { return fs.statSync(summaryPath).mtimeMs < transcriptMtimeMs; }
+    catch { return false; }
+}
+
 function findExistingSummaryPath(transcriptPath, folderOverride) {
     const cfg = readConfig();
     const dir = folderOverride ?? cfg.summaryFolder ?? path.dirname(transcriptPath);
@@ -783,6 +891,8 @@ function findExistingSummaryPath(transcriptPath, folderOverride) {
     if (safeOverride) candidates.push(path.join(dir, safeOverride + '.summary.md'));
     const { info, mtimeMs } = readTranscriptInfoSync(transcriptPath);
     candidates.push(path.join(dir, defaultSummaryBase(transcriptPath, info, mtimeMs) + '.summary.md'));
+    candidates.push(path.join(dir, titleFirstDottedSummaryBase(transcriptPath, info, mtimeMs) + '.summary.md'));
+    candidates.push(path.join(dir, dateFirstSummaryBase(transcriptPath, info, mtimeMs) + '.summary.md'));
     candidates.push(path.join(dir, legacySummaryBase(transcriptPath) + '.summary.md'));
     for (const p of candidates) {
         if (fs.existsSync(p)) return p;
@@ -941,6 +1051,15 @@ ipcMain.handle('summary:load', (_e, transcriptPath, folder) => {
 
 // ─── IPC: Summarizer settings ─────────────────────────────────────────────────
 
+// Shared by the settings sanitizer and ollamaOptions() below: a positive
+// whole number, or '' for "not set". Capped well above any real model's
+// context window so a stray extra digit doesn't sail through unchecked.
+const MAX_OLLAMA_CONTEXT_TOKENS = 2_000_000;
+function parsePositiveInt(value, max) {
+    const n = Number(value);
+    return Number.isInteger(n) && n > 0 && n <= max ? n : '';
+}
+
 const DEFAULT_SUMMARIZER = {
     provider: 'claude-code', // 'claude-code' | 'openrouter' | 'ollama' | 'openai-compatible'
     openrouter: {
@@ -951,6 +1070,7 @@ const DEFAULT_SUMMARIZER = {
     ollama: {
         baseUrl: 'http://localhost:11434',
         model: 'llama3.1',
+        contextTokens: '', // blank = don't send `options.num_ctx`, keep Ollama's own default
     },
     openaiCompatible: {
         apiKey: '',
@@ -1010,6 +1130,11 @@ function readSummarizerConfig() {
 
 ipcMain.handle('settings:getSummarizer', () => readSummarizerConfig());
 
+// Shown at the foot of Settings. `app.getVersion()` reads the packaged
+// Info.plist, so a built app reports its real version rather than whatever
+// package.json happened to say at bundle time.
+ipcMain.handle('app:version', () => app.getVersion());
+
 ipcMain.handle('settings:getAutoStop', () => autoStopEnabled());
 ipcMain.handle('settings:setAutoStop', (_e, on) => { setAutoStopEnabled(Boolean(on)); return { ok: true }; });
 
@@ -1031,6 +1156,7 @@ ipcMain.handle('settings:setSummarizer', (_e, summarizer) => {
         ollama: {
             baseUrl: String(summarizer.ollama?.baseUrl || DEFAULT_SUMMARIZER.ollama.baseUrl).trim().replace(/\/+$/, ''),
             model: String(summarizer.ollama?.model || DEFAULT_SUMMARIZER.ollama.model).trim(),
+            contextTokens: parsePositiveInt(summarizer.ollama?.contextTokens, MAX_OLLAMA_CONTEXT_TOKENS),
         },
         openaiCompatible: {
             ...encryptApiKey(oaiKey),
@@ -1100,9 +1226,27 @@ const CLAUDE_ISOLATION_ARGS = ['--safe-mode', '--permission-mode', 'manual'];
 // chat message — all three route through runClaudeCode.
 let claudeIsolationSupported = true;
 
-async function runClaudeCode(content, promptInstruction) {
+// `onAbort`, when passed, is called with an `{ abort() }` handle as soon as
+// one exists (once per attempt — runClaudeCode's isolation-flag fallback
+// spawns a second child and hands over a second handle for it), so a caller
+// can store the latest one and invoke `.abort()` whenever it wants to cancel
+// — including before any handle existed yet, since the caller's own onAbort
+// re-checks whether cancellation was already requested each time it receives
+// a handle. Omitted by every caller below except summarize:run, so none of
+// them changes behavior.
+async function runClaudeCode(content, promptInstruction, onAbort) {
     const claudePath = await findClaude();
-    if (!claudePath) return { ok: false, notInstalled: true };
+    // `error` alongside `notInstalled` so a generic consumer (the job queue
+    // panel, which has no per-provider special-casing) still shows something
+    // actionable instead of a bare "Job failed." Summarize's own modal still
+    // reads `notInstalled` directly for its richer "Install it…" view.
+    if (!claudePath) {
+        return {
+            ok: false,
+            notInstalled: true,
+            error: 'Claude Code not found. Install it, or pick another provider in Settings.',
+        };
+    }
 
     const isWin = process.platform === 'win32';
     const extraPaths = isWin
@@ -1115,8 +1259,8 @@ async function runClaudeCode(content, promptInstruction) {
 
     if (claudeIsolationSupported) {
         const startedAt = Date.now();
-        const res = await spawnClaude(claudePath, [...CLAUDE_BASE_ARGS, ...CLAUDE_ISOLATION_ARGS], content, promptInstruction, extendedPath);
-        if (res.ok) return res;
+        const res = await spawnClaude(claudePath, [...CLAUDE_BASE_ARGS, ...CLAUDE_ISOLATION_ARGS], content, promptInstruction, extendedPath, onAbort);
+        if (res.ok || res.canceled) return res;
         // A CLI too old for the isolation flags rejects them outright — summarizing
         // unisolated beats not summarizing at all. Two rejection shapes, both from
         // the same cause: `unknown option '--safe-mode'` when the flag is missing
@@ -1133,13 +1277,33 @@ async function runClaudeCode(content, promptInstruction) {
         }
         claudeIsolationSupported = false;
     }
-    return spawnClaude(claudePath, CLAUDE_BASE_ARGS, content, promptInstruction, extendedPath);
+    return spawnClaude(claudePath, CLAUDE_BASE_ARGS, content, promptInstruction, extendedPath, onAbort);
 }
 
-function spawnClaude(claudePath, args, content, promptInstruction, extendedPath) {
+// SIGTERM alone leaves two gaps: a child that ignores/traps it never exits,
+// and on Windows `proc` is the shell spawned for the .cmd wrapper (see the
+// `shell: true` below) — killing the shell's PID doesn't kill the claude.cmd
+// grandchild actually doing the work. `taskkill /t` kills that whole tree;
+// on POSIX, a SIGKILL escalation after a grace period catches the rest.
+function killClaudeProcess(proc) {
+    if (process.platform === 'win32') {
+        if (proc.pid) execFile('taskkill', ['/pid', String(proc.pid), '/t', '/f'], () => {});
+        return;
+    }
+    proc.kill('SIGTERM');
+    const escalate = setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, 3000);
+    proc.once('exit', () => clearTimeout(escalate));
+}
+
+function spawnClaude(claudePath, args, content, promptInstruction, extendedPath, onAbort) {
     return new Promise((resolve) => {
         let stdout = '';
         let stderr = '';
+        // Set by our own onAbort handle, never by the timeout below (that path
+        // resolves itself before `close`/`error` can fire) — the only thing this
+        // flag has to distinguish is "killed because the user cancelled" from
+        // "killed/exited for any other reason".
+        let canceled = false;
 
         // Both the instruction and the transcript are fed via stdin and NOT as
         // argv — on Windows we spawn through a shell (claude is a .cmd), and any
@@ -1151,6 +1315,13 @@ function spawnClaude(claudePath, args, content, promptInstruction, extendedPath)
             stdio: ['pipe', 'pipe', 'pipe'],
             shell: process.platform === 'win32',
         });
+
+        // The abort handle exists the instant the child does. If the caller asked
+        // to cancel before this point (e.g. while findClaude() above was still
+        // resolving), that request is remembered by the caller, not by us — handing
+        // over the handle here gives it something to act on, and it fires the
+        // abort right back at us synchronously when that's the case.
+        if (onAbort) onAbort({ abort: () => { canceled = true; killClaudeProcess(proc); } });
 
         // A child that rejects its flags exits during this write, and a transcript
         // is far bigger than the pipe buffer — the rest of it then lands on a
@@ -1166,25 +1337,30 @@ function spawnClaude(claudePath, args, content, promptInstruction, extendedPath)
         proc.stderr.on('data', (d) => { stderr += d.toString(); });
 
         const timer = setTimeout(() => {
-            proc.kill();
+            killClaudeProcess(proc);
             resolve({ ok: false, error: 'Timed out (5 min). Make sure Claude Code is authenticated.' });
         }, 300_000);
 
         proc.on('close', (code) => {
             clearTimeout(timer);
+            if (canceled) { resolve({ ok: false, canceled: true }); return; }
             if (code === 0 && stdout.trim()) resolve({ ok: true, summary: stdout.trim() });
             else resolve({ ok: false, error: stderr.trim() || `Claude Code exited with code ${code}. Try running 'claude login' in a terminal to re-authenticate.` });
         });
 
         proc.on('error', (err) => {
             clearTimeout(timer);
+            if (canceled) { resolve({ ok: false, canceled: true }); return; }
             resolve({ ok: false, error: err.message });
         });
     });
 }
 
-async function fetchWithTimeout(url, options, timeoutMs) {
+async function fetchWithTimeout(url, options, timeoutMs, onAbort) {
     const controller = new AbortController();
+    // Built synchronously, unlike claude-code's child process — there is no gap
+    // for a cancel to land before this handle exists.
+    if (onAbort) onAbort({ abort: () => controller.abort() });
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
         return await fetch(url, { ...options, signal: controller.signal });
@@ -1193,11 +1369,25 @@ async function fetchWithTimeout(url, options, timeoutMs) {
     }
 }
 
-async function runOpenRouter(content, promptInstruction, config) {
+// The timeout above aborts the same AbortController a user cancel does, so an
+// AbortError alone doesn't say which one happened. Wraps `onAbort` so the
+// caller's own abort() — and only that — flips a local flag the catch block
+// can check.
+function withCancelFlag(onAbort) {
+    if (!onAbort) return { onAbort: null, wasCanceled: () => false };
+    let canceled = false;
+    return {
+        onAbort: (handle) => onAbort({ abort: () => { canceled = true; handle.abort(); } }),
+        wasCanceled: () => canceled,
+    };
+}
+
+async function runOpenRouter(content, promptInstruction, config, onAbort) {
     const { apiKey, model, baseUrl } = config;
     if (!apiKey) return { ok: false, error: 'OpenRouter API key is not set. Open Settings to add one.' };
     if (!model) return { ok: false, error: 'OpenRouter model is not set.' };
 
+    const abortState = withCancelFlag(onAbort);
     try {
         const res = await fetchWithTimeout(`${baseUrl}/chat/completions`, {
             method: 'POST',
@@ -1214,7 +1404,7 @@ async function runOpenRouter(content, promptInstruction, config) {
                     { role: 'user', content },
                 ],
             }),
-        }, 300_000);
+        }, 300_000, abortState.onAbort);
 
         if (!res.ok) {
             const text = await res.text().catch(() => '');
@@ -1225,12 +1415,16 @@ async function runOpenRouter(content, promptInstruction, config) {
         if (!summary) return { ok: false, error: 'OpenRouter returned an empty response.' };
         return { ok: true, summary };
     } catch (err) {
-        if (err.name === 'AbortError') return { ok: false, error: 'Request to OpenRouter timed out (5 min).' };
+        if (err.name === 'AbortError') {
+            return abortState.wasCanceled()
+                ? { ok: false, canceled: true }
+                : { ok: false, error: 'Request to OpenRouter timed out (5 min).' };
+        }
         return { ok: false, error: `OpenRouter request failed: ${err.message}` };
     }
 }
 
-async function runOpenAICompat(content, promptInstruction, config) {
+async function runOpenAICompat(content, promptInstruction, config, onAbort) {
     const { apiKey, model, baseUrl } = config;
     if (!baseUrl) return { ok: false, error: 'OpenAI-compatible base URL is not set. Open Settings to add one.' };
     if (!model) return { ok: false, error: 'OpenAI-compatible model is not set.' };
@@ -1241,6 +1435,7 @@ async function runOpenAICompat(content, promptInstruction, config) {
     const headers = { 'Content-Type': 'application/json' };
     if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
 
+    const abortState = withCancelFlag(onAbort);
     try {
         const res = await fetchWithTimeout(`${baseUrl}/chat/completions`, {
             method: 'POST',
@@ -1252,7 +1447,7 @@ async function runOpenAICompat(content, promptInstruction, config) {
                     { role: 'user', content },
                 ],
             }),
-        }, 300_000);
+        }, 300_000, abortState.onAbort);
 
         if (!res.ok) {
             const text = await res.text().catch(() => '');
@@ -1263,7 +1458,11 @@ async function runOpenAICompat(content, promptInstruction, config) {
         if (!summary) return { ok: false, error: 'OpenAI-compatible endpoint returned an empty response.' };
         return { ok: true, summary };
     } catch (err) {
-        if (err.name === 'AbortError') return { ok: false, error: 'Request to OpenAI-compatible endpoint timed out (5 min).' };
+        if (err.name === 'AbortError') {
+            return abortState.wasCanceled()
+                ? { ok: false, canceled: true }
+                : { ok: false, error: 'Request to OpenAI-compatible endpoint timed out (5 min).' };
+        }
         if (err.code === 'ECONNREFUSED' || /fetch failed/i.test(err.message)) {
             return { ok: false, error: `Cannot reach OpenAI-compatible endpoint at ${baseUrl}. Is the server running?` };
         }
@@ -1271,10 +1470,21 @@ async function runOpenAICompat(content, promptInstruction, config) {
     }
 }
 
-async function runOllama(content, promptInstruction, config) {
+// Ollama defaults to a small context window (2048-4096 tokens) regardless of
+// what the chosen model actually supports, silently truncating a large prompt
+// instead of erroring. `contextTokens` is a user-set escape hatch (Settings ->
+// Ollama) for whoever's model can take a bigger window; unset, this sends no
+// `options` at all and Ollama's own default behavior is unchanged.
+function ollamaOptions(config) {
+    const n = parsePositiveInt(config?.contextTokens, MAX_OLLAMA_CONTEXT_TOKENS);
+    return n ? { options: { num_ctx: n } } : {};
+}
+
+async function runOllama(content, promptInstruction, config, onAbort) {
     const { baseUrl, model } = config;
     if (!model) return { ok: false, error: 'Ollama model is not set.' };
 
+    const abortState = withCancelFlag(onAbort);
     try {
         const res = await fetchWithTimeout(`${baseUrl}/api/chat`, {
             method: 'POST',
@@ -1282,12 +1492,13 @@ async function runOllama(content, promptInstruction, config) {
             body: JSON.stringify({
                 model,
                 stream: false,
+                ...ollamaOptions(config),
                 messages: [
                     { role: 'system', content: promptInstruction },
                     { role: 'user', content },
                 ],
             }),
-        }, 600_000);
+        }, 600_000, abortState.onAbort);
 
         if (!res.ok) {
             const text = await res.text().catch(() => '');
@@ -1298,7 +1509,11 @@ async function runOllama(content, promptInstruction, config) {
         if (!summary) return { ok: false, error: 'Ollama returned an empty response.' };
         return { ok: true, summary };
     } catch (err) {
-        if (err.name === 'AbortError') return { ok: false, error: 'Request to Ollama timed out (10 min).' };
+        if (err.name === 'AbortError') {
+            return abortState.wasCanceled()
+                ? { ok: false, canceled: true }
+                : { ok: false, error: 'Request to Ollama timed out (10 min).' };
+        }
         if (err.code === 'ECONNREFUSED' || /fetch failed/i.test(err.message)) {
             return { ok: false, error: `Cannot reach Ollama at ${baseUrl}. Is it running? (\`ollama serve\`)` };
         }
@@ -1308,17 +1523,26 @@ async function runOllama(content, promptInstruction, config) {
 
 // One dispatch for every caller that sends text through the configured model —
 // summarize:run and transcripts:enhance. Returns { ok, summary } / { ok, error }.
-async function runSummarizerProvider(content, promptInstruction, cfg) {
+async function runSummarizerProvider(content, promptInstruction, cfg, onAbort) {
     switch (cfg.provider) {
-        case 'openrouter':        return runOpenRouter(content, promptInstruction, cfg.openrouter);
-        case 'ollama':            return runOllama(content, promptInstruction, cfg.ollama);
-        case 'openai-compatible': return runOpenAICompat(content, promptInstruction, cfg.openaiCompatible);
+        case 'openrouter':        return runOpenRouter(content, promptInstruction, cfg.openrouter, onAbort);
+        case 'ollama':            return runOllama(content, promptInstruction, cfg.ollama, onAbort);
+        case 'openai-compatible': return runOpenAICompat(content, promptInstruction, cfg.openaiCompatible, onAbort);
         case 'claude-code':
-        default:                  return runClaudeCode(content, promptInstruction);
+        default:                  return runClaudeCode(content, promptInstruction, onAbort);
     }
 }
 
-ipcMain.handle('summarize:run', async (_e, filePath, promptInstruction) => {
+// One summarize job at a time, process-wide — the summarize lane already
+// guarantees that; these two just carry the current run's cancel handle.
+// `summarizeAbort` holds whatever the active provider handed back through
+// `onAbort`; the lane's cancel hook (registered below) just calls it.
+let summarizeCancelRequested = false;
+let summarizeAbort = null;
+
+// The `summarize:run` body, unchanged — now called by the queue instead of
+// directly by the IPC handler, which only submits.
+async function runSummarizeJob(filePath, promptInstruction) {
     if (!canReadPath(filePath)) return { ok: false, error: 'File is not accessible.' };
     let content;
     try {
@@ -1338,7 +1562,19 @@ ipcMain.handle('summarize:run', async (_e, filePath, promptInstruction) => {
     }
 
     const cfg = readSummarizerConfig();
-    const result = await runSummarizerProvider(content, promptInstruction, cfg);
+    summarizeCancelRequested = false;
+    summarizeAbort = null;
+    let result;
+    try {
+        result = await runSummarizerProvider(content, promptInstruction, cfg, (handle) => {
+            summarizeAbort = handle;
+            // Cancel may have been requested before this provider had a handle to
+            // give us (e.g. claude-code's findClaude() gap) — fire it right away.
+            if (summarizeCancelRequested) handle.abort();
+        });
+    } finally {
+        summarizeAbort = null;
+    }
     if (!result?.ok) return result;
 
     // The frontmatter block is model output, delimiters and all — every provider
@@ -1366,6 +1602,25 @@ ipcMain.handle('summarize:run', async (_e, filePath, promptInstruction) => {
     const date = `${parts.y}-${parts.mo}-${parts.d}`;
     const { text, repairs } = normalizeSummary(result.summary, { date });
     return { ...result, summary: text, repairs };
+}
+
+queue.registerLane('summarize', {
+    run: (job) => runSummarizeJob(job.filePath, job.extra?.promptInstruction),
+    cancel: () => {
+        summarizeCancelRequested = true;
+        if (summarizeAbort) summarizeAbort.abort();
+    },
+});
+
+// Submits and returns immediately — the result arrives via `queue:changed`.
+// A second call for the same file while one is already queued/running just
+// hands back that job's id (see job-queue.js's duplicate collapse).
+ipcMain.handle('summarize:run', (_e, filePath, promptInstruction) => {
+    const job = queue.submit('summarize', filePath, {
+        title: path.basename(filePath),
+        extra: { promptInstruction },
+    });
+    return { ok: true, jobId: job.id };
 });
 
 // ─── IPC: Follow-up draft ─────────────────────────────────────────────────────
@@ -1546,7 +1801,7 @@ async function runChatOllama(transcriptContent, messages, config) {
         const res = await fetchWithTimeout(`${baseUrl}/api/chat`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ model, stream: false, messages: [systemMsg, ...messages] }),
+            body: JSON.stringify({ model, stream: false, ...ollamaOptions(config), messages: [systemMsg, ...messages] }),
         }, 600_000);
         if (!res.ok) {
             const text = await res.text().catch(() => '');
@@ -1596,15 +1851,42 @@ ipcMain.handle('chat:ask', async (_e, target, messages) => {
 
 // ─── IPC: Transcripts library ─────────────────────────────────────────────────
 
+// The keys below feed the library list's filtering/sorting; the meta
+// info-chip's own special-cased display (renderer/app.js's META_LABELS and
+// metaValue()) is a separate, unlinked list — a key added only here still
+// renders in the panel (parseTranscriptMeta has no whitelist), just without
+// whatever bespoke label/formatting a new special case would want.
 function parseTranscriptHeaderMain(content) {
-    const info = { title: null, generated: null, recordedAt: null, language: null, participants: [], source: null };
+    const info = {
+        title: null, generated: null, recordedAt: null, language: null,
+        participants: [], source: null, model: null, enhancedAt: null,
+        enhanceAttemptedAt: null, interrupted: false,
+    };
     for (const line of content.split('\n')) {
         if (line === '') break;
         if (line.startsWith('Meeting: '))         info.title       = line.slice(9).trim();
+        // Only value ever written is "PARTIAL … " (see the interrupted-run
+        // write site) — a cut-short transcript, the clearest re-transcribe
+        // candidate there is. Consumed by meetingMatchesFilter in
+        // renderer/app.js, via deriveMeetingFromTranscript's copy of this
+        // field. renderer/app.js's own parseTranscriptMeta independently
+        // checks the same "PARTIAL" prefix for the card's warning banner —
+        // unlinked, update both if the written text ever changes.
+        else if (line.startsWith('Status: '))     info.interrupted = /^PARTIAL\b/.test(line.slice(8).trim());
         else if (line.startsWith('Generated: '))  info.generated   = line.slice(11).trim();
         else if (line.startsWith('Recorded-At: ')) info.recordedAt = line.slice(13).trim();
         else if (line.startsWith('Language: '))   info.language    = line.slice(10).trim();
         else if (line.startsWith('Source: '))     info.source      = line.slice(8).trim();
+        // Provenance: which ASR model produced the text, and whether the Enhance
+        // proofreading pass has run over it. Absent on transcripts written before
+        // these lines existed, and on pasted ones — null, never a guess.
+        else if (line.startsWith('Model: '))      info.model       = line.slice(7).trim();
+        else if (line.startsWith('Enhanced: '))   info.enhancedAt  = line.slice(10).trim();
+        // A run whose proofreading pass rejected every part but still renamed
+        // speakers — not a proofreading pass (see runEnhanceJob), but a repeat
+        // run would hit the identical rejection, so it must still leave "To
+        // enhance" rather than sit there forever asking to be re-run.
+        else if (line.startsWith('Enhance-Attempted: ')) info.enhanceAttemptedAt = line.slice(19).trim();
         else if (line.startsWith('Participants: '))
             info.participants = line.slice(14).trim().split(', ').filter(Boolean);
     }
@@ -1657,10 +1939,44 @@ function mergeParticipants(...lists) {
 
 ipcMain.handle('transcripts:getFolder', () => TRANSCRIPTS_FOLDER);
 
+// Spoken-turn index: filePath -> { mtime, length, hasSpokenTurns }. Same shape
+// and same self-invalidation as contentIndex below. `loadLibrary` re-runs on
+// every watcher event — every finished job, every external edit, every rename —
+// and scanning each body per call costs 854 ms over 633 real transcripts against
+// 98 ms warm, so the answer is remembered per file. Keyed on mtime AND byte
+// length: two writes inside the same millisecond, or a restore that puts back an
+// old mtime, would otherwise serve a stale flag.
+const spokenTurnsIndex = new Map();
+
+// `raw` is handed in — this reads nothing from disk. transcripts:list has the
+// bytes already, and avoiding a second readFileSync is the point of caching.
+function cachedHasSpokenTurns(filePath, mtime, raw) {
+    const hit = spokenTurnsIndex.get(filePath);
+    if (hit && hit.mtime === mtime && hit.length === raw.length) return hit.hasSpokenTurns;
+    try {
+        const hasSpokenTurns = enhance.hasSpokenTurns(raw, NOTE_LABEL);
+        spokenTurnsIndex.set(filePath, { mtime, length: raw.length, hasSpokenTurns });
+        return hasSpokenTurns;
+    } catch (err) {
+        // Its own try: one odd body costs this flag alone. Inside the caller's
+        // try it would have dropped the whole row into the catch fallback,
+        // losing the title, model, enhancedAt, hasAudio and recordedAt-derived
+        // date that survived before this field existed. Nothing is cached here —
+        // a stored `false` is indistinguishable from a real "no turns" and would
+        // stick until the file changed. `err` is passed, not interpolated: a
+        // non-Error throw has no `.message`, and reading one would throw again,
+        // out of this try and into the caller's, which is the exact collapse
+        // this try exists to prevent.
+        console.warn('transcripts:list: spoken-turn scan failed for', filePath, err);
+        return false;
+    }
+}
+
 ipcMain.handle('transcripts:list', () => {
     try {
         if (!fs.existsSync(TRANSCRIPTS_FOLDER)) return [];
-        return fs.readdirSync(TRANSCRIPTS_FOLDER)
+        const listed = new Set();
+        const items = fs.readdirSync(TRANSCRIPTS_FOLDER)
             .filter(f => {
                 if (!f.endsWith('.txt')) return false;
                 try { return fs.statSync(path.join(TRANSCRIPTS_FOLDER, f)).isFile(); } catch { return false; }
@@ -1668,6 +1984,7 @@ ipcMain.handle('transcripts:list', () => {
             .map(f => {
                 const filePath = path.join(TRANSCRIPTS_FOLDER, f);
                 const stat = fs.statSync(filePath);
+                listed.add(filePath);
                 try {
                     const raw = fs.readFileSync(filePath, 'utf-8');
                     const blankIdx = raw.indexOf('\n\n');
@@ -1677,21 +1994,51 @@ ipcMain.handle('transcripts:list', () => {
                     const createdAt = Number.isFinite(recordedAtMs)
                         ? recordedAtMs
                         : (stat.birthtimeMs || stat.mtimeMs);
-                    const hasSummary = findExistingSummaryPath(filePath) !== null;
+                    const summaryPath = findExistingSummaryPath(filePath);
+                    const hasSummary = summaryPath !== null;
+                    const summaryOutdated = hasSummary && isSummaryOutdated(summaryPath, stat.mtimeMs);
                     const audioPaths = findRelatedAudioPaths(filePath);
                     const hasAudio = audioPaths.length > 0;
-                    return { filename: f, filePath, createdAt, mtime: stat.mtimeMs, hasSummary, hasAudio, audioPath: audioPaths[0] || null, ...info };
-                } catch {
+                    // Computed here because the renderer never holds the body of
+                    // a meeting it has not opened. Cached, own try.
+                    const hasSpokenTurns = cachedHasSpokenTurns(filePath, stat.mtimeMs, raw);
+                    // `head` verbatim as well as the parsed fields: the card's info
+                    // panel shows every header line, and this whitelist has never
+                    // covered all of them (older extension builds wrote `Started:`).
+                    return { filename: f, filePath, createdAt, mtime: stat.mtimeMs, hasSummary, summaryOutdated, hasAudio, hasSpokenTurns, readFailed: false, audioPath: audioPaths[0] || null, audioPaths, header: head, ...info };
+                } catch (err) {
+                    // Everything below is a fabricated default, not a finding —
+                    // the read, or the summary/audio lookup after it, never
+                    // completed. `readFailed` says so, and the sidebar's queues
+                    // exclude the row rather than offering an action that is
+                    // known to fail. Logged because the flag says only that
+                    // something failed, never what.
+                    console.warn('transcripts:list: could not describe', filePath, err);
+                    // audioPaths is the one exception to "fabricated, not a
+                    // finding": path existence doesn't depend on the read that
+                    // just failed, and mergeMeetings needs it to keep this
+                    // transcript's own wav from also double-carding as an
+                    // untranscribed recording. hasAudio itself stays the
+                    // fabricated default — nothing here asserts that finding.
+                    const audioPaths = findRelatedAudioPaths(filePath);
                     return {
                         filename: f, filePath,
                         createdAt: stat.birthtimeMs || stat.mtimeMs,
                         mtime: stat.mtimeMs,
-                        hasSummary: false, hasAudio: false,
+                        hasSummary: false, hasAudio: false, hasSpokenTurns: false, readFailed: true,
                         title: f, generated: null, participants: [],
+                        audioPath: audioPaths[0] || null, audioPaths,
                     };
                 }
             })
             .sort((a, b) => b.createdAt - a.createdAt);
+        // Deleted, renamed and moved-away files leave the index otherwise: a long
+        // session would grow it forever, and a path that comes back reused could
+        // be served the previous file's flag.
+        for (const key of spokenTurnsIndex.keys()) {
+            if (!listed.has(key)) spokenTurnsIndex.delete(key);
+        }
+        return items;
     } catch {
         return [];
     }
@@ -1747,6 +2094,17 @@ let libraryChangeTimer = null;
 // transcript in the folder and rebuild the sidebar mid-edit.
 let lastSelfWrite = { name: null, at: 0 };
 const SELF_WRITE_WINDOW_MS = 500; // covers the watcher's own 200ms coalescing
+
+// Suppressing the watcher means the renderer is not told this file changed, so
+// nothing else will invalidate what we cached about its content. mtime and byte
+// length normally do that on the next list by themselves; dropping the entry
+// here means a write that somehow preserved both cannot serve a stale flag —
+// which for hasSpokenTurns would grey out Enhance on a transcript the user just
+// pasted turns into.
+function stampSelfWrite(filePath) {
+    lastSelfWrite = { name: path.basename(filePath), at: Date.now() };
+    spokenTurnsIndex.delete(filePath);
+}
 
 ipcMain.handle('transcripts:watch', () => {
     if (libraryWatcher) return;
@@ -1984,7 +2342,7 @@ ipcMain.handle('transcripts:create', async (_e, payload) => {
         const language = typeof payload?.language === 'string' ? payload.language.trim() : '';
 
         const headerLines = [`Meeting: ${title}`];
-        headerLines.push(`Generated: ${new Date().toLocaleString()}`);
+        headerLines.push(`Generated: ${new Date().toISOString()}`);
         if (participants.length) headerLines.push(`Participants: ${participants.join(', ')}`);
         if (language) headerLines.push(`Language: ${language}`);
         const content = headerLines.join('\n') + '\n\n' + body.replace(/\s+$/, '') + '\n';
@@ -2005,26 +2363,42 @@ ipcMain.handle('transcripts:create', async (_e, payload) => {
 
 // One at a time, process-wide: two passes over the same transcript would each
 // hold a full copy in memory and the loser would write its stale one back.
-let enhanceInFlight = false;
+// The enhance lane already guarantees this; the flag only remains to let a
+// long-running pass notice a cancel between chunks.
 let enhanceCancelled = false;
 
 // Rejections before the first usable part: the same failure repeats on every
 // part, so there is nothing to learn from parts 4..500.
 const FAIL_FAST_PARTS = 3;
 
+// How much spoken text the naming prompt's glossary block is chosen from.
+// `glossary.select` is a synchronous O(words × terms) fuzzy scan on the main
+// process — a second per 40000 characters with a large glossary — and the
+// selection is capped at 40 entries anyway, so scanning a whole marathon
+// transcript would freeze the UI to pick the same handful of terms.
+const GLOSSARY_SCAN_CHARS = 40000;
+
 // Enhance is deliberately not a quit-flush slot (see before-quit): it holds
 // nothing that must be saved — the file is written only at the end — so quitting
 // mid-run costs model time, not data. Cancelling just stops the next call.
 app.on('before-quit', () => { enhanceCancelled = true; });
 
-ipcMain.handle('transcripts:enhanceCancel', () => {
-    // Only meaningful while a pass is running; the flag is cleared by the run
-    // itself, so setting it on an idle app is harmless.
-    enhanceCancelled = enhanceInFlight;
-    return { ok: true };
-});
+// Every enhance job — user-clicked or auto-chained after a transcribe (see
+// runRecordTranscribeJob's return) — runs through the queue, so it always has
+// a sink rather than the real `event.sender`. `isDestroyed: () => false` is
+// deliberate: a queued job outlives the window that submitted it, and
+// teardown-on-navigation belonged to a renderer-owned run.
+function makeEnhanceSink(updateProgress) {
+    return {
+        send: (_channel, payload) => updateProgress(payload),
+        once() {}, on() {}, off() {},
+        isDestroyed: () => false,
+    };
+}
 
-ipcMain.handle('transcripts:enhance', async (event, filePath) => {
+// Shared by the manual `transcripts:enhance` handler and any auto-chained
+// enhance — `sender` is always the queue's sink now (see makeEnhanceSink).
+async function runEnhanceJob(filePath, sender) {
     if (typeof filePath !== 'string' || !isPathInside(filePath, TRANSCRIPTS_FOLDER)) {
         return { ok: false, error: 'Refusing to operate on a path outside the transcripts folder.' };
     }
@@ -2036,7 +2410,6 @@ ipcMain.handle('transcripts:enhance', async (event, filePath) => {
     if (!canReadPath(filePath) || !canWritePath(filePath)) {
         return { ok: false, error: 'File is not accessible.' };
     }
-    if (enhanceInFlight) return { ok: false, error: 'Another transcript is being enhanced.' };
 
     let original;
     try {
@@ -2045,8 +2418,82 @@ ipcMain.handle('transcripts:enhance', async (event, filePath) => {
         return { ok: false, error: 'Could not read transcript file.' };
     }
 
-    const { header, body } = enhance.splitTranscript(original);
-    const blocks = enhance.parseBlocks(body);
+    const split = enhance.splitTranscript(original);
+    const body = split.body;
+    let header = split.header;
+    let blocks = enhance.parseBlocks(body);
+    const cfg = readSummarizerConfig();
+    // Parsed once for the whole run — both passes select from it, and `select`
+    // still runs per prompt so a block only carries the terms that text
+    // plausibly contains.
+    const glossaryEntries = glossary.parse(readConfig().glossary || '');
+
+    // A renderer that reloads or goes away can no longer show the result, and the
+    // run would otherwise hold the lock for hours and write the file under a
+    // window that knows nothing about it. Armed before the speaker pass, not
+    // after: that pass is a model call like any other and must be cancellable.
+    const stopOnGone = () => { enhanceCancelled = true; };
+    sender.once('destroyed', stopOnGone);
+    sender.on('did-start-navigation', stopOnGone);
+    enhanceCancelled = false;
+
+    // Name the speakers first, so the proofreading pass below sees real names
+    // (it restores misheard ones) and every chunk it validates already carries
+    // the final markers. A failure here is not a failure of Enhance: the
+    // placeholders simply stay, and the proofreading still runs.
+    let namedSpeakers = 0;
+    const placeholders = enhance.placeholderSpeakers(blocks, {
+        noteLabel: NOTE_LABEL,
+        phonetic: PHONETIC_LETTERS,
+    });
+    if (placeholders.length) {
+        if (!sender.isDestroyed()) {
+            sender.send('transcripts:enhanceProgress', { filePath, phase: 'speakers' });
+        }
+        const participants = enhance.participantsFromHeader(header);
+        const meetingTitle = parseTranscriptHeaderMain(header).title;
+        const evidence = enhance.speakerEvidence(blocks, NOTE_LABEL);
+        // Selected against the spoken text only, exactly as the proofreading loop
+        // below does and for the same reason: matching the rendered evidence also
+        // matches the marker lines, so a term that happens to be a participant's
+        // surname is selected by every transcript. Capped, because unlike the
+        // loop's per-chunk selection this one is a single scan over the whole
+        // file (see GLOSSARY_SCAN_CHARS).
+        const spokenBody = blocks
+            .filter((b) => !enhance.isNoteBlock(b, NOTE_LABEL))
+            .map((b) => b.text).join('\n')
+            .slice(0, GLOSSARY_SCAN_CHARS);
+        // Its own heading: the proofreading imperative ("restore these
+        // spellings") must not be the last thing a prompt says when the only
+        // answer wanted is `Placeholder -> Name`.
+        const terms = glossary.render(
+            glossary.select(glossaryEntries, spokenBody), glossary.REFERENCE_HEADING);
+        const instruction = enhance.speakerInstruction({ terms, meetingTitle, participants });
+        try {
+            const res = await runSummarizerProvider(
+                `Placeholders to identify: ${placeholders.join(', ')}\n\n${evidence}`,
+                instruction, cfg);
+            if (res?.ok && !enhanceCancelled) {
+                const named = enhance.parseSpeakerNames(res.summary, {
+                    labels: placeholders, body, participants, phonetic: PHONETIC_LETTERS,
+                });
+                if (named.size) {
+                    blocks = enhance.renameSpeakers(blocks, named);
+                    header = enhance.renameParticipantsLine(header, named, body);
+                    namedSpeakers = named.size;
+                }
+            } else {
+                console.warn(`enhance: speaker naming skipped — ${res?.error || 'provider failed'}`);
+            }
+        } catch (err) {
+            console.warn(`enhance: speaker naming threw — ${err.message}`);
+        }
+    }
+    // Surfaced to the user below: placeholders were left unnamed, which reads
+    // identically to "the model could not work the names out" — the very
+    // confusion this distinction exists to resolve.
+    const speakerNamingFailed = placeholders.length > 0 && namedSpeakers === 0;
+
     const targets = enhance.spokenTargets(blocks, NOTE_LABEL);
     if (!targets.length) {
         return {
@@ -2056,28 +2503,15 @@ ipcMain.handle('transcripts:enhance', async (event, filePath) => {
     }
 
     const chunks = enhance.chunkBlocks(targets);
-    const cfg = readSummarizerConfig();
-    // Parsed once for the whole run; `select` still runs per chunk, so the block
-    // only carries the terms that chunk plausibly contains.
-    const glossaryEntries = glossary.parse(readConfig().glossary || '');
 
-    // A renderer that reloads or goes away can no longer show the result, and the
-    // run would otherwise hold the lock for hours and write the file under a
-    // window that knows nothing about it.
-    const stopOnGone = () => { enhanceCancelled = true; };
-    event.sender.once('destroyed', stopOnGone);
-    event.sender.on('did-start-navigation', stopOnGone);
-
-    enhanceInFlight = true;
-    enhanceCancelled = false;
     let skipped = 0;
     let done = 0;
     try {
         for (let i = 0; i < chunks.length; i++) {
             if (enhanceCancelled) break;
             const chunk = chunks[i];
-            if (!event.sender.isDestroyed()) {
-                event.sender.send('transcripts:enhanceProgress', {
+            if (!sender.isDestroyed()) {
+                sender.send('transcripts:enhanceProgress', {
                     filePath, done: i, total: chunks.length, skipped,
                 });
             }
@@ -2120,7 +2554,10 @@ ipcMain.handle('transcripts:enhance', async (event, filePath) => {
 
         // Every part rejected is a failure, not a clean transcript. Saying
         // "nothing to fix" here would report a total model failure as success.
-        if (!done) {
+        // Named speakers are a result in their own right: if every proofreading
+        // part came back unusable but the speaker pass resolved names, those
+        // still belong in the file rather than being thrown away with the rest.
+        if (!done && !namedSpeakers) {
             if (enhanceCancelled) return { ok: false, canceled: true, applied: 0 };
             return {
                 ok: false,
@@ -2145,9 +2582,45 @@ ipcMain.handle('transcripts:enhance', async (event, filePath) => {
             return { ok: false, error: 'Transcript changed while it was being enhanced — nothing was written.' };
         }
 
-        const updated = enhance.matchLineEndings(enhance.assembleTranscript(header, blocks), original);
+        // `changed` reports whether the proofreading altered the text, so it is
+        // decided before the Enhanced stamp goes in — the stamp differs from the
+        // original by definition and would otherwise report every no-op pass as
+        // a change ("Nothing to fix" in the queue panel).
+        const proofread = enhance.matchLineEndings(enhance.assembleTranscript(header, blocks), original);
+        // Stamped even by a pass that fixed nothing: the header line answers
+        // "has Enhance run over this transcript", not "did it change anything",
+        // and a run that found nothing to fix is exactly the case the user must
+        // not be tempted to repeat. So a no-op pass still writes — the file
+        // gains one header line and nothing else.
+        // A cancelled run leaves the transcript only partly proofread and keeps
+        // what it got (see below) — but it does not get the stamp, or the
+        // indicator would claim a pass that never finished and talk the user out
+        // of the re-run they actually need.
+        // A run that only named speakers (`done === 0`, every proofreading part
+        // rejected) is not a proofreading pass either — it keeps the names, but
+        // the text it was supposed to clean up was never touched. It still gets
+        // its own stamp (never `Enhanced`, which would claim proofreading ran) —
+        // otherwise a re-run hits the identical rejection and "To enhance" never
+        // clears. `!namedSpeakers` cannot reach here: the early return above
+        // already bails when both are zero.
+        // A prior rejected run may have left `Enhance-Attempted:` in the header;
+        // stampHeaderLine only ever upserts its own key, so a later successful
+        // pass must drop that line itself or both stamps sit there forever,
+        // contradicting each other in the info panel.
+        const withoutAttempted = header.split('\n')
+            .filter((l) => !l.replace(/\r$/, '').startsWith('Enhance-Attempted: '))
+            .join('\n');
+        const stamped = enhanceCancelled
+            ? header
+            : done
+                ? enhance.stampHeaderLine(withoutAttempted, 'Enhanced', new Date().toISOString())
+                : enhance.stampHeaderLine(header, 'Enhance-Attempted', new Date().toISOString());
+        const updated = enhance.matchLineEndings(enhance.assembleTranscript(stamped, blocks), original);
         if (updated === original) {
-            return { ok: true, canceled: enhanceCancelled, total: chunks.length, skipped, changed: false };
+            return {
+                ok: true, canceled: enhanceCancelled, total: chunks.length, skipped,
+                namedSpeakers, speakerNamingFailed, changed: false,
+            };
         }
 
         writeFileAtomic(filePath, updated);
@@ -2155,21 +2628,32 @@ ipcMain.handle('transcripts:enhance', async (event, filePath) => {
         // can only arrive once the data is out. Not routed through that helper —
         // it also moves currentFilePath/isDirty, and Enhance runs on transcripts
         // that are not open in the editor.
-        lastSelfWrite = { name: path.basename(filePath), at: Date.now() };
+        stampSelfWrite(filePath);
         // Cancelling keeps the parts already proofread: they each passed the same
         // gate as any other part, and discarding an hour of model time because the
         // user stopped the rest would be its own kind of loss.
         return {
             ok: true, canceled: enhanceCancelled, total: chunks.length, skipped, applied: done,
-            changed: true, content: updated,
+            namedSpeakers, speakerNamingFailed, changed: proofread !== original, content: updated,
         };
     } catch (err) {
         return { ok: false, error: err.message };
     } finally {
-        enhanceInFlight = false;
         enhanceCancelled = false;
-        if (!event.sender.isDestroyed()) event.sender.off('did-start-navigation', stopOnGone);
+        if (!sender.isDestroyed()) sender.off('did-start-navigation', stopOnGone);
     }
+}
+
+queue.registerLane('enhance', {
+    run: (job, updateProgress) => runEnhanceJob(job.filePath, makeEnhanceSink(updateProgress)),
+    cancel: () => { enhanceCancelled = true; },
+});
+
+// Submits and returns immediately — the result (including the updated
+// content, for the in-editor reload) arrives via `queue:changed`.
+ipcMain.handle('transcripts:enhance', (_e, filePath) => {
+    const job = queue.submit('enhance', filePath, { title: path.basename(filePath) });
+    return { ok: true, jobId: job.id };
 });
 
 ipcMain.handle('transcripts:rename', async (_e, filePath, newTitle) => {
@@ -2245,6 +2729,9 @@ const live = {
     // matching stem — that way transcripts:list and record:list pair them up
     // automatically via findRelatedAudioPaths / recordingTranscriptPath.
     outputPath: null,
+    // WhisperKit model this session is running on, kept so the saved transcript
+    // can record which one produced its text. Set by live:start.
+    model: null,
     notes: [],            // freeform notes typed during this session: {text, at}
     notesStartedAt: null, // wall-clock anchor notes' elapsed offsets are measured from
 };
@@ -2316,6 +2803,15 @@ ipcMain.handle('live:platformOK', () => process.platform === 'darwin');
 // So we let the helper try; if `SCShareableContent` throws because the
 // permission isn't actually granted, swift surfaces a precise, user-actionable
 // error message that we render as a red banner in the stream.
+// Unlike screen-recording status (see the comment above this function), the
+// microphone TCC status is not known to lie or go stale — safe to surface
+// verbatim to the setup screens instead of the permanently-static hint text
+// both used to show regardless of whether the user had already granted it.
+function micPermissionStatus() {
+    if (process.platform !== 'darwin') return 'granted';
+    return systemPreferences.getMediaAccessStatus('microphone');
+}
+
 async function ensureMacPermissions() {
     if (process.platform !== 'darwin') return { ok: true };
 
@@ -2342,6 +2838,8 @@ ipcMain.handle('live:openScreenSettings', () => {
     shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture');
     return true;
 });
+
+ipcMain.handle('live:micStatus', () => micPermissionStatus());
 
 // ─── Calendar (EventKit) ────────────────────────────────────────────────────
 // One-shot query: spawn the swift helper, ask for nearby calendar events, read
@@ -2467,7 +2965,7 @@ ipcMain.handle('live:start', async (_e, opts) => {
 
     // Tee audio to a WAV under RECORDINGS_FOLDER using the Record tab's
     // naming convention. The stem becomes "HH-mm DD-MM-YY" (no user title)
-    // or "HH-mm DD-MM-YY <title>" when the user typed one. Collision suffix
+    // or "<title> HH-mm DD-MM-YY" when the user typed one. Collision suffix
     // " (N)" mirrors record:start so concurrent or rapid sessions don't
     // clobber each other.
     if (!fs.existsSync(RECORDINGS_FOLDER)) {
@@ -2502,6 +3000,7 @@ ipcMain.handle('live:start', async (_e, opts) => {
         live.stdoutBuf = '';
         live.stderrBuf = '';
         live.outputPath = outputPath;
+        live.model = payload.model;
         live.notes = [];
         // Provisional fallback — overwritten precisely once the helper's
         // 'recording' event fires (liveHandleEvent above). Stop is reachable
@@ -2536,12 +3035,15 @@ ipcMain.handle('live:start', async (_e, opts) => {
             }
         });
 
-        proc.on('exit', (code) => {
+        proc.on('exit', (code, signal) => {
             // Mirrors the recorder's exit: a helper that dies on its own never
             // reaches live:saveTranscript, so mirror the notes to disk while
             // outputPath still points at the (salvageable) WAV.
             flushNotesSidecar(live);
-            liveSendToRenderer({ type: 'exited', code });
+            // `signal` is the whole story when a helper is killed rather than
+            // returning: without it the renderer could only report the useless
+            // "code null" a crash leaves behind.
+            liveSendToRenderer({ type: 'exited', code, signal });
             live.proc = null;
             cancelAutoStop('live');
             closeNotesWindow();
@@ -2562,6 +3064,7 @@ ipcMain.handle('live:start', async (_e, opts) => {
     } catch (err) {
         live.proc = null;
         live.outputPath = null;
+        live.model = null;
         return { ok: false, error: err.message };
     }
 });
@@ -2708,7 +3211,12 @@ ipcMain.handle('live:saveTranscript', async (_e, payload) => {
 
         const headerLines = [`Meeting: ${title}`];
         if (recordedAtIso) headerLines.push(`Recorded-At: ${recordedAtIso}`);
-        headerLines.push(`Generated: ${new Date().toLocaleString()}`);
+        headerLines.push(`Generated: ${new Date().toISOString()}`);
+        // Which model produced this text. Live runs on whatever the user picked
+        // for the session — usually a light one, since it has to keep up with
+        // speech; the re-transcription queued below then rewrites this same file
+        // with large-v3 and this line along with it.
+        if (live.model) headerLines.push(`Model: ${live.model}`);
         if (participants.length) headerLines.push(`Participants: ${participants.join(', ')}`);
         if (language) headerLines.push(`Language: ${language}`);
 
@@ -2739,14 +3247,26 @@ ipcMain.handle('live:saveTranscript', async (_e, payload) => {
         // should come back with it.
         flushNotesSidecar(live);
         live.outputPath = null;
+        live.model = null;
         live.notes = [];
         live.notesStartedAt = null;
+        // Background-queue a bigger, more accurate re-transcription of this
+        // same session, then (on its success) an Enhance pass over the
+        // result — no manual action needed. Skipped if the wav never existed
+        // or has since vanished; nothing else here depends on it either way.
+        if (wavPath && fs.existsSync(wavPath)) queueAutoTranscribe(wavPath, language, calendarParticipants);
         noteSessionFlushed('live');
         return { ok: true, filePath, audioPath: wavPath };
     } catch (err) {
         // A failed save is still the end of the session — don't make a pending
         // Quit sit out its whole timeout waiting for a save that won't come.
         noteSessionFlushed('live');
+        // Otherwise the wav stays keyed to this outputPath forever: record:list
+        // excludes whatever it points at as "still being written", so a save
+        // that throws would hide an intact, playable recording from the
+        // library for the rest of the process's life.
+        live.outputPath = null;
+        mainWindow?.webContents.send('record:listChanged');
         return { ok: false, error: err.message };
     }
 });
@@ -2843,11 +3363,54 @@ const transcriber = {
     // letting it finish, so whatever `record:transcribe` writes afterwards is a
     // prefix of the real transcript and must not pass for a complete one.
     interrupted: false,
+    // True while the current job is an unattended auto-queue run (see
+    // queueAutoTranscribe) rather than something the user clicked — the
+    // quit flush reads this to decide whether popping the window back up
+    // is actually for the user's benefit. Set alongside `proc` in
+    // runRecordTranscribeJob, so it's always current for whichever job owns it.
+    background: false,
 };
 
 function recordSendToRenderer(event) {
     if (!mainWindow || mainWindow.isDestroyed()) return;
     mainWindow.webContents.send('record:event', event);
+}
+
+// A short, human label for the job panel — the Record tab keeps its own rich
+// per-segment live view (still fed by recordSendToRenderer below); this is
+// only the summary a header panel row has room for.
+function transcribeStatusLabel(evt) {
+    switch (evt?.type) {
+        case 'transcribeStarted': return 'Loading model…';
+        case 'modelDownload': {
+            const pct = Math.round(Math.max(0, Math.min(1, Number(evt.progress) || 0)) * 100);
+            return `Downloading model… ${pct}%`;
+        }
+        case 'loaded': return 'Audio loaded';
+        case 'transcribing': return 'Transcribing…';
+        case 'diarizing': return 'Labeling speakers…';
+        case 'diarizationComplete': return 'Saving transcript…';
+        case 'diarizationFailed': return 'Speaker labels unavailable — saving transcript…';
+        default: return null;
+    }
+}
+
+// The transcribe lane's sink: forwards every event to the Record tab exactly
+// as a manual run always has (whoever's on that tab keeps its live progress
+// view), and separately distills the job's own `progress` for the header
+// panel. Used for both the manual `record:transcribe` handler and any
+// auto-queued re-transcription — there is no more "silent" variant; every
+// transcribe job is an ordinary, visible job. Tagged with the producing
+// job's id/filePath: several transcribe jobs can exist at once (one running,
+// others queued) and record:event has no other way to say which job a given
+// segment/status update belongs to — without this, a background job's
+// progress renders into whatever the Record tab happens to have open.
+function makeTranscribeSink(job, updateProgress) {
+    return (evt) => {
+        recordSendToRenderer({ ...evt, jobId: job.id, filePath: job.filePath });
+        const label = transcribeStatusLabel(evt);
+        if (label) updateProgress({ label });
+    };
 }
 
 function recordHandleEvent(event) {
@@ -2881,7 +3444,7 @@ function defaultRecordingStem(title) {
     // 'Recording' is the placeholder used when the user didn't type a title
     // (see record:start handler). In that case the stem is just the timestamp.
     const isDefault = !cleaned || cleaned === 'Recording';
-    return isDefault ? stamp : `${stamp} ${cleaned}`;
+    return isDefault ? stamp : `${cleaned} ${stamp}`;
 }
 
 function defaultRecordingPath(title) {
@@ -2919,8 +3482,6 @@ function spawnHelperWithJsonStdout(onEvent) {
 }
 
 ipcMain.handle('record:platformOK', () => process.platform === 'darwin');
-
-ipcMain.handle('record:getFolder', () => RECORDINGS_FOLDER);
 
 ipcMain.handle('record:start', async (_e, opts) => {
     if (process.platform !== 'darwin') {
@@ -2972,12 +3533,14 @@ ipcMain.handle('record:start', async (_e, opts) => {
         recordSendToRenderer({ type: 'recorderExited', code });
         recorder.proc = null;
         recorder.outputPath = null;
+        mainWindow?.webContents.send('record:listChanged');
         cancelAutoStop('record');
     });
     recorder.proc.on('error', (err) => {
         recordSendToRenderer({ type: 'error', message: `helper spawn error: ${err.message}` });
         recorder.proc = null;
         recorder.outputPath = null;
+        mainWindow?.webContents.send('record:listChanged');
     });
 
     recorder.proc.stdin.write(JSON.stringify({
@@ -3007,10 +3570,31 @@ ipcMain.handle('record:stop', async () => {
     // this too, but it runs asynchronously and a Transcribe click right after
     // Stop & save would otherwise hit the "Stop recording before transcribing"
     // guard. Synchronously nulling here closes that race.
+    // No broadcast needed here: the persistent on('exit') listener registered
+    // in record:start runs before this await resolves (it's the same 'exit'
+    // event) and already nulled both fields and sent record:listChanged.
     recorder.proc = null;
     recorder.outputPath = null;
     noteSessionFlushed('record');
     return { ok: true };
+});
+
+// What the Record tab calls the moment a recording is saved: the wav needs no
+// further decisions, so it goes straight into the queue. Same platform gate as
+// `record:transcribe`, checked here rather than left for the queue to discover a
+// drain cycle later, and the same `canReadPath` confinement every
+// renderer-supplied path gets.
+ipcMain.handle('record:autoQueueTranscribe', (_e, filePath, language, participants) => {
+    if (process.platform !== 'darwin') {
+        return { ok: false, error: 'Local transcription is macOS-only.' };
+    }
+    if (!canReadPath(filePath)) return { ok: false, error: 'File is not accessible.' };
+    const job = queueAutoTranscribe(
+        filePath,
+        typeof language === 'string' ? language : '',
+        Array.isArray(participants) ? participants : [],
+    );
+    return { ok: true, jobId: job.id };
 });
 
 ipcMain.handle('record:openScreenSettings', () => {
@@ -3019,6 +3603,8 @@ ipcMain.handle('record:openScreenSettings', () => {
     return true;
 });
 
+ipcMain.handle('record:micStatus', () => micPermissionStatus());
+
 ipcMain.handle('record:list', () => {
     try {
         if (!fs.existsSync(RECORDINGS_FOLDER)) return [];
@@ -3026,6 +3612,10 @@ ipcMain.handle('record:list', () => {
             .filter(f => f.toLowerCase().endsWith('.wav'))
             .map(f => {
                 const filePath = path.join(RECORDINGS_FOLDER, f);
+                // A wav still being written (Record or Live tab, either one) is
+                // not a library row yet — no card to select/delete out from
+                // under the helper process still holding it open.
+                if (filePath === recorder.outputPath || filePath === live.outputPath) return null;
                 try {
                     const stat = fs.statSync(filePath);
                     if (!stat.isFile()) return null;
@@ -3170,64 +3760,6 @@ ipcMain.handle('record:deleteMany', async (_e, paths) => {
         return { ok: false, error: errors[0].error, errors };
     }
     return { ok: true, deleted, errors };
-});
-
-// Delete only the transcript paired with a given recording. The audio file
-// and any summary stay on disk.
-ipcMain.handle('record:deleteTranscript', async (_e, wavPath) => {
-    if (typeof wavPath !== 'string' || !wavPath.startsWith(RECORDINGS_FOLDER)) {
-        return { ok: false, error: 'Refusing to operate on a path outside the recordings folder.' };
-    }
-    const transcriptPath = recordingTranscriptPath(wavPath);
-    if (!fs.existsSync(transcriptPath)) {
-        return { ok: false, error: 'No transcript found for this recording.' };
-    }
-    const choice = dialog.showMessageBoxSync(mainWindow, {
-        type: 'warning',
-        buttons: ['Delete', 'Cancel'],
-        defaultId: 1,
-        cancelId: 1,
-        message: 'Delete the transcript?',
-        detail: 'Only the .txt transcript will be removed. The audio file and summary (if any) are kept.',
-    });
-    if (choice !== 0) return { ok: false, canceled: true };
-    try {
-        fs.unlinkSync(transcriptPath);
-        return { ok: true };
-    } catch (err) {
-        return { ok: false, error: err.message };
-    }
-});
-
-// Delete only the summary paired with a given recording. The audio file and
-// transcript stay on disk.
-ipcMain.handle('record:deleteSummary', async (_e, wavPath) => {
-    if (typeof wavPath !== 'string' || !wavPath.startsWith(RECORDINGS_FOLDER)) {
-        return { ok: false, error: 'Refusing to operate on a path outside the recordings folder.' };
-    }
-    const transcriptPath = recordingTranscriptPath(wavPath);
-    if (!fs.existsSync(transcriptPath)) {
-        return { ok: false, error: 'No transcript — no summary to delete.' };
-    }
-    const summaryPath = findExistingSummaryPath(transcriptPath);
-    if (!summaryPath) {
-        return { ok: false, error: 'No summary found for this recording.' };
-    }
-    const choice = dialog.showMessageBoxSync(mainWindow, {
-        type: 'warning',
-        buttons: ['Delete', 'Cancel'],
-        defaultId: 1,
-        cancelId: 1,
-        message: 'Delete the summary?',
-        detail: 'Only the summary file will be removed. The audio file and transcript are kept.',
-    });
-    if (choice !== 0) return { ok: false, canceled: true };
-    try {
-        fs.unlinkSync(summaryPath);
-        return { ok: true };
-    } catch (err) {
-        return { ok: false, error: err.message };
-    }
 });
 
 ipcMain.handle('record:rename', async (_e, wavPath, newTitle) => {
@@ -3385,11 +3917,15 @@ ipcMain.handle('record:pickAudioFile', async () => {
 
 // ─── Transcribe a saved WAV ──────────────────────────────────────────────────
 
-ipcMain.handle('record:transcribe', async (_e, opts) => {
+// Shared by the manual `record:transcribe` handler and any auto-queued
+// re-transcription (queueAutoTranscribe) — both now run through the
+// transcribe lane, so the queue guarantees only one of these is ever in
+// flight at a time. Every clean success queues its own Enhance pass; see the
+// return below.
+async function runRecordTranscribeJob(opts, sendEvent) {
     if (process.platform !== 'darwin') {
         return { ok: false, error: 'Local transcription is macOS-only.' };
     }
-    if (transcriber.proc) return { ok: false, error: 'A transcription is already running.' };
 
     const filePath = String(opts?.filePath || '');
     if (!canReadPath(filePath)) return { ok: false, error: 'File is not accessible.' };
@@ -3418,17 +3954,33 @@ ipcMain.handle('record:transcribe', async (_e, opts) => {
     // segments into one bubble. Applied after diarization labels are resolved.
     const mergeAdjacent = opts?.mergeAdjacent !== false; // default true
 
+    // Staleness guard (mirrors runEnhanceJob's own before/after content check):
+    // snapshot the canonical transcript path now, at job start, so the write
+    // far below can tell whether an editor's autosave — or a rename/delete —
+    // landed on it while this (possibly minutes-long) transcription ran. Only
+    // the non-partial path is snapshotted: an interrupted run writes to a
+    // distinct `.partial.txt` name that nothing else is racing to touch.
+    const targetTranscriptPath = recordingTranscriptPath(filePath);
+    let transcriptSnapshot;
+    try {
+        transcriptSnapshot = fs.readFileSync(targetTranscriptPath, 'utf-8');
+    } catch {
+        transcriptSnapshot = null; // no transcript there yet
+    }
+
     const segments = [];
     let diarSegments = null;
+    let detectedLanguage = null;
     let resolveDone;
     const done = new Promise((resolve) => { resolveDone = resolve; });
 
     const spawnRes = spawnHelperWithJsonStdout((evt) => {
-        recordSendToRenderer(evt);
+        sendEvent(evt);
         if (evt?.type === 'segment' && evt.final === true) segments.push(evt);
         if (evt?.type === 'diarizationComplete' && Array.isArray(evt.segments)) {
             diarSegments = evt.segments;
         }
+        if (evt?.type === 'languageDetected' && evt.language) detectedLanguage = evt.language;
         // The helper's command loop stays parked on `readLine()` after the
         // FileTranscriber task finishes, so `proc.exit` only fires when we
         // close stdin or SIGTERM the proc. Resolve on the `stopped` event
@@ -3442,14 +3994,15 @@ ipcMain.handle('record:transcribe', async (_e, opts) => {
     // Cleared at the start of every run, so a cancel that lands on one run
     // can't mark the next one partial. Every exit path below is covered.
     transcriber.interrupted = false;
+    transcriber.background = Boolean(opts?.background);
 
     transcriber.proc.on('exit', (code) => {
-        recordSendToRenderer({ type: 'transcriberExited', code });
+        sendEvent({ type: 'transcriberExited', code });
         transcriber.proc = null;
         resolveDone(code);
     });
     transcriber.proc.on('error', (err) => {
-        recordSendToRenderer({ type: 'error', message: `helper spawn error: ${err.message}` });
+        sendEvent({ type: 'error', message: `helper spawn error: ${err.message}` });
         transcriber.proc = null;
         resolveDone(-1);
     });
@@ -3555,7 +4108,15 @@ ipcMain.handle('record:transcribe', async (_e, opts) => {
         : recordingTranscriptPath(filePath);
     try {
         if (!fs.existsSync(TRANSCRIPTS_FOLDER)) fs.mkdirSync(TRANSCRIPTS_FOLDER, { recursive: true });
-        const title = path.basename(filePath, path.extname(filePath));
+        // A prior transcript for this same recording may already carry a real
+        // title — typed at Live save time, or set later via "Rename…" — while
+        // the wav itself keeps its timestamp-derived filename forever. Falling
+        // back to the filename stem reverts that title to a raw timestamp on
+        // every re-transcription; preferring the existing header keeps it.
+        const existingTitle = transcriptSnapshot
+            ? parseTranscriptHeaderMain(transcriptSnapshot).title
+            : null;
+        const title = existingTitle || path.basename(filePath, path.extname(filePath));
         const speakerParticipants = Array.from(new Set(
             finalSegments.map(s => humanizeSpeakerLabel(s.speaker)).filter(x => x && x !== '?' && x !== '…')
         ));
@@ -3575,9 +4136,17 @@ ipcMain.handle('record:transcribe', async (_e, opts) => {
         const headerLines = [`Meeting: ${title}`];
         if (interrupted) headerLines.push('Status: PARTIAL — transcription was interrupted, re-run it for the full text');
         if (recordedAtIso) headerLines.push(`Recorded-At: ${recordedAtIso}`);
-        headerLines.push(`Generated: ${new Date().toLocaleString()}`);
+        headerLines.push(`Generated: ${new Date().toISOString()}`);
+        headerLines.push(`Model: ${model}`);
         if (participants.length) headerLines.push(`Participants: ${participants.join(', ')}`);
-        if (language) headerLines.push(`Language: ${language}`);
+        // WhisperKit's own answer when it was told to detect the language
+        // ("auto") — writing the request verbatim would stamp every
+        // auto-detected transcript with the literal word "auto". Only
+        // substituted for "auto": when the user picked a specific language,
+        // that's what was requested and what belongs in the header, even if
+        // WhisperKit's own reported language ever disagreed with it.
+        const writtenLanguage = (language === 'auto' && detectedLanguage) || language;
+        if (writtenLanguage) headerLines.push(`Language: ${writtenLanguage}`);
         headerLines.push(`Source: ${filePath}`);
         const segBlocks = finalSegments.map(seg => {
             const t = formatHms(seg.start);
@@ -3590,7 +4159,29 @@ ipcMain.handle('record:transcribe', async (_e, opts) => {
         // {start, text} form, so it shares the Live writer's block builder.
         const body = interleaveNotes(segBlocks, buildNoteBlocks(recordedNotes));
         const content = headerLines.join('\n') + '\n\n' + body + (body ? '\n' : '');
-        fs.writeFileSync(transcriptPath, content, 'utf-8');
+
+        // Re-check right before writing: only meaningful for the canonical
+        // (non-partial) path — see the snapshot comment above.
+        if (transcriptPath === targetTranscriptPath) {
+            let currentContent;
+            try {
+                currentContent = fs.readFileSync(targetTranscriptPath, 'utf-8');
+            } catch {
+                currentContent = null;
+            }
+            if (currentContent !== transcriptSnapshot) {
+                noteSessionFlushed('transcriber');
+                return { ok: false, error: 'Transcript changed since transcription started — nothing was written.' };
+            }
+        }
+
+        // Unlike runEnhanceJob's write, deliberately not followed by
+        // stampSelfWrite: Enhance suppresses the watcher because it already
+        // pushes the updated content straight to an open editor, but a
+        // transcribe job has no such consumer — the folder watcher firing
+        // transcripts:changed is what tells the library this file exists (or
+        // changed) at all.
+        writeFileAtomic(transcriptPath, content);
         // Keep a partial out of Recent Documents — it isn't a document anyone
         // asked for, it's a salvage file.
         if (!interrupted) {
@@ -3620,27 +4211,54 @@ ipcMain.handle('record:transcribe', async (_e, opts) => {
         }
         noteSessionFlushed('transcriber');
         if (interrupted) return { ok: false, error: 'Transcription interrupted.', transcriptPath };
+        // Any clean transcription — manual, "Re-transcribe…", batch, or
+        // auto-queued — chains an Enhance pass over its own result. Submitted
+        // (not run inline) so it waits its turn behind whatever else is busy
+        // in the enhance lane.
+        queue.submit('enhance', transcriptPath, { title: path.basename(transcriptPath) });
         return { ok: true, transcriptPath };
     } catch (err) {
         noteSessionFlushed('transcriber');
         return { ok: false, error: err.message };
     }
+}
+
+queue.registerLane('transcribe', {
+    run: (job, updateProgress) => runRecordTranscribeJob(job.extra, makeTranscribeSink(job, updateProgress)),
+    cancel: () => {
+        // Captured now: `transcriber` is a single shared object, and the
+        // queue starts the NEXT transcribe job the instant this one settles
+        // — so by the time the backstop below fires, `transcriber.proc` may
+        // already be a different, unrelated helper process. Only ever act on
+        // the one we actually meant to cancel.
+        const proc = transcriber.proc;
+        if (!proc) return;
+        // Same prefix-not-a-transcript problem as the quit flush: the run
+        // stops where it stops, so whatever gets written is partial.
+        transcriber.interrupted = true;
+        try { proc.stdin.write(JSON.stringify({ cmd: 'stop' }) + '\n'); } catch {}
+        // Backstop, fire-and-forget: the queue doesn't wait on cancel() — it
+        // waits for runRecordTranscribeJob's own promise (`await done`) to
+        // settle, which the 'stopped' event above already unblocks in the
+        // common case. Cleared on exit (mirrors the old record:cancelTranscribe
+        // handler's own clearTimeout) so it can never reach into whatever the
+        // next job started in the meantime.
+        const t = setTimeout(() => {
+            if (transcriber.proc === proc) { try { proc.kill('SIGTERM'); } catch {} }
+        }, 5000);
+        proc.once('exit', () => clearTimeout(t));
+    },
 });
 
-ipcMain.handle('record:cancelTranscribe', async () => {
-    if (!transcriber.proc) return { ok: false, error: 'No transcription in progress.' };
-    // Same prefix-not-a-transcript problem as the quit flush: the run stops
-    // where it stops, so whatever gets written is partial.
-    transcriber.interrupted = true;
-    try { transcriber.proc.stdin.write(JSON.stringify({ cmd: 'stop' }) + '\n'); } catch {}
-    await new Promise((resolve) => {
-        const t = setTimeout(() => {
-            try { transcriber.proc?.kill('SIGTERM'); } catch {}
-            resolve();
-        }, 5000);
-        transcriber.proc?.once('exit', () => { clearTimeout(t); resolve(); });
+// Submits and returns immediately — progress and the final transcriptPath
+// arrive via `queue:changed`.
+ipcMain.handle('record:transcribe', (_e, opts) => {
+    const filePath = String(opts?.filePath || '');
+    const job = queue.submit('transcribe', filePath, {
+        title: path.basename(filePath || 'Recording'),
+        extra: opts,
     });
-    return { ok: true };
+    return { ok: true, jobId: job.id };
 });
 
 ipcMain.handle('record:getInstalledModels', () => {
@@ -3736,6 +4354,15 @@ function broadcastNotesChanged() {
         if (win && !win.isDestroyed()) win.webContents.send('notes:changed');
     }
 }
+
+// The main window's Settings panel is the only place `uds-theme` is chosen;
+// the notes window is a separate document that only resolves it once at load
+// (theme-init.js), so it needs telling. The prompt window gets no such
+// listener — it's transient enough that this was deliberately left out of
+// scope (spec-panel-windows-theme.md).
+ipcMain.on('theme:changed', () => {
+    if (notesWindow && !notesWindow.isDestroyed()) notesWindow.webContents.send('theme:changed');
+});
 
 // The floating window is closeable and reopenable mid-session, so it can't be
 // the source of truth for what has been captured — main is. Hand it the
@@ -3889,7 +4516,7 @@ function startCallMonitor() {
 }
 
 function stopCallMonitor() {
-    closePromptWindow();
+    closeCallPrompt();
     if (!callMonitor.proc) return;
     try { callMonitor.proc.stdin.write(JSON.stringify({ cmd: 'stopMonitor' }) + '\n'); } catch {}
     try { callMonitor.proc.stdin.end(); } catch {}
@@ -3900,7 +4527,7 @@ function stopCallMonitor() {
 function handleMonitorEvent(evt) {
     if (!evt || typeof evt.type !== 'string') return;
     if (evt.type === 'micActive') maybeShowPrompt(evt);
-    else if (evt.type === 'micInactive') closePromptWindow(); // call ended first
+    else if (evt.type === 'micInactive') closeCallPrompt(); // call ended first
 }
 
 function maybeShowPrompt(evt) {
@@ -3912,6 +4539,10 @@ function maybeShowPrompt(evt) {
 }
 
 function showPromptWindow(data) {
+    // One panel at a time: a call prompt left up when a recording starts by
+    // hand would otherwise be orphaned by the auto-stop prompt that replaces
+    // it — always-on-top, on every space, and with no handle left to close it.
+    closePromptWindow();
     const wa = screen.getPrimaryDisplay().workArea;
     const W = 360, H = 132;
     promptWindow = new BrowserWindow({
@@ -3958,7 +4589,8 @@ function showPromptWindow(data) {
         // does not focus/surface any window, so the main window is not promoted.
         if (process.platform === 'darwin') app.setActivationPolicy('regular');
     });
-    promptWindow.on('closed', () => { promptWindow = null; });
+    const win = promptWindow;
+    win.on('closed', () => { if (promptWindow === win) promptWindow = null; });
 }
 
 function closePromptWindow() {
@@ -4009,14 +4641,48 @@ async function currentCalendarTitle() {
             e.type === 'calendarEvents' ? { ok: true, events: Array.isArray(e.events) ? e.events : [] } : null);
         if (!res.ok) return '';
         const now = Date.now();
-        const hit = res.events.find((ev) => {
+        // Same two-phase shape as renderer/calendar-picker.js's currentEvent()
+        // — not the same code (main has no access to renderer modules), but
+        // it must stay the same shape: an all-day/multi-day entry ("PTO",
+        // "Sprint 42") is "ongoing" from midnight to midnight and would
+        // otherwise beat the real meeting to the pick, an untitled event
+        // can't prefill anything, and among several *ongoing* overlaps the
+        // shortest wins (a multi-hour block must not outrank the actual call
+        // happening inside it) — but an ongoing event always outranks a
+        // merely-upcoming one regardless of duration, and among upcoming
+        // candidates the EARLIEST start wins, not the shortest one. Merging
+        // both phases into one predicate + one tie-break would silently
+        // prefer a short meeting starting later over a long one starting
+        // sooner. Check both if this ever changes.
+        const MAX_MEETING_MS = 6 * 3600 * 1000;
+        let ongoing = null, ongoingLen = Infinity;
+        let next = null;
+        for (const ev of res.events) {
             const s = Date.parse(ev.start), end = Date.parse(ev.end);
-            return Number.isFinite(s) && Number.isFinite(end) && s <= now + 5 * 60000 && end >= now;
-        });
-        return hit?.title ? String(hit.title) : '';
+            if (!Number.isFinite(s) || !Number.isFinite(end)) continue;
+            if (end - s > MAX_MEETING_MS) continue;
+            if (!String(ev.title || '').trim()) continue;
+            if (s <= now && now <= end) {
+                if (!ongoing || end - s < ongoingLen) { ongoing = ev; ongoingLen = end - s; }
+            } else if (s > now && s <= now + 5 * 60000 && (!next || s < Date.parse(next.start))) {
+                next = ev;
+            }
+        }
+        const hit = ongoing || next;
+        return hit ? String(hit.title) : '';
     } catch {
         return '';
     }
+}
+
+// Chrome holds the input *device* open until its Meet window is closed, long
+// after it released the mic per-process — so `micInactive` can land minutes
+// after `meetingEnded` and tear down the "Meeting ended" prompt the user is
+// still looking at, while its countdown keeps running unseen. Call-detect
+// teardown therefore stops at a running countdown.
+function closeCallPrompt() {
+    if (autoStopTimer) return;
+    closePromptWindow();
 }
 
 ipcMain.on('prompt:record', () => triggerAutoRecord());
@@ -4053,6 +4719,12 @@ function onMeetingEnded(slot) {
         autoStopTimer = null;
         autoStopSlot = null;
         closePromptWindow();
+        // The conferencing app's own input device can report idle-then-active
+        // seconds after we stop, once it finally notices the mic released —
+        // same late flip that caused the original bug this cooldown avoids
+        // re-triggering on: a spurious "call just started" right after a call
+        // that just ended.
+        callMonitor.cooldownUntil = Date.now() + PROMPT_COOLDOWN_MS;
         triggerAutoStop([slot]);
     }, AUTOSTOP_COUNTDOWN_SEC * 1000);
 }
@@ -4086,7 +4758,10 @@ ipcMain.on('prompt:stopNow', () => {
     if (autoStopTimer) { clearTimeout(autoStopTimer); autoStopTimer = null; }
     autoStopSlot = null;
     closePromptWindow();
-    if (slot) triggerAutoStop([slot]);
+    if (slot) {
+        callMonitor.cooldownUntil = Date.now() + PROMPT_COOLDOWN_MS;
+        triggerAutoStop([slot]);
+    }
 });
 
 // "✕" — hide the overlay only. The countdown keeps running and stops us in the
