@@ -25,13 +25,24 @@ actor StreamingTranscriber {
     // Rolling PCM buffer (16 kHz mono).
     private var buffer: [Float] = []
     private var segmentStartSample: Int = 0
-    private var decodeTask: Task<Void, Never>?
-    // Serial chain of finalize-decodes. `feed` must return promptly (its caller
-    // is the audio SamplePipe consumer; if it blocks on an inline WhisperKit
-    // decode the lossy AsyncStream drops audio buffers). So finalize snapshots
-    // the buffer synchronously and appends the heavy decode to this chain, which
-    // runs one segment at a time in arrival order. `flush` awaits the tail.
-    private var finalizeChain: Task<Void, Never>?
+    // Serial chain of decodes — partial AND final alike. `feed` must return
+    // promptly (its caller is the audio SamplePipe consumer; if it blocks on an
+    // inline WhisperKit decode the lossy AsyncStream drops audio buffers). So
+    // both decode paths snapshot the buffer synchronously and append the heavy
+    // decode to this chain, which runs one at a time in arrival order.
+    // `flush` awaits the tail.
+    //
+    // The chain is not just for ordering: `WhisperKit.progress` is an
+    // unsynchronized mutable property that `transcribe` mutates on entry
+    // (`progress.addChild`) and reassigns on completion/cancellation. Two
+    // concurrent `transcribe` calls on the same instance therefore race on an
+    // NSProgress node — one drops the parent while the other takes a weak
+    // reference to it — and the objc runtime traps the process (SIGTRAP).
+    // Serializing every decode on one kit is what keeps that from happening.
+    private var decodeChain: Task<Void, Never>?
+    // Decodes enqueued but not yet finished. Used only to drop partial ticks
+    // while the chain is busy — see `enqueueDecode`.
+    private var queued = 0
     private var lastPartialEmit = Date(timeIntervalSince1970: 0)
     private var silenceSamples: Int = 0
 
@@ -160,31 +171,23 @@ actor StreamingTranscriber {
         if !buffer.isEmpty {
             finalizeCurrent()
         }
-        decodeTask?.cancel()
-        // Wait for every queued finalize-decode (including the one just enqueued)
-        // to finish so the last segments are emitted before the session tears down.
-        await finalizeChain?.value
+        // Wait for every queued decode (including the one just enqueued) to
+        // finish so the last segments are emitted before the session tears down.
+        await decodeChain?.value
     }
 
     // ─── Decoding ───────────────────────────────────────────────────────────
 
     private func schedulePartialDecode() {
-        decodeTask?.cancel()
-        let snapshot = buffer
-        let startSec = Double(segmentStartSample) / Double(sampleRate)
-
-        decodeTask = Task { [weak self] in
-            guard let self = self else { return }
-            await self.decodeAndEmit(samples: snapshot, startSec: startSec, final: false)
-        }
+        enqueueDecode(samples: buffer,
+                      startSec: Double(segmentStartSample) / Double(sampleRate),
+                      final: false)
     }
 
     // Synchronous: snapshots and resets the rolling buffer on the actor, then
-    // enqueues the (slow) decode onto `finalizeChain` so the caller — ultimately
-    // the audio pipe consumer — returns immediately instead of blocking on
-    // WhisperKit. Decodes still run one at a time, in arrival order.
+    // enqueues the (slow) decode so the caller — ultimately the audio pipe
+    // consumer — returns immediately instead of blocking on WhisperKit.
     private func finalizeCurrent() {
-        decodeTask?.cancel()
         let snapshot = buffer
         let startSec = Double(segmentStartSample) / Double(sampleRate)
         segmentStartSample += buffer.count
@@ -193,12 +196,28 @@ actor StreamingTranscriber {
 
         if snapshot.count < minSpeechSamples { return }
 
-        let previous = finalizeChain
-        finalizeChain = Task { [weak self] in
+        enqueueDecode(samples: snapshot, startSec: startSec, final: true)
+    }
+
+    private func enqueueDecode(samples: [Float], startSec: Double, final: Bool) {
+        // A partial is a preview: if a decode is already queued there is no
+        // point putting another one behind it — by the time it ran it would be
+        // stale, and the next tick is only `partialIntervalMs` away. A final
+        // carries a segment nothing else will re-emit, so it always queues.
+        if !final && queued > 0 { return }
+        queued += 1
+
+        let previous = decodeChain
+        decodeChain = Task { [weak self] in
             await previous?.value
             guard let self = self else { return }
-            await self.decodeAndEmit(samples: snapshot, startSec: startSec, final: true)
+            await self.decodeAndEmit(samples: samples, startSec: startSec, final: final)
+            await self.decodeDidFinish()
         }
+    }
+
+    private func decodeDidFinish() {
+        queued -= 1
     }
 
     private func decodeAndEmit(samples: [Float], startSec: Double, final: Bool) async {

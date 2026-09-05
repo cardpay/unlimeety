@@ -18,6 +18,7 @@
         console.warn('[record] window.recordApi is not exposed; Record tab disabled');
         return;
     }
+    const queueApi = window.queueApi;
 
     // ─── DOM refs ────────────────────────────────────────────────────────
     const $ = (id) => document.getElementById(id);
@@ -29,27 +30,40 @@
     const recordingSection  = $('record-recording');
     const tsSection         = $('record-transcribe-settings');
     const transcribeSection = $('record-transcribing');
+    // Wraps ts/transcribe sections — a top-level panel of its own (see
+    // record.css), shown independently of which tab is active underneath.
+    const transcribeFlowWrap = $('transcribe-flow');
 
     const srcMicCheck       = $('record-src-mic');
     const srcSystemCheck    = $('record-src-system');
     const titleInput        = $('record-title');
     const startBtn          = $('record-btn-start');
     const importBtn         = $('record-btn-import');
+    const settingsBtn       = $('record-btn-settings');
     const setupError        = $('record-setup-error');
     const openScreenSettingsBtn = $('record-open-screen-settings');
+    const micStatusEl       = $('record-mic-status');
 
     const statusDot   = $('record-status-dot');
     const statusText  = $('record-status-text');
     const timerEl     = $('record-timer');
     const outputPathEl = $('record-output-path');
     const stopBtn     = $('record-btn-stop');
+    // Language for the transcription that fires on Stop & save, offered twice:
+    // on the setup screen for when you already know it, and on the recording
+    // screen for when you find out mid-call. Not extra state — both read and
+    // write `batchSettings.language`, the same value #ts-lang-seg edits.
+    const setupLangSeg = $('record-setup-lang-seg');
+    const recLangSeg   = $('record-rec-lang-seg');
+    // Every language picker this tab owns. One list, so adding another one is a
+    // single edit and cannot half-wire itself.
+    const langSegs = [setupLangSeg, recLangSeg];
 
     const notesListEl  = $('record-notes-list');
     const notesEmptyEl = $('record-notes-empty');
     const notesInputEl = $('record-notes-input');
 
     // Transcribe-settings screen (Variant C) refs.
-    const tsCrumbCount   = $('ts-crumb-count');
     const tsBatchCount   = $('ts-batch-count');
     const tsBatchSub     = $('ts-batch-sub');
     const tsBatchList    = $('ts-batch-list');
@@ -91,25 +105,9 @@
     const transStream = $('record-trans-stream');
     const cancelTransBtn         = $('record-btn-cancel-trans');
     const newRecordingFromTransBtn = $('record-btn-new-recording');
-    const tsCrumbBack            = $('ts-crumb-back');
+    const tsBtnClose             = $('ts-btn-close');
     const transActiveBanner      = $('record-trans-active-banner');
     const viewQueueBtn           = $('record-btn-view-queue');
-
-    const sbList    = $('record-sb-list');
-    const sbEmpty   = $('record-sb-empty');
-    const sbCount   = $('record-sb-count');
-
-    // Inline audio player (sidebar). Lets the user listen to a recording —
-    // transcribed or not — without leaving the Record tab. Renderer is a
-    // file:// document, so the WAV path loads directly into <audio>.
-    const apBar       = $('record-ap');
-    const apAudioEl   = $('record-audio-el');
-    const apPlayBtn   = $('record-ap-play');
-    const apIconPlay  = $('record-ap-icon-play');
-    const apIconPause = $('record-ap-icon-pause');
-    const apWaveform  = $('record-ap-waveform');
-    const apTime      = $('record-ap-time');
-    const apSpeed     = $('record-ap-speed');
 
     document.getElementById('recording-indicator')
         ?.addEventListener('click', () => {
@@ -143,19 +141,13 @@
         timerInterval: null,
         outputPath: null,
         activeSources: [],
-        // Variant A — batch transcribe via sidebar checkbox flow.
-        selectedRecordings: new Set(),
-        // Tracks recordings that this renderer has already auto-selected. New
-        // pending entries are pre-checked once; if the user clears them, they
-        // stay cleared across refreshes because we never re-add them.
-        seenRecordings: new Set(),
         // Attendee names from a calendar event picked on the setup screen. Used
         // for the transcript's "Participants:" line when transcribing in the
         // same session (no participants field exists in the Record UI).
         calendarParticipants: [],
         batchSettings: {
             model: 'openai_whisper-large-v3',
-            language: 'ru',
+            language: 'auto',
             diarize: true,
             expectedSpeakers: '3',
             mergeAdjacent: true,
@@ -166,20 +158,36 @@
             // stays OFF by default. Users can still opt in via the toggle.
             vadFilter: false,
         },
+        // True only for the short window where runBatchTranscribe is still
+        // firing off its submit calls — guards against a double-click queuing
+        // the same batch twice. Not a transcribing indicator any more (the
+        // queue is): see anyTranscribeActive below.
         batchRunning: false,
         // Set when the user enters the settings screen: holds the file paths
         // queued for the eventual batch run. Cleared when the batch finishes
         // or the user backs out via Cancel.
         pendingBatchTargets: null,
-        // File paths currently being transcribed (single-file or batch).
-        // Drives the sidebar "is-transcribing" affordance + locks the CTA.
-        transcribingPaths: new Set(),
-        // Path of the recording currently loaded into the inline player (null
-        // when the player is hidden). Drives the per-card play/pause icon.
-        playingPath: null,
     };
 
+    // The recordings the transcribe-settings screen renders its batch rows
+    // from. The list itself lives in the Meetings sidebar (app.js) now; this
+    // tab keeps a copy only to label the batch it is about to run.
     let currentItems = [];
+
+    // ─── Job queue ───────────────────────────────────────────────────────
+    // The single source of truth for "is this file transcribing" — replaces
+    // the old locally-tracked `transcribingPaths` set, which could only ever
+    // reflect a run this renderer itself started sequentially. A submit now
+    // returns immediately, and a transcribe can just as well be an
+    // auto-chained re-transcription this tab never asked for.
+    let queueJobs = [];
+    // The job this tab's own "transcribing" screen (single-file flow) is
+    // currently watching — what the Cancel button on that screen targets.
+    let currentTranscribeJobId = null;
+
+    function anyTranscribeActive() {
+        return queueJobs.some((j) => j.type === 'transcribe' && (j.status === 'queued' || j.status === 'running'));
+    }
 
     // ─── Transcribe presets + auto-persisted settings (localStorage) ─────────
     // There's no main-process settings store; the renderer owns this. We keep
@@ -263,12 +271,60 @@
         persistBatchSettings();
         applyBatchSettingsToScreen();
         recomputeTsEta();
-        recomputeCta();
         renderPresetSelect();
     }
 
-    // Initial phase marker (used by CSS to hide the sidebar while recording).
-    document.body.dataset.recordPhase = state.phase;
+    // ── auto-transcribe ──
+    // Two pure helpers, kept together and free of module state so
+    // test/record-auto-transcribe.test.js can drive them directly.
+
+    // A recording this short holds no speech worth a large-v3 run — the job
+    // would spend minutes to fail with "produced no text". Below the threshold
+    // the wav is still saved and still listed under "To transcribe", so nothing
+    // is lost; it just is not queued automatically.
+    const MIN_AUTO_TRANSCRIBE_SEC = 1;
+
+    /// What to hand `autoQueueTranscribe` when a recording is saved, or null
+    /// when there is nothing worth transcribing. `event.path` is main's
+    /// canonical answer; `st.outputPath` is the one start() reported, used when
+    /// a `recordSaved` arrives without one.
+    function autoTranscribeArgs(event, st) {
+        const filePath = (event && event.path) || st.outputPath || '';
+        if (!filePath) return null;
+        // Absent duration (an older helper) must not block the queue — only a
+        // duration we have and know to be too short does.
+        const durationSec = Number(event && event.durationSec);
+        if (Number.isFinite(durationSec) && durationSec > 0 && durationSec < MIN_AUTO_TRANSCRIBE_SEC) {
+            return null;
+        }
+        return {
+            filePath,
+            language: st.batchSettings.language,
+            participants: Array.isArray(st.calendarParticipants) ? st.calendarParticipants : [],
+        };
+    }
+
+    /// Paint every language picker from one value. Both pickers go through
+    /// here, so the recording screen and the settings screen cannot disagree
+    /// about which language is selected. `aria-checked` rides along: the pills
+    /// are a radio group built from buttons, so it is the only thing that tells
+    /// a screen reader which one is chosen.
+    function paintLangSegs(containers, lang) {
+        for (const box of containers) {
+            if (!box) continue;
+            for (const seg of box.querySelectorAll('.ts-seg')) {
+                const on = seg.dataset.lang === lang;
+                seg.classList.toggle('is-active', on);
+                seg.setAttribute('aria-checked', on ? 'true' : 'false');
+            }
+        }
+    }
+    // ── end auto-transcribe ──
+
+    // The settings screen paints itself when it opens (renderTsScreen), but the
+    // Record tab's own two pickers would otherwise show the markup default until
+    // then — wrong for anyone whose persisted language is not Russian.
+    paintLangSegs([tsLangSeg, ...langSegs], state.batchSettings.language);
 
     // ─── Platform gating ─────────────────────────────────────────────────
     (async () => {
@@ -286,18 +342,78 @@
         api.watch();
     })();
 
+    // The hint below this used to always say "First launch: macOS will ask…"
+    // regardless of whether that had already happened. Real Microphone status
+    // replaces the guesswork for the two states worth reporting; Screen
+    // Recording is left as-is (see live.css) — that OS API is known to cache
+    // and lie right after a fresh grant, unlike this one. 'not-determined' —
+    // macOS hasn't even asked yet — is left blank rather than shown as denied;
+    // the static copy below already covers that case. Re-run every time the
+    // idle screen shows (see showSection): the very first Start click is what
+    // triggers the real prompt, so the answer is only known *after* it.
+    async function refreshMicStatus() {
+        const status = await api.micStatus?.();
+        if (!micStatusEl || !status) return;
+        if (status === 'granted') {
+            micStatusEl.textContent = 'Microphone: granted. ';
+            micStatusEl.classList.remove('is-denied');
+        } else if (status === 'denied' || status === 'restricted') {
+            micStatusEl.textContent = 'Microphone: not granted. ';
+            micStatusEl.classList.add('is-denied');
+        } else {
+            micStatusEl.textContent = '';
+            micStatusEl.classList.remove('is-denied');
+        }
+    }
+    refreshMicStatus();
+
     api.onListChanged(() => refreshHistory());
+
+    // The idle-screen "transcription in progress" banner reads `queueJobs` —
+    // refresh it on every broadcast, not just when this
+    // tab itself submitted the job (an auto-chained re-transcription from
+    // Live is just as much "transcribing" as one this tab started). Hydrated
+    // once up front too, or a reload leaves them stale until the next
+    // unrelated broadcast happens to arrive.
+    function onQueueJobsChanged(jobs) {
+        queueJobs = jobs;
+        updateTransActiveBanner();
+    }
+    queueApi?.onChanged(onQueueJobsChanged);
+    queueApi?.list().then(onQueueJobsChanged);
 
     // ─── Show/hide sections ──────────────────────────────────────────────
     function showSection(name) {
         state.phase = name;
-        document.body.dataset.recordPhase = name;
         setupSection.classList.toggle('hidden',      name !== 'idle');
         recordingSection.classList.toggle('hidden',  name !== 'recording');
         tsSection.classList.toggle('hidden',         name !== 'transcribeSettings');
         transcribeSection.classList.toggle('hidden', name !== 'transcribing');
+        transcribeFlowWrap?.classList.toggle('hidden', name !== 'transcribeSettings' && name !== 'transcribing');
         updateTransActiveBanner();
+        if (name === 'idle') refreshMicStatus();
     }
+
+    // #transcribe-flow is a top-level overlay now, not gated by the tab
+    // switcher — so live.js calls this on every tab-button click (Live,
+    // Record, or the recording-indicator pill) to make sure it can't stay
+    // pinned on top of a tab the user just switched away to. A pending batch
+    // config (not yet submitted) is abandoned like Cancel; an already-running
+    // transcription is left alone — same as the "New recording" button here,
+    // it keeps going in the queue, just off screen.
+    function closeTranscribeFlow() {
+        if (state.phase === 'transcribeSettings') cancelTranscribeSettings();
+        else if (state.phase === 'transcribing') showSection('idle');
+    }
+
+    // Escape closes #transcribe-flow, matching every other dismissible
+    // surface in the app (modals, popovers, context menus).
+    document.addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape') return;
+        if (!transcribeFlowWrap || transcribeFlowWrap.classList.contains('hidden')) return;
+        e.preventDefault();
+        closeTranscribeFlow();
+    });
 
     // Toolbar pill follows `state.recordingActive`, NOT the current section.
     // Recording can continue while the user is in transcribeSettings/transcribing
@@ -315,16 +431,39 @@
     }
 
     function updateTransActiveBanner() {
-        const active = state.transcribingPaths.size > 0 || state.batchRunning;
+        const active = anyTranscribeActive() || state.batchRunning;
         transActiveBanner?.classList.toggle('hidden', !active || state.phase !== 'idle');
     }
 
     openScreenSettingsBtn?.addEventListener('click', () => api.openScreenSettings());
 
+    // Troubleshoot block: copy the `tccutil reset …` command to the clipboard so
+    // the user can paste straight into Terminal. Read from the DOM rather than
+    // duplicated as a literal here, so the displayed and copied command cannot
+    // drift apart. Mirrors live.js's handler for the Live tab's own copy.
+    const copyTccBtn = $('record-copy-tcc-cmd');
+    const COPY_TCC_LABEL = 'Copy command';
+    copyTccBtn?.addEventListener('click', async () => {
+        const cmd = $('record-tcc-reset-cmd')?.textContent || '';
+        if (!cmd) return;
+        try {
+            await navigator.clipboard.writeText(cmd);
+            // Restore from the constant, not from whatever the label reads now:
+            // a second click inside the window would otherwise capture
+            // "Copied ✓" as the original and leave it there for good.
+            copyTccBtn.textContent = 'Copied ✓';
+            clearTimeout(copyTccBtn._restore);
+            copyTccBtn._restore = setTimeout(() => { copyTccBtn.textContent = COPY_TCC_LABEL; }, 1500);
+        } catch (_) {
+            // Clipboard blocked — the command is still visible in the <pre>
+            // for manual copy, so leave the label alone.
+        }
+    });
+
     // ─── Import an existing audio file ───────────────────────────────────
-    // Skips the sidebar checkbox flow: the imported file is not in the
-    // library; we treat it as a one-element batch and go straight to the
-    // transcription-settings screen.
+    // Skips the selection flow: the imported file is not in the recordings
+    // folder, so no card exists for it; we treat it as a one-element batch and
+    // go straight to the transcription-settings screen.
     importBtn?.addEventListener('click', async () => {
         setupError.classList.add('hidden');
         setupError.textContent = '';
@@ -341,17 +480,43 @@
         enterTranscribeSettings([res.filePath], { size: res.size || 0 });
     });
 
+    // ─── Open transcribe settings with nothing queued ────────────────────
+    // The only way to reach model/language/diarization defaults without
+    // picking a recording first — the sidebar's own settings entry point went
+    // out with the sidebar.
+    settingsBtn?.addEventListener('click', () => {
+        state.outputPath = null;
+        enterTranscribeSettings([]);
+    });
+
     // ─── Start recording ─────────────────────────────────────────────────
     // Calendar pre-fill: title flows into the WAV filename (→ "Meeting:");
     // participants are stashed for the transcribe step's "Participants:" line.
     // Shared by the picker (this tab's 📅 button) and the smart router
     // (calendar-smart.js), which routes here and pre-fills after switching tab.
-    function applyCalendarPick({ title, participants }) {
-        if (title) titleInput.value = title;
-        state.calendarParticipants = Array.isArray(participants) ? participants : [];
+    // An absent half is left alone. Only an explicit `clear` empties the field:
+    // a nameless calendar event reaches the smart router as `title: ''` and must
+    // not wipe a title typed by hand.
+    function applyCalendarPick({ title, participants, clear }) {
+        if (clear) titleInput.value = '';
+        else if (title) titleInput.value = title;
+        if (Array.isArray(participants)) state.calendarParticipants = participants;
     }
     window.calendarPicker?.attach({ button: $('record-cal-btn'), onPick: applyCalendarPick });
-    window.recordTab = { applyCalendarPick, enterTranscribeSettings };
+    // Re-read on every visit to this tab (live.js owns the switcher, so this is
+    // a listener of our own): the field used to keep whatever the calendar said
+    // the first time it was filled, so a meeting that ended hours ago was still
+    // pre-selected — and its title names the WAV file.
+    const calPrefill = window.calendarPicker?.autoPrefill({
+        input: titleInput,
+        onPick: applyCalendarPick,
+        // Also re-checked after the calendar read: a refresh started on the setup
+        // screen must not land once recording or transcribing is on screen.
+        active: () => state.phase === 'idle',
+    });
+    document.querySelector('#tab-switch .tab-btn[data-tab="record"]')
+        ?.addEventListener('click', () => { if (state.phase === 'idle') calPrefill?.refresh(); });
+    window.recordTab = { applyCalendarPick, enterTranscribeSettings, closeTranscribeFlow };
 
     startBtn.addEventListener('click', async () => {
         setupError.classList.add('hidden');
@@ -393,7 +558,6 @@
         outputPathEl.textContent = res.outputPath;
         buildWaveform();
         fillRecordFileCard();
-        updateStatusBar('recording');
     });
 
     // ─── Inline notes (freeform, timestamped) ───────────────────────────────
@@ -493,13 +657,6 @@
         }
     }
 
-    function updateStatusBar(phase) {
-        const path = document.getElementById('status-path');
-        if (phase === 'recording' && state.outputPath) {
-            if (path) path.textContent = `Recording → ${state.outputPath}`;
-        }
-    }
-
     // ─── Stop recording ──────────────────────────────────────────────────
     // Shared by the Stop button and the auto-stop trigger (main fires an
     // `autoStop` event when the meeting ended and the countdown elapsed).
@@ -530,27 +687,18 @@
         if (!targets.length) return;
         if (targets.length === 1) {
             const fp = targets[0];
-            state.transcribingPaths.add(fp);
-            renderSidebarList(currentItems);
-            recomputeCta();
-            updateTransActiveBanner();
-            updateTranscribeQueue(fp, []);
-            try {
-                await startTranscription(fp);
-            } finally {
-                state.transcribingPaths.delete(fp);
-                state.pendingBatchTargets = null;
-                clearTranscribeQueue();
-                renderSidebarList(currentItems);
-                recomputeCta();
-                updateTransActiveBanner();
-            }
+            state.pendingBatchTargets = null;
+            // The banner follows the queue now (see queueApi.onChanged
+            // below) — no local bookkeeping needed.
+            await startTranscription(fp);
         } else {
             await runBatchTranscribe(targets);
         }
     });
 
-    tsBtnCancel?.addEventListener('click', () => {
+    // Shared by the footer Cancel button and the header close (✕) — both back
+    // out of the batch the same way.
+    function cancelTranscribeSettings() {
         state.outputPath = null;
         state.pendingBatchTargets = null;
         if (tsError) {
@@ -559,7 +707,10 @@
         }
         showSection('idle');
         refreshHistory();
-    });
+    }
+
+    tsBtnCancel?.addEventListener('click', cancelTranscribeSettings);
+    tsBtnClose?.addEventListener('click', cancelTranscribeSettings);
 
     tsEditSelection?.addEventListener('click', () => {
         // Back to library — user adjusts checkboxes and hits Transcribe again.
@@ -656,25 +807,36 @@
     }
 
     cancelTransBtn.addEventListener('click', async () => {
+        if (!currentTranscribeJobId) return;
         cancelTransBtn.disabled = true;
         cancelTransBtn.querySelector('span:last-child').textContent = 'Cancelling…';
-        await api.cancelTranscribe();
+        await queueApi.cancel(currentTranscribeJobId);
         // We'll get a `transcriberExited` event; the settings screen is
         // restored from there.
     });
 
-    newRecordingFromTransBtn?.addEventListener('click', () => showSection('idle'));
-
-    tsCrumbBack?.addEventListener('click', () => {
-        state.pendingBatchTargets = null;
-        showSection('idle');
+    // Now that this screen opens over whichever tab launched it (usually
+    // Transcripts), "New recording" has to take the user to the Record tab
+    // itself, not just clear this screen — switching tabs is what closes it
+    // (see closeTranscribeFlow, called from live.js's switchTab).
+    newRecordingFromTransBtn?.addEventListener('click', () => {
+        document.querySelector('.tab-btn[data-tab="record"]')?.click();
     });
 
-    viewQueueBtn?.addEventListener('click', () => showSection('transcribing'));
+    // The on-page NOW/NEXT queue widget is gone — the header panel (app.js)
+    // is the one place that shows everything queued/running across every tab.
+    viewQueueBtn?.addEventListener('click', () => window.queuePanel?.open());
 
     // ─── Helper events ───────────────────────────────────────────────────
     api.onEvent((event) => {
         if (!event || typeof event.type !== 'string') return;
+        // Transcribe events are tagged with the producing job's id (see
+        // makeTranscribeSink in main.js) — several transcribe jobs can exist
+        // at once (one running, others queued), so a background job's
+        // segment/status events must not render into whatever this tab
+        // happens to have open. Recorder-lifecycle events (recording,
+        // audioLevel, recordSaved, …) carry no jobId and always pass through.
+        if (event.jobId && event.jobId !== currentTranscribeJobId) return;
 
         switch (event.type) {
             case 'autoStop':
@@ -702,14 +864,49 @@
                 updateRecordingIndicator();
                 stopTimer();
                 state.outputPath = event.path || state.outputPath;
-                updateStatusBar('idle');
-                // Return to the idle screen — the new recording shows up in
-                // the sidebar (pre-checked, courtesy of refreshHistory) and
-                // the user transcribes via the lime CTA. Only from the
-                // recording section: a stop that lands while a parallel
-                // transcription is on screen must not yank the user off it.
+                // Leave the recording screen FIRST. The submit below is the only
+                // thing here that can throw synchronously (a missing bridge
+                // method would), and a throw must not strand the user on a
+                // recording screen for a session that already ended.
+                // Only from the recording section: a stop that lands while a
+                // parallel transcription is on screen must not yank the user
+                // off it.
                 if (state.phase === 'recording') showSection('idle');
                 refreshHistory();
+                // Stop & save goes straight into transcription: nothing is left
+                // to decide, so the wav is queued here rather than parked under
+                // "To transcribe" for a manual trip through the settings screen.
+                // Fixed large-v3 + diarization + a chained Enhance all live in
+                // main's queueAutoTranscribe; the language is the one thing this
+                // tab picks. Progress belongs to the header queue panel and the
+                // idle screen's banner, so there is no screen to switch to.
+                const auto = autoTranscribeArgs(event, state);
+                // Whatever a previous stop failed with is stale now.
+                setupError.textContent = '';
+                setupError.classList.add('hidden');
+                // The finished meeting's title names the next WAV, so refresh it
+                // against the calendar whatever came of this recording — a stop
+                // too short to queue (autoTranscribeArgs → null) ends a session
+                // just the same.
+                calPrefill?.refresh();
+                // Calendar attendees belong to the session that just ended, queued
+                // or not — a stop too short to queue is still "the session ended".
+                // Consumed here, or recording #2 inherits recording #1's guest
+                // list into an unattended transcript header.
+                state.calendarParticipants = [];
+                if (auto) {
+                    const failed = (message) => {
+                        setupError.textContent = message || 'Could not start transcription.';
+                        setupError.classList.remove('hidden');
+                    };
+                    Promise.resolve()
+                        .then(() => api.autoQueueTranscribe(auto.filePath, auto.language, auto.participants))
+                        .then((res) => { if (!res?.ok) failed(res?.error); })
+                        // A rejection here means the IPC itself failed — the
+                        // handler threw, or the bridge is gone. Silence would
+                        // read as "transcription started" while nothing runs.
+                        .catch((err) => failed(err?.message));
+                }
                 break;
             }
 
@@ -718,7 +915,6 @@
                 updateRecordingIndicator();
                 if (state.phase === 'recording') {
                     // Helper died unexpectedly. Surface as setup error.
-                    updateStatusBar('idle');
                     showSection('idle');
                     setupError.textContent = `Recorder exited unexpectedly (code ${event.code}).`;
                     setupError.classList.remove('hidden');
@@ -790,15 +986,41 @@
         }
     });
 
-    async function startTranscription(filePath) {
-        showSection('transcribing');
-        setTransStatus('loading', 'Starting…');
-        transStream.innerHTML = '';
-        transDownload.classList.add('hidden');
-        transProgressBar.style.width = '0%';
+    // Resolves once `jobId` leaves the queue (done/failed/canceled), with the
+    // same { ok, transcriptPath } / { ok: false, error } shape the direct
+    // record:transcribe call used to resolve with — record:transcribe now
+    // only submits, so this is what actually waits for the result.
+    function waitForQueueJob(jobId) {
+        return new Promise((resolve) => {
+            let dispose;
+            const check = (jobs) => {
+                const job = jobs.find((j) => j.id === jobId);
+                if (!job) {
+                    // The only way a submitted job vanishes outright (rather
+                    // than settling to a terminal status) is a cancel while
+                    // it was still `queued` — job-queue.js drops those
+                    // instead of marking them. Without this the promise would
+                    // never resolve and this screen would hang forever.
+                    dispose?.();
+                    resolve({ ok: false, canceled: true });
+                    return;
+                }
+                if (job.status === 'queued') {
+                    setTransStatus('loading', 'Waiting for another transcription to finish…');
+                    return;
+                }
+                if (job.status === 'running') return; // per-event progress covers this (api.onEvent below)
+                dispose?.();
+                resolve(job.result || (job.error ? { ok: false, error: job.error } : { ok: false }));
+            };
+            dispose = queueApi.onChanged(check);
+            queueApi.list().then(check);
+        });
+    }
 
-        // Both single-file and batch flows go through the same settings
-        // screen — so the saved batchSettings are the source of truth.
+    // Both single-file and batch flows go through the same settings screen —
+    // so the saved batchSettings are the source of truth for either.
+    function buildTranscribeOpts(filePath) {
         const bs = state.batchSettings;
         // Expected-speakers pill → integer count; 'auto' and '6+' mean
         // "let the model decide" (no fixed count), so only a pure-digit
@@ -806,7 +1028,7 @@
         const numberOfSpeakers = /^\d+$/.test(bs.expectedSpeakers)
             ? parseInt(bs.expectedSpeakers, 10)
             : null;
-        const res = await api.transcribe({
+        return {
             filePath,
             model: bs.model,
             language: bs.language,
@@ -817,10 +1039,22 @@
             temperature: bs.temperature,
             vadFilter: bs.vadFilter,
             mergeAdjacent: bs.mergeAdjacent,
-        });
+        };
+    }
 
-        if (!res?.ok) {
-            setTransStatus('idle', res?.error || 'Transcription failed');
+    // Single-file flow only — batch submits directly via runBatchTranscribe
+    // and never shows this screen (see its own comment for why).
+    async function startTranscription(filePath) {
+        showSection('transcribing');
+        setTransStatus('loading', 'Starting…');
+        transStream.innerHTML = '';
+        transDownload.classList.add('hidden');
+        transProgressBar.style.width = '0%';
+
+        const submitRes = await api.transcribe(buildTranscribeOpts(filePath));
+
+        const fail = (message) => {
+            setTransStatus('idle', message || 'Transcription failed');
             // Surface a recovery affordance: a back button reusing cancel slot.
             cancelTransBtn.querySelector('span:last-child').textContent = 'Back';
             cancelTransBtn.disabled = false;
@@ -829,60 +1063,30 @@
                 cancelTransBtn.querySelector('span:last-child').textContent = 'Cancel';
                 showSection('transcribeSettings');
             };
-            return;
-        }
+        };
+
+        if (!submitRes?.ok) { fail(submitRes?.error); return; }
+
+        currentTranscribeJobId = submitRes.jobId;
+        const res = await waitForQueueJob(submitRes.jobId);
+        currentTranscribeJobId = null;
+
+        if (!res?.ok) { fail(res?.error); return; }
 
         showSection('idle');
         refreshHistory();
 
-        // Single-file flow: announce the freshly created transcript so the
-        // Transcripts tab (app.js) can jump to it and open it. In a batch run
-        // we stay put — the batch runner fires the event once at the very end
-        // (see runBatchTranscribe) and opens the last result.
-        if (!state.batchRunning && res.transcriptPath) {
+        // Announce the freshly created transcript so the Transcripts tab
+        // (app.js) can jump to it and open it.
+        if (res.transcriptPath) {
             document.dispatchEvent(new CustomEvent('transcript:created', {
                 detail: { filePath: res.transcriptPath },
             }));
         }
-        return res.transcriptPath;   // batch runner collects this
+        return res.transcriptPath;
     }
 
-    // ─── Transcribe queue UI ─────────────────────────────────────────────
-    function updateTranscribeQueue(currentPath, pendingPaths) {
-        const wrap = $('record-trans-queue');
-        const nowEl = $('record-trans-now-file');
-        const pendingWrap = $('record-trans-pending');
-        const pendingList = $('record-trans-pending-list');
-        if (!wrap) return;
-        if (!currentPath && (!pendingPaths || !pendingPaths.length)) {
-            wrap.classList.add('hidden');
-            return;
-        }
-        wrap.classList.remove('hidden');
-        if (nowEl) {
-            const base = currentPath ? (currentPath.split('/').pop() || currentPath) : '—';
-            nowEl.textContent = base.replace(/\.wav$/i, '');
-        }
-        const pending = (pendingPaths || []).filter(p => p && p !== currentPath);
-        if (!pendingList) return;
-        if (!pending.length) {
-            pendingWrap?.classList.add('hidden');
-            pendingList.innerHTML = '';
-            return;
-        }
-        pendingWrap?.classList.remove('hidden');
-        pendingList.innerHTML = '';
-        for (const p of pending) {
-            const li = document.createElement('li');
-            li.textContent = (p.split('/').pop() || p).replace(/\.wav$/i, '');
-            pendingList.appendChild(li);
-        }
-    }
-    function clearTranscribeQueue() {
-        updateTranscribeQueue(null, []);
-    }
-
-    // ─── Sidebar library: render + batch CTA ─────────────────────────────
+    // ─── Recordings, for the transcribe-settings screen only ─────────────
     function formatRelativeDay(epochMs) {
         const d = new Date(epochMs);
         const now = new Date();
@@ -893,530 +1097,78 @@
         return 'older';
     }
 
-    function groupRecordings(items) {
-        const today = [], earlier = [], older = [];
-        for (const it of items) {
-            const bucket = formatRelativeDay(it.createdAt || it.mtime || 0);
-            (bucket === 'today' ? today : bucket === 'earlier' ? earlier : older).push(it);
-        }
-        return { today, earlier, older };
-    }
-
-    function cardEl(item, opts) {
-        const isPending = !item.hasTranscript;
-        const isSelected = state.selectedRecordings.has(item.filePath);
-        const isTranscribing = state.transcribingPaths.has(item.filePath);
-        const card = document.createElement('div');
-        card.className = 'record-sb-card'
-            + (isPending ? '' : ' is-transcribed')
-            + (isSelected ? ' is-selected' : '')
-            + (isTranscribing ? ' is-transcribing' : '');
-        card.dataset.path = item.filePath;
-        const baseTitle = (item.filename || item.filePath?.split('/').pop() || 'Recording').replace(/\.wav$/i, '');
-        // New format on disk: "HH-mm dd-mm-yy" or "HH-mm dd-mm-yy <user title>",
-        // optionally followed by " (N)" collision suffix. Render with a colon
-        // between hours and minutes for readability. Legacy filenames (anything
-        // that doesn't match) are shown as-is.
-        const newFmt = /^(\d{2})-(\d{2}) (\d{2}-\d{2}-\d{2})(?: (.+?))?( \(\d+\))?$/;
-        const m = baseTitle.match(newFmt);
-        const title = m
-            ? `${m[1]}:${m[2]} ${m[3]}` + (m[4] ? ` — ${m[4]}` : '') + (m[5] || '')
-            : baseTitle;
-        const dur = item.durationSec
-            ? `${Math.floor(item.durationSec / 60)}m ${String(item.durationSec % 60).padStart(2, '0')}s`
-            : (item.size ? formatBytes(item.size) : '—');
-        const whenMs = item.createdAt || item.mtime;
-        const when = whenMs
-            ? new Date(whenMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-            : '';
-
-        const titleRow = document.createElement('div');
-        titleRow.className = 'record-sb-card-title-row';
-        // Play/pause affordance — available on every card (pending & transcribed).
-        const playBtn = document.createElement('button');
-        playBtn.type = 'button';
-        const isPlaying = state.playingPath === item.filePath;
-        playBtn.className = 'record-sb-card-play' + (isPlaying ? ' is-playing' : '');
-        playBtn.title = isPlaying ? 'Pause' : 'Play';
-        playBtn.setAttribute('aria-label', playBtn.title);
-        playBtn.textContent = isPlaying && !apAudioEl?.paused ? '⏸' : '▶';
-        playBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            togglePlay(item.filePath);
-        });
-        titleRow.appendChild(playBtn);
-        const cb = document.createElement('span');
-        cb.className = 'record-sb-card-checkbox';
-        titleRow.appendChild(cb);
-        const titleSpan = document.createElement('span');
-        titleSpan.className = 'record-sb-card-title';
-        titleSpan.textContent = title;
-        titleRow.appendChild(titleSpan);
-        if (opts?.isNew) {
-            const badge = document.createElement('span');
-            badge.className = 'record-sb-badge-new';
-            badge.textContent = 'NEW';
-            titleRow.appendChild(badge);
-        }
-        const moreBtn = document.createElement('button');
-        moreBtn.type = 'button';
-        moreBtn.className = 'record-sb-card-more';
-        moreBtn.title = 'More actions';
-        moreBtn.setAttribute('aria-label', 'More actions');
-        moreBtn.textContent = '⋯';
-        moreBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            openRecordingMenu(item, moreBtn);
-        });
-        titleRow.appendChild(moreBtn);
-
-        const meta = document.createElement('div');
-        meta.className = 'record-sb-card-meta';
-        meta.textContent = when ? `${dur} · ${when}` : dur;
-        if (!isPending) {
-            const tick = document.createElement('span');
-            tick.className = 'record-sb-card-check-mark';
-            tick.textContent = '✓';
-            meta.appendChild(tick);
-        }
-
-        card.appendChild(titleRow);
-        card.appendChild(meta);
-
-        if (!isTranscribing) {
-            card.addEventListener('click', () => {
-                if (state.selectedRecordings.has(item.filePath)) {
-                    state.selectedRecordings.delete(item.filePath);
-                } else {
-                    state.selectedRecordings.add(item.filePath);
-                }
-                renderSidebarList(currentItems);
-                recomputeCta();
-            });
-        }
-        if (!isPending) {
-            card.addEventListener('dblclick', () => {
-                api.showInFinder(item.filePath);
-            });
-        }
-        card.addEventListener('contextmenu', (e) => {
-            e.preventDefault();
-            openRecordingMenu(item, moreBtn, { x: e.clientX, y: e.clientY });
-        });
-        return card;
-    }
-
-    function renderSidebarList(items) {
-        currentItems = items;
-        if (sbCount) sbCount.textContent = String(items.length);
-        if (!sbList) return;
-        sbList.innerHTML = '';
-        if (sbEmpty) sbEmpty.classList.toggle('hidden', items.length > 0);
-        const groups = groupRecordings(items);
-        const groupSpecs = [
-            { key: 'today', label: 'Today', items: groups.today },
-            { key: 'earlier', label: 'Earlier this week', items: groups.earlier },
-            { key: 'older', label: 'Older', items: groups.older },
-        ];
-        const newestPending = items.find(it => !it.hasTranscript)?.filePath;
-        for (const g of groupSpecs) {
-            if (!g.items.length) continue;
-            const wrap = document.createElement('div');
-            wrap.className = 'record-sb-group';
-            const header = document.createElement('div');
-            header.className = 'record-sb-group-header';
-            header.textContent = g.label;
-            wrap.appendChild(header);
-            for (const it of g.items) {
-                wrap.appendChild(cardEl(it, { isNew: it.filePath === newestPending }));
-            }
-            sbList.appendChild(wrap);
-        }
-    }
-
-    function recomputeCta() {
-        const items = currentItems;
-        const selected = items.filter(it => state.selectedRecordings.has(it.filePath));
-        const n = selected.length;
-        const total = items.length;
-        const busy = state.batchRunning || state.transcribingPaths.size > 0;
-        const inFlight = state.transcribingPaths.size;
-
-        const summaryLabel = $('record-sb-summary-label');
-        const ctaLabel = $('record-sb-cta-label');
-        const ctaBtn = $('record-btn-transcribe-all');
-        const etaEl = $('record-sb-cta-eta');
-        const selectAll = $('record-sb-select-all');
-        const clearLink = $('record-sb-clear');
-        const deleteLink = $('record-sb-delete');
-        const masterCb = $('record-sb-master-cb');
-
-        if (summaryLabel) {
-            if (busy) summaryLabel.textContent = `Transcribing ${inFlight}…`;
-            else if (total === 0) summaryLabel.textContent = 'No recordings';
-            else if (n === total) summaryLabel.textContent = `${total} recordings — all selected`;
-            else if (n === 0) summaryLabel.textContent = `0 of ${total} selected`;
-            else summaryLabel.textContent = `${n} of ${total} selected`;
-        }
-        if (ctaLabel) {
-            if (busy) ctaLabel.textContent = `Transcribing… (${inFlight} left)`;
-            else if (n === 0) ctaLabel.textContent = 'Select recordings to transcribe';
-            else if (n === total) ctaLabel.textContent = `Send all ${n} to transcription`;
-            else ctaLabel.textContent = `Send ${n} selected to transcription`;
-        }
-        if (ctaBtn) {
-            const disabled = busy || n === 0;
-            ctaBtn.disabled = disabled;
-            ctaBtn.classList.toggle('is-disabled', disabled);
-        }
-        if (masterCb) masterCb.disabled = busy;
-        if (etaEl) {
-            if (n === 0) {
-                etaEl.textContent = total > 0 ? `${total} recordings — none selected` : '—';
-            } else {
-                const totalSec = selected.reduce((sum, it) => sum + (it.durationSec || 0), 0);
-                const etaSec = Math.round(totalSec * 0.073);
-                const m = Math.floor(etaSec / 60);
-                const s = etaSec % 60;
-                const etaStr = m ? `~${m}m ${String(s).padStart(2, '0')}s` : `~${etaSec}s`;
-                const modelLabel = MODEL_INFO[state.batchSettings.model]?.label || state.batchSettings.model;
-                etaEl.textContent = `${etaStr} · ${modelLabel} · ${state.batchSettings.language}`;
-            }
-        }
-        if (selectAll) selectAll.classList.toggle('hidden', busy || n === total || total === 0);
-        if (clearLink) clearLink.classList.toggle('hidden', busy || n === 0);
-        if (deleteLink) deleteLink.classList.toggle('hidden', busy || n === 0);
-        if (masterCb) {
-            masterCb.checked = total > 0 && n === total;
-        }
-    }
-
     let _refreshToken = 0;
+    // The recordings list is the Meetings sidebar's job now (app.js). This
+    // refresh exists only so the transcribe-settings screen can label its batch
+    // rows with a title, size and timestamp.
     async function refreshHistory() {
+        // Nothing on this tab reads `currentItems` unless the settings screen is
+        // up, and app.js runs its own record:list on every folder event — a
+        // third scan per event for a screen nobody is looking at is waste.
+        if (state.phase !== 'transcribeSettings') return;
         const token = ++_refreshToken;
         const items = await api.list();
         // Stale response — a newer refreshHistory() is in flight; drop this one
         // so we don't overwrite the latest view with older data.
         if (token !== _refreshToken) return;
-        // Drop selections for items that disappeared.
-        for (const p of Array.from(state.selectedRecordings)) {
-            if (!items.some(it => it.filePath === p)) {
-                state.selectedRecordings.delete(p);
-            }
-        }
-        // Drop seen entries for items removed from disk so the Set doesn't grow
-        // forever and so a re-imported file gets pre-checked again.
-        const present = new Set(items.map(it => it.filePath));
-        for (const p of Array.from(state.seenRecordings)) {
-            if (!present.has(p)) state.seenRecordings.delete(p);
-        }
-        // Stop the inline player if its recording was deleted/renamed away.
-        if (state.playingPath && !present.has(state.playingPath)) {
-            playerHide();
-        }
-        // Pre-check every pending recording on first appearance.
-        for (const it of items) {
-            if (!state.seenRecordings.has(it.filePath)) {
-                state.seenRecordings.add(it.filePath);
-                if (!it.hasTranscript) state.selectedRecordings.add(it.filePath);
-            }
-        }
-        renderSidebarList(items);
-        recomputeCta();
-        if (state.phase === 'transcribeSettings') {
-            renderTsScreen();
-        }
+        currentItems = items;
+        renderTsScreen();
     }
-
-    // ─── Inline audio player ─────────────────────────────────────────────
-    // Self-contained mirror of the Editor-tab player (app.js): waveform,
-    // click-to-seek, speed cycling. Loads the WAV straight from its file://
-    // path — no IPC, since item.filePath is the absolute path on disk.
-    const PLAYER_OK = !!(apBar && apAudioEl && apPlayBtn && apIconPlay && apIconPause
-        && apWaveform && apTime && apSpeed);
-    const WAVEFORM_BARS = 80;
-    const SPEEDS = [1, 1.5, 2, 0.75];
-    let apSpeedIdx = 0;
-    let apWaveBars = [];
-    let apWavePlayedIdx = -1;
-    let apWaveToken = 0;  // race-protect decoder against rapid track switches
-
-    function apFmtTime(sec) {
-        if (!isFinite(sec)) return '0:00';
-        const m = Math.floor(sec / 60), s = Math.floor(sec % 60);
-        return `${m}:${String(s).padStart(2, '0')}`;
-    }
-
-    function apRenderWaveform(peaks) {
-        apWaveform.innerHTML = '';
-        apWaveBars = [];
-        for (const p of peaks) {
-            const bar = document.createElement('div');
-            bar.className = 'ap-bar';
-            bar.style.height = `${Math.max(8, Math.round(p * 100))}%`;
-            apWaveform.appendChild(bar);
-            apWaveBars.push(bar);
-        }
-        apWavePlayedIdx = -1;
-    }
-
-    function apRenderPlaceholder() {
-        apRenderWaveform(new Array(WAVEFORM_BARS).fill(0.25));
-    }
-
-    function apUpdateProgress(pct) {
-        if (!apWaveBars.length) return;
-        const targetIdx = Math.floor(pct * apWaveBars.length);
-        if (targetIdx === apWavePlayedIdx) return;
-        if (targetIdx > apWavePlayedIdx) {
-            for (let i = Math.max(0, apWavePlayedIdx + 1); i <= targetIdx && i < apWaveBars.length; i++) {
-                apWaveBars[i].classList.add('played');
-            }
-        } else {
-            for (let i = apWavePlayedIdx; i > targetIdx && i >= 0; i--) {
-                apWaveBars[i].classList.remove('played');
-            }
-        }
-        apWavePlayedIdx = targetIdx;
-    }
-
-    async function apBuildWaveform(audioPath, numBars) {
-        const buf = await fetch(`file://${encodeURI(audioPath)}`).then(r => r.arrayBuffer());
-        const ctx = new (window.AudioContext || window.webkitAudioContext)();
-        try {
-            const audio = await ctx.decodeAudioData(buf);
-            const data = audio.getChannelData(0);
-            const bucket = Math.floor(data.length / numBars);
-            const peaks = new Array(numBars);
-            for (let i = 0; i < numBars; i++) {
-                let max = 0;
-                const start = i * bucket, end = start + bucket;
-                for (let j = start; j < end; j++) {
-                    const v = Math.abs(data[j]);
-                    if (v > max) max = v;
-                }
-                peaks[i] = max;
-            }
-            const peak = Math.max(...peaks, 0.01);
-            return peaks.map(p => p / peak);
-        } finally {
-            ctx.close();
-        }
-    }
-
-    function apSetPlayingIcon(playing) {
-        apIconPlay.classList.toggle('hidden', playing);
-        apIconPause.classList.toggle('hidden', !playing);
-    }
-
-    // Reflect play/pause state on the matching sidebar card button.
-    function apSyncCardButtons() {
-        if (!sbList) return;
-        const playing = state.playingPath && !apAudioEl.paused;
-        sbList.querySelectorAll('.record-sb-card-play').forEach((btn) => {
-            const card = btn.closest('.record-sb-card');
-            const isThis = card?.dataset.path === state.playingPath;
-            btn.classList.toggle('is-playing', !!isThis);
-            btn.textContent = isThis && playing ? '⏸' : '▶';
-            btn.title = isThis && playing ? 'Pause' : 'Play';
-            btn.setAttribute('aria-label', btn.title);
-        });
-    }
-
-    function apUpdateTime() {
-        const cur = apAudioEl.currentTime, dur = apAudioEl.duration;
-        apTime.textContent = `${apFmtTime(cur)} / ${apFmtTime(dur)}`;
-        apUpdateProgress(dur ? cur / dur : 0);
-    }
-
-    function playFile(filePath) {
-        if (!PLAYER_OK) return;
-        state.playingPath = filePath;
-        apAudioEl.src = `file://${encodeURI(filePath)}`;
-        apAudioEl.load();
-        apSetPlayingIcon(false);
-        apRenderPlaceholder();
-        apTime.textContent = '0:00 / 0:00';
-        apBar.classList.remove('hidden');
-        apSyncCardButtons();
-
-        const myToken = ++apWaveToken;
-        apBuildWaveform(filePath, WAVEFORM_BARS).then((peaks) => {
-            if (myToken !== apWaveToken) return;  // stale — another track loaded
-            apRenderWaveform(peaks);
-        }).catch((err) => {
-            console.warn('[record] waveform decode failed:', err);
-        });
-        apAudioEl.play().catch(() => {});
-    }
-
-    function playerHide() {
-        if (!PLAYER_OK) return;
-        apAudioEl.pause();
-        apAudioEl.src = '';
-        state.playingPath = null;
-        apSetPlayingIcon(false);
-        apBar.classList.add('hidden');
-        apWaveToken++;  // invalidate any in-flight decode
-        apSyncCardButtons();
-    }
-
-    function togglePlay(filePath) {
-        if (!PLAYER_OK) return;
-        if (state.playingPath === filePath) {
-            apAudioEl.paused ? apAudioEl.play().catch(() => {}) : apAudioEl.pause();
-        } else {
-            playFile(filePath);
-        }
-    }
-
-    if (PLAYER_OK) {
-        apPlayBtn.addEventListener('click', () => {
-            if (!state.playingPath) return;
-            apAudioEl.paused ? apAudioEl.play().catch(() => {}) : apAudioEl.pause();
-        });
-        apAudioEl.addEventListener('play',  () => { apAudioEl.playbackRate = SPEEDS[apSpeedIdx]; apSetPlayingIcon(true);  apSyncCardButtons(); });
-        apAudioEl.addEventListener('pause', () => { apSetPlayingIcon(false); apSyncCardButtons(); });
-        apAudioEl.addEventListener('ended', () => {
-            apSetPlayingIcon(false);
-            apUpdateProgress(0);
-            apSyncCardButtons();
-        });
-        apAudioEl.addEventListener('timeupdate', apUpdateTime);
-        apAudioEl.addEventListener('loadedmetadata', apUpdateTime);
-        apWaveform.addEventListener('click', (e) => {
-            const rect = apWaveform.getBoundingClientRect();
-            const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-            apAudioEl.currentTime = pct * (apAudioEl.duration || 0);
-            apUpdateProgress(pct);
-        });
-        apSpeed.addEventListener('click', () => {
-            apSpeedIdx = (apSpeedIdx + 1) % SPEEDS.length;
-            apAudioEl.playbackRate = SPEEDS[apSpeedIdx];
-            apSpeed.textContent = `${SPEEDS[apSpeedIdx]}×`;
-        });
-    }
-
-    // ─── Sidebar bindings ────────────────────────────────────────────────
-    $('record-sb-master-cb')?.addEventListener('change', (e) => {
-        if (e.target.checked) {
-            for (const it of currentItems) state.selectedRecordings.add(it.filePath);
-        } else {
-            state.selectedRecordings.clear();
-        }
-        renderSidebarList(currentItems);
-        recomputeCta();
-    });
-    $('record-sb-select-all')?.addEventListener('click', () => {
-        for (const it of currentItems) state.selectedRecordings.add(it.filePath);
-        renderSidebarList(currentItems);
-        recomputeCta();
-    });
-    $('record-sb-clear')?.addEventListener('click', () => {
-        state.selectedRecordings.clear();
-        renderSidebarList(currentItems);
-        recomputeCta();
-    });
-    $('record-sb-delete')?.addEventListener('click', async () => {
-        if (state.batchRunning) return;
-        const targets = currentItems
-            .filter(it => state.selectedRecordings.has(it.filePath))
-            .map(it => it.filePath);
-        if (!targets.length) return;
-        const res = await api.deleteMany(targets);
-        if (res?.ok) {
-            state.selectedRecordings.clear();
-            await refreshHistory();
-            recomputeCta();
-        }
-    });
-    $('record-btn-transcribe-all')?.addEventListener('click', () => {
-        if (state.batchRunning) return;
-        const targets = currentItems.filter(it => state.selectedRecordings.has(it.filePath));
-        if (!targets.length) return;
-        enterTranscribeSettings(targets.map(it => it.filePath));
-    });
 
     // Switch into the transcribe-settings screen pre-filled with the queued
-    // recordings (sidebar selection or a single imported file). The same
-    // screen handles N≥1 — single is the degenerate case of a 1-element batch.
+    // recordings — a Meetings-sidebar selection, one row's Transcribe… , or a
+    // single imported file. The same screen handles N≥1; single is the
+    // degenerate case of a 1-element batch.
     function enterTranscribeSettings(filePaths, opts = {}) {
+        // The settings/transcribing panel lives on the Transcripts tab now — an
+        // overlay of its own (see #transcribe-flow in record.css), not part of
+        // Record's tab panel. Make sure Transcripts is the tab shown underneath,
+        // regardless of which tab this was triggered from (e.g. Record's own
+        // "Import audio file…" button).
+        document.querySelector('.tab-btn[data-tab="editor"]')?.click();
         state.pendingBatchTargets = filePaths.slice();
         state.outputPath = filePaths[0] || null;
         renderTsScreen({ importedSize: opts.size });
         showSection('transcribeSettings');
+        // Same "move focus into the thing that just opened" convention as this
+        // app's modals (e.g. the New Transcript dialog). The close button is a
+        // safe, always-present landing spot — the screen has no single obvious
+        // first field the way a modal with one text input does.
+        tsBtnClose?.focus();
+        // Only now is the phase right for refreshHistory to run: the rows above
+        // are labelled from whatever `currentItems` still held, and this fills
+        // in size and timestamp for anything it did not know.
+        refreshHistory();
     }
 
+    // One submit per file — every one is accepted immediately and drained in
+    // order by the transcribe lane; the header panel (app.js) is what shows
+    // progress and failures now, not this screen. Replaces the old
+    // sequential await-per-file loop and its on-page NOW/NEXT queue widget.
     async function runBatchTranscribe(filePaths) {
         if (state.batchRunning) return;
         state.batchRunning = true;
-        state.transcribingPaths = new Set(filePaths);
-        renderSidebarList(currentItems);
-        recomputeCta();
-        updateTransActiveBanner();
-        const failures = [];
-        const created = [];
         try {
-            for (let i = 0; i < filePaths.length; i++) {
-                const fp = filePaths[i];
-                state.outputPath = fp;
-                updateTranscribeQueue(fp, filePaths.slice(i + 1));
-                try {
-                    const tp = await startTranscription(fp);
-                    // startTranscription does not throw on transcribe failures;
-                    // it surfaces a "Back" affordance and keeps phase === 'transcribing'.
-                    // Treat a non-idle phase after the await as a failure for this item.
-                    if (state.phase !== 'idle') failures.push({ path: fp });
-                    else if (tp) created.push(tp);
-                } catch (err) {
-                    failures.push({ path: fp, err: err?.message || String(err) });
-                } finally {
-                    state.transcribingPaths.delete(fp);
-                    renderSidebarList(currentItems);
-                    recomputeCta();
-                    updateTransActiveBanner();
-                }
+            // record:transcribe only ever submits (it can't refuse — see
+            // job-queue.js) so there is no submit-failure path to handle here;
+            // a bad file/path still fails, just later, as a failed job the
+            // header panel shows.
+            for (const fp of filePaths) {
+                await api.transcribe(buildTranscribeOpts(fp));
             }
         } finally {
             state.batchRunning = false;
-            state.transcribingPaths.clear();
             state.pendingBatchTargets = null;
-            state.selectedRecordings.clear();
-            clearTranscribeQueue();
             updateTransActiveBanner();
+            showSection('idle');
             refreshHistory();
-            // Whole batch done → jump to the last successfully created transcript.
-            if (created.length) {
-                document.dispatchEvent(new CustomEvent('transcript:created', {
-                    detail: { filePath: created[created.length - 1] },
-                }));
-            }
-            if (failures.length) {
-                console.error('Batch transcribe: failures', failures);
-                const errEl = $('record-setup-error');
-                if (errEl) {
-                    errEl.textContent = `${failures.length} of ${filePaths.length} failed. Check console.`;
-                    errEl.classList.remove('hidden');
-                }
-            }
         }
     }
-    $('record-sb-settings')?.addEventListener('click', () => {
-        // Sidebar `Settings…` now leads to the full transcription-settings
-        // screen with whatever pending recordings are currently selected
-        // (or an empty batch when nothing is checked).
-        const targets = currentItems
-            .filter(it => state.selectedRecordings.has(it.filePath))
-            .map(it => it.filePath);
-        enterTranscribeSettings(targets);
-    });
-
     // ─── Transcribe-settings screen wiring ──────────────────────────────
     function renderTsScreen({ importedSize } = {}) {
         const targets = state.pendingBatchTargets || [];
         const n = targets.length;
 
-        if (tsCrumbCount) tsCrumbCount.textContent = String(n);
         if (tsBatchCount) tsBatchCount.textContent = String(n);
         if (tsBtnTranscribeLabel) {
             tsBtnTranscribeLabel.textContent =
@@ -1435,7 +1187,7 @@
             if (!n) {
                 const empty = document.createElement('div');
                 empty.className = 'ts-batch-empty';
-                empty.textContent = 'No recordings selected. Use the sidebar to pick recordings.';
+                empty.textContent = 'No recordings selected. Pick them in the Meetings list.';
                 tsBatchList.appendChild(empty);
             }
             for (const fp of targets) {
@@ -1563,12 +1315,8 @@
                 }
             }
         }
-        // Language segmented
-        if (tsLangSeg) {
-            for (const seg of tsLangSeg.querySelectorAll('.ts-seg')) {
-                seg.classList.toggle('is-active', seg.dataset.lang === bs.language);
-            }
-        }
+        // Language segmented — both pickers, one value.
+        paintLangSegs([tsLangSeg, ...langSegs], bs.language);
         // Diarize switch + inner state
         if (tsDiarizeToggle) tsDiarizeToggle.checked = !!bs.diarize;
         if (tsDiaInner) tsDiaInner.classList.toggle('is-disabled', !bs.diarize);
@@ -1642,20 +1390,18 @@
             onBatchSettingsChanged();
             applyBatchSettingsToScreen();
             recomputeTsEta();
-            recomputeCta();
         });
     }
-    if (tsLangSeg) {
-        tsLangSeg.addEventListener('click', (ev) => {
-            const seg = ev.target.closest('.ts-seg');
-            if (!seg) return;
-            const lang = seg.dataset.lang;
-            if (!lang || lang === 'more') return;
+    // One handler for both pickers: they write the same setting, so a second
+    // copy of this could only ever drift from the first.
+    for (const box of [tsLangSeg, ...langSegs]) {
+        box?.addEventListener('click', (ev) => {
+            const lang = ev.target.closest('.ts-seg')?.dataset.lang;
+            if (!lang) return;
             state.batchSettings.language = lang;
             onBatchSettingsChanged();
             applyBatchSettingsToScreen();
             recomputeTsEta();
-            recomputeCta();
         });
     }
     if (tsDiarizeToggle) {
@@ -1698,7 +1444,7 @@
             : baseTitle;
     }
     function formatRelativeWhen(epochMs) {
-        const time = new Date(epochMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const time = formatClockTime(new Date(epochMs));
         const bucket = formatRelativeDay(epochMs);
         const word = bucket === 'today' ? 'today' : bucket === 'earlier' ? 'earlier' : 'older';
         return `${word} · ${time}`;
@@ -1712,205 +1458,6 @@
         if (m > 0) return `${m}m ${String(r).padStart(2, '0')}s`;
         return `${r}s`;
     }
-
-    // ─── Per-card context menu ───────────────────────────────────────────
-    let _recordingMenu = null;
-    function openRenamePopup(currentTitle, anchorRect) {
-        return new Promise((resolve) => {
-            const overlay = document.createElement('div');
-            overlay.className = 'rename-overlay';
-
-            const popup = document.createElement('div');
-            popup.className = 'rename-popup';
-
-            const input = document.createElement('input');
-            input.className = 'rename-popup-input';
-            input.type = 'text';
-            input.value = currentTitle;
-
-            const actions = document.createElement('div');
-            actions.className = 'rename-popup-actions';
-
-            const cancelBtn = document.createElement('button');
-            cancelBtn.className = 'rename-popup-btn';
-            cancelBtn.type = 'button';
-            cancelBtn.textContent = 'Cancel';
-
-            const okBtn = document.createElement('button');
-            okBtn.className = 'rename-popup-btn primary';
-            okBtn.type = 'button';
-            okBtn.textContent = 'Rename';
-
-            actions.appendChild(cancelBtn);
-            actions.appendChild(okBtn);
-            popup.appendChild(input);
-            popup.appendChild(actions);
-
-            function cleanup() { overlay.remove(); popup.remove(); }
-            function confirm() { const v = input.value.trim(); cleanup(); resolve(v); }
-            function cancel() { cleanup(); resolve(null); }
-
-            cancelBtn.addEventListener('click', cancel);
-            okBtn.addEventListener('click', confirm);
-            overlay.addEventListener('click', cancel);
-            input.addEventListener('keydown', (e) => {
-                if (e.key === 'Enter') { e.preventDefault(); confirm(); }
-                else if (e.key === 'Escape') { e.preventDefault(); cancel(); }
-            });
-
-            document.body.appendChild(overlay);
-            document.body.appendChild(popup);
-
-            if (anchorRect) {
-                const left = Math.max(8, Math.min(anchorRect.right + 8, window.innerWidth - 296));
-                const top = Math.max(8, Math.min(anchorRect.top, window.innerHeight - 80));
-                popup.style.left = `${left}px`;
-                popup.style.top = `${top}px`;
-            } else {
-                popup.style.left = `${Math.round((window.innerWidth - 280) / 2)}px`;
-                popup.style.top = `${Math.round((window.innerHeight - 80) / 2)}px`;
-            }
-
-            input.focus();
-            input.select();
-        });
-    }
-
-    // Local SVG icons for the card context menu. Kept self-contained (paths
-    // mirror app.js's ICON_PATHS) so the Record tab stays isolated from app.js.
-    const REC_ICON_PATHS = {
-        pencil: '<path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/>',
-        mic: '<path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/>',
-        trash: '<polyline points="3 6 5 6 21 6"/><path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/>',
-    };
-    function recIcon(name) {
-        const path = REC_ICON_PATHS[name] || '';
-        return `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${path}</svg>`;
-    }
-
-    function openRecordingMenu(item, anchorBtn, mousePos) {
-        if (_recordingMenu) {
-            _recordingMenu.remove();
-            _recordingMenu = null;
-        }
-
-        // Pre-fill the rename popup with the recording's current full name (the
-        // on-disk stem, minus the .wav extension) so the old name is editable —
-        // mirrors how transcript rename works.
-        const baseTitle = (item.filename || item.filePath?.split('/').pop() || 'Recording').replace(/\.wav$/i, '');
-
-        const menu = document.createElement('div');
-        menu.className = 'meeting-menu';
-        menu.setAttribute('role', 'menu');
-        const isTranscribingNow = state.transcribingPaths.has(item.filePath);
-        const items = [
-            { label: 'Rename…', icon: 'pencil', enabled: true, action: async () => {
-                const rect = anchorBtn.getBoundingClientRect();
-                const newTitle = await openRenamePopup(baseTitle, rect);
-                if (newTitle === null || newTitle === baseTitle) return;
-                const res = await api.rename(item.filePath, newTitle);
-                if (res?.ok) refreshHistory();
-                else if (res?.error) console.error('rename recording:', res.error);
-            } },
-            // (Re-)Transcribe routes through the same settings screen as the
-            // sidebar's batch CTA — pre-fills it with this one recording so
-            // the user can tweak model / language / diarization before kicking
-            // off. For items that already have a transcript, the new run will
-            // overwrite the .txt on disk (same stem ⇒ same path); any summary
-            // is left alone since it lives in a different file.
-            {
-                label: item.hasTranscript ? 'Re-transcribe…' : 'Transcribe…',
-                icon: 'mic',
-                enabled: !isTranscribingNow && !state.batchRunning,
-                action: () => enterTranscribeSettings([item.filePath]),
-            },
-            { divider: true },
-            { label: 'Delete audio', icon: 'trash', danger: true, enabled: true, action: async () => {
-                const res = await api.delete(item.filePath);
-                if (res?.ok) refreshHistory();
-                else if (res?.error) console.error('delete recording:', res.error);
-            } },
-            { label: 'Delete transcript', icon: 'trash', danger: true, enabled: !!item.hasTranscript, action: async () => {
-                const res = await api.deleteTranscript(item.filePath);
-                if (res?.ok) refreshHistory();
-                else if (res?.error) console.error('delete transcript:', res.error);
-            } },
-            { label: 'Delete summary', icon: 'trash', danger: true, enabled: !!item.hasSummary, action: async () => {
-                const res = await api.deleteSummary(item.filePath);
-                if (res?.ok) refreshHistory();
-                else if (res?.error) console.error('delete summary:', res.error);
-            } },
-        ];
-        for (const spec of items) {
-            if (spec.divider) {
-                const div = document.createElement('div');
-                div.className = 'meeting-menu-divider';
-                menu.appendChild(div);
-                continue;
-            }
-            const btn = document.createElement('button');
-            btn.type = 'button';
-            btn.setAttribute('role', 'menuitem');
-            btn.className = 'meeting-menu-item' + (spec.danger ? ' danger' : '');
-            const iconSpan = document.createElement('span');
-            iconSpan.className = 'meeting-menu-icon';
-            iconSpan.innerHTML = recIcon(spec.icon);
-            const labelSpan = document.createElement('span');
-            labelSpan.textContent = spec.label;
-            btn.append(iconSpan, labelSpan);
-            if (spec.enabled) {
-                btn.addEventListener('click', async () => {
-                    closeRecordingMenu();
-                    await spec.action();
-                });
-            } else {
-                btn.disabled = true;
-            }
-            menu.appendChild(btn);
-        }
-        document.body.appendChild(menu);
-        const rect = anchorBtn.getBoundingClientRect();
-        const left = mousePos?.x ?? (rect.right - 4);
-        const top = mousePos?.y ?? (rect.bottom + 4);
-        menu.style.left = `${left}px`;
-        menu.style.top = `${top}px`;
-        // Clamp inside viewport.
-        const mrect = menu.getBoundingClientRect();
-        if (mrect.right > window.innerWidth - 8) {
-            menu.style.left = `${window.innerWidth - mrect.width - 8}px`;
-        }
-        if (mrect.bottom > window.innerHeight - 8) {
-            menu.style.top = `${window.innerHeight - mrect.height - 8}px`;
-        }
-        _recordingMenu = menu;
-        setTimeout(() => {
-            document.addEventListener('click', closeOnOutsideMenu, true);
-            document.addEventListener('contextmenu', closeOnOutsideMenu, true);
-            document.addEventListener('keydown', menuKeyHandler);
-        }, 0);
-    }
-    function closeRecordingMenu() {
-        if (_recordingMenu) {
-            _recordingMenu.remove();
-            _recordingMenu = null;
-        }
-        document.removeEventListener('click', closeOnOutsideMenu, true);
-        document.removeEventListener('contextmenu', closeOnOutsideMenu, true);
-        document.removeEventListener('keydown', menuKeyHandler);
-    }
-    function closeOnOutsideMenu(ev) {
-        if (_recordingMenu && !_recordingMenu.contains(ev.target)) closeRecordingMenu();
-    }
-    function menuKeyHandler(ev) {
-        if (ev.key === 'Escape') closeRecordingMenu();
-    }
-
-    // ─── Folder picker (Variant A "Change…") ─────────────────────────────
-    $('record-btn-change-folder')?.addEventListener('click', async () => {
-        // TODO: wire to a dedicated folder-picker IPC for recordings (none yet);
-        // currently no-op with a console warn.
-        console.warn('[record] folder picker is not wired (TODO).');
-    });
 
     // ─── Transcribing UI ──────────────────────────────────────────────────
     function setTransStatus(kind, text) {

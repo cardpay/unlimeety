@@ -57,15 +57,33 @@
 #live-setup {
     flex: 1;
     display: flex;
-    align-items: center;
-    justify-content: center;
     padding: 40px 24px;
     overflow-y: auto;
 }
 
+/* Shared column: #live-setup above and #record-setup in record.css both wrap
+   their rows in this, so the two start screens are one design rather than two
+   that drifted.
+
+   `margin: auto` rather than `align-items/justify-content: center` on the
+   scroll container: centering keywords split the overflow across both edges,
+   and the half above the top edge is unreachable because scrollTop cannot go
+   negative. Both forms are taller than the window at 1200x800 (sources,
+   permission hint, an expandable troubleshoot block, title, actions), so
+   centering hid their headings for good. Auto margins center the same way when
+   there is free space and collapse to zero when there is not, putting all the
+   overflow below where scrollTop can reach it.
+
+   Two things this now quietly depends on. `#live-setup` no longer sets
+   `align-items`, so its cross-axis default is `stretch` — `margin: auto` wins
+   only because an auto cross-axis margin suppresses stretch. And that rule
+   exists only inside a flex container, so `display: flex` on #live-setup and
+   #record-setup is structural here, not cosmetic: swap either for `block` and
+   the vertical centring goes with it. */
 .live-setup-inner {
     width: 100%;
     max-width: 520px;
+    margin: auto;
     display: flex;
     flex-direction: column;
     gap: 20px;
@@ -256,6 +274,12 @@
 }
 
 .live-perm-link:hover { color: var(--text-primary); }
+
+/* Real Microphone TCC status, prepended to the hint above — see main.js's
+   micPermissionStatus(). Screen Recording status is not shown next to it:
+   the OS API for it is known to cache and lie right after a fresh grant. */
+.live-perm-mic:empty { display: none; }
+.live-perm-mic.is-denied { color: var(--danger); }
 
 /* ─── Permission troubleshoot disclosure ────────────────────────────────
    Sits just below `.live-perm-hint`. Visible only when the user expands it,

@@ -27,6 +27,8 @@ contextBridge.exposeInMainWorld('transcriber', {
     setDirty: (dirty) => ipcRenderer.send('window:setDirty', dirty),
 
     // ── Summarization via Claude Code CLI ─────────────────────────────────────
+    // Submits a job and returns { ok, jobId } — the result arrives via
+    // queueApi.onChanged. Cancel goes through queueApi.cancel(jobId) now.
     summarize:    (filePath, promptInstruction) => ipcRenderer.invoke('summarize:run', filePath, promptInstruction),
     chatAsk:      (filePath, messages)          => ipcRenderer.invoke('chat:ask', filePath, messages),
     saveSummary:  (filePath, text, folder)      => ipcRenderer.invoke('summary:save', filePath, text, folder),
@@ -40,6 +42,7 @@ contextBridge.exposeInMainWorld('transcriber', {
     pickFolder:       () => ipcRenderer.invoke('settings:pickFolder'),
     getSummarizer:    ()     => ipcRenderer.invoke('settings:getSummarizer'),
     setSummarizer:    (cfg)  => ipcRenderer.invoke('settings:setSummarizer', cfg),
+    getAppVersion:    ()     => ipcRenderer.invoke('app:version'),
     getAutoStop:      ()     => ipcRenderer.invoke('settings:getAutoStop'),
     setAutoStop:      (on)   => ipcRenderer.invoke('settings:setAutoStop', on),
     getGlossary:      ()     => ipcRenderer.invoke('settings:getGlossary'),
@@ -63,9 +66,10 @@ contextBridge.exposeInMainWorld('transcriber', {
     createTranscript: (payload) => ipcRenderer.invoke('transcripts:create', payload),
     renameTranscript: (filePath, newTitle) => ipcRenderer.invoke('transcripts:rename', filePath, newTitle),
     getAudioPath: (filePath) => ipcRenderer.invoke('transcripts:getAudioPath', filePath),
+    // Submits a job and returns { ok, jobId } — progress and the final result
+    // (including updated content, for the in-editor reload) arrive via
+    // queueApi.onChanged. Cancel goes through queueApi.cancel(jobId) now.
     enhanceTranscript: (filePath) => ipcRenderer.invoke('transcripts:enhance', filePath),
-    cancelEnhance: () => ipcRenderer.invoke('transcripts:enhanceCancel'),
-    onEnhanceProgress: (cb) => ipcRenderer.on('transcripts:enhanceProgress', (_e, p) => cb(p)),
     onTranscriptsChanged: (cb) => ipcRenderer.on('transcripts:changed', () => cb()),
 
     // ── Follow-up draft ───────────────────────────────────────────────────────
@@ -87,6 +91,7 @@ contextBridge.exposeInMainWorld('live', {
     saveTranscript:     (data)  => ipcRenderer.invoke('live:saveTranscript', data),
     downloadModel:      (name)  => ipcRenderer.invoke('live:downloadModel', name),
     openScreenSettings: ()      => ipcRenderer.invoke('live:openScreenSettings'),
+    micStatus:          ()      => ipcRenderer.invoke('live:micStatus'),
     onEvent:            (cb)    => ipcRenderer.on('live:event', (_e, evt) => cb(evt)),
     // Auto-detect: main asks the Live tab to start a session for a detected call.
     onAutoStart:        (cb)    => ipcRenderer.on('live:autoStart', (_e, data) => cb(data)),
@@ -105,26 +110,46 @@ contextBridge.exposeInMainWorld('calendar', {
     openSettings:  ()     => ipcRenderer.invoke('calendar:openSettings'),
 });
 
+// ─── Job queue (isolated namespace) ──────────────────────────────────────────
+// Single bridge for every long-running job — transcribe, enhance, summarize.
+// The header panel is built entirely from this: one snapshot on demand, one
+// broadcast on every change, one cancel-by-id.
+contextBridge.exposeInMainWorld('queueApi', {
+    list:      ()      => ipcRenderer.invoke('queue:list'),
+    cancel:    (jobId) => ipcRenderer.invoke('queue:cancel', jobId),
+    dismiss:   (jobId) => ipcRenderer.invoke('queue:dismiss', jobId),
+    onChanged: (cb)    => {
+        const handler = (_e, jobs) => cb(jobs);
+        ipcRenderer.on('queue:changed', handler);
+        return () => ipcRenderer.removeListener('queue:changed', handler);
+    },
+});
+
 // ─── Record tab (isolated namespace) ────────────────────────────────────────
 // Record-only mode (save raw audio) and on-demand local transcription of
 // saved recordings. Independent of the Live namespace above.
 contextBridge.exposeInMainWorld('recordApi', {
     platformOK:         ()       => ipcRenderer.invoke('record:platformOK'),
-    getFolder:          ()       => ipcRenderer.invoke('record:getFolder'),
     start:              (opts)   => ipcRenderer.invoke('record:start', opts),
     stop:               ()       => ipcRenderer.invoke('record:stop'),
     openScreenSettings: ()       => ipcRenderer.invoke('record:openScreenSettings'),
+    micStatus:          ()       => ipcRenderer.invoke('record:micStatus'),
     list:               ()       => ipcRenderer.invoke('record:list'),
     watch:              ()       => ipcRenderer.invoke('record:watch'),
     delete:             (p)      => ipcRenderer.invoke('record:delete', p),
     deleteMany:         (paths)  => ipcRenderer.invoke('record:deleteMany', paths),
-    deleteTranscript:   (p)      => ipcRenderer.invoke('record:deleteTranscript', p),
-    deleteSummary:      (p)      => ipcRenderer.invoke('record:deleteSummary', p),
     rename:             (p, t)   => ipcRenderer.invoke('record:rename', p, t),
     showInFinder:       (p)      => ipcRenderer.invoke('record:showInFinder', p),
     pickAudioFile:      ()       => ipcRenderer.invoke('record:pickAudioFile'),
+    // Submits a job and returns { ok, jobId } — progress and the final
+    // transcriptPath arrive via queueApi.onChanged. Cancel goes through
+    // queueApi.cancel(jobId) now.
     transcribe:         (opts)   => ipcRenderer.invoke('record:transcribe', opts),
-    cancelTranscribe:   ()       => ipcRenderer.invoke('record:cancelTranscribe'),
+    // Fired the moment a recording is saved. Takes no settings: the model is
+    // fixed to large-v3 in main and diarization is always on, so the only thing
+    // the renderer decides is the language.
+    autoQueueTranscribe: (filePath, language, participants) =>
+        ipcRenderer.invoke('record:autoQueueTranscribe', filePath, language, participants),
     getInstalledModels: ()       => ipcRenderer.invoke('record:getInstalledModels'),
     deleteModel:        (name)   => ipcRenderer.invoke('record:deleteModel', name),
     onEvent:            (cb)     => ipcRenderer.on('record:event', (_e, evt) => cb(evt)),
@@ -144,6 +169,20 @@ contextBridge.exposeInMainWorld('promptApi', {
     stopNow: () => ipcRenderer.send('prompt:stopNow'),
     // Auto-stop countdown: hide the overlay, but let the countdown run out.
     hide: () => ipcRenderer.send('prompt:hide'),
+});
+
+// ─── Theme (isolated namespace) ─────────────────────────────────────────────
+// theme-init.js resolves the shared `uds-theme` preference once, at load, in
+// every window. The main window is the only one with a Settings UI to change
+// it — this relays that change to the floating notes window, which stays open
+// across it and would otherwise keep its stale palette until reopened.
+contextBridge.exposeInMainWorld('themeApi', {
+    notifyChanged: () => ipcRenderer.send('theme:changed'),
+    onChanged:     (cb) => {
+        const handler = () => cb();
+        ipcRenderer.on('theme:changed', handler);
+        return () => ipcRenderer.removeListener('theme:changed', handler);
+    },
 });
 
 // ─── Notes (isolated namespace) ──────────────────────────────────────────────

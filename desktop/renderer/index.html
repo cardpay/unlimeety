@@ -60,6 +60,22 @@
     <div id="toolbar-right">
       <button id="cal-smart-btn" title="Suggest a recording mode from your calendar"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg> From calendar</button>
 
+      <!-- Job queue: header indicator + popover job list. Covers every
+           transcribe/enhance/summarize job, queued or running, in one place. -->
+      <div id="queue-indicator-wrap">
+        <button class="btn btn-ghost btn-icon" id="queue-indicator-btn" title="Jobs" aria-haspopup="true" aria-expanded="false">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="9"/>
+            <polyline points="12 7 12 12 15.5 14"/>
+          </svg>
+          <span id="queue-indicator-badge" class="queue-indicator-badge hidden">0</span>
+        </button>
+        <div id="queue-panel" class="queue-panel hidden" role="menu" aria-label="Jobs">
+          <div class="queue-panel-header">Jobs</div>
+          <ul id="queue-panel-list" class="queue-panel-list"></ul>
+        </div>
+      </div>
+
       <button class="btn btn-ghost btn-icon" id="btn-settings" title="Settings">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="12" cy="12" r="3"/>
@@ -104,7 +120,7 @@
           <span class="library-title">Meetings</span>
           <span id="library-count" class="library-count"></span>
         </div>
-        <button id="btn-open" class="meeting-open-btn" title="Open transcript file (⌘O)">
+        <button id="btn-open" class="meeting-open-btn" title="Open transcript file">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
           </svg>
@@ -126,24 +142,46 @@
           <line x1="21" y1="21" x2="16.65" y2="16.65"/>
         </svg>
         <input id="meeting-search" type="text" placeholder="Search meetings, speakers…" autocomplete="off" spellcheck="false" />
-        <span class="library-search-kbd">⌘K</span>
+        <button type="button" id="meeting-search-clear" class="library-search-clear hidden" title="Clear" aria-label="Clear search">✕</button>
       </div>
 
-      <!-- Filter chips — "Audio" chip lands once IPC reports audio artifacts (Phase 4). -->
-      <div class="library-filters" role="tablist">
-        <button class="filter-chip active" data-filter="all" role="tab">All <span class="filter-count" data-count="all">0</span></button>
-        <button class="filter-chip" data-filter="transcribed" role="tab">Transcribed <span class="filter-count" data-count="transcribed">0</span></button>
-        <button class="filter-chip" data-filter="summarized" role="tab">Summarized <span class="filter-count" data-count="summarized">0</span></button>
+      <!-- Filter chips — work left to do, not work already done. A "To transcribe"
+           chip needs audio-without-transcript entries in the library first.
+           No tablist/tab roles: these toggle what the list below holds, they do
+           not switch panels — selection is exposed with aria-pressed instead, and
+           role=group + aria-label give the row the name the tablist used to.
+           Each criterion is in title AND aria-label: title is mouse-only, and
+           aria-label repeats the visible text first so the accessible name still
+           starts with what the chip says. -->
+      <div class="library-filters" role="group" aria-label="Filter meetings by work left to do">
+        <button class="filter-chip active" data-filter="all" aria-pressed="true" title="Every meeting in the library" aria-label="All — every meeting in the library">All <span class="filter-count" data-count="all">0</span></button>
+        <button class="filter-chip" data-filter="transcribe" aria-pressed="false" title="Has audio and no transcript yet" aria-label="To transcribe — has audio and no transcript yet">To transcribe <span class="filter-count" data-count="transcribe">0</span></button>
+        <button class="filter-chip" data-filter="retranscribe" aria-pressed="false" title="Has audio and was transcribed with something less accurate than large-v3" aria-label="To re-transcribe — has audio and was transcribed with something less accurate than large-v3">To re-transcribe <span class="filter-count" data-count="retranscribe">0</span></button>
+        <button class="filter-chip" data-filter="enhance" aria-pressed="false" title="Has spoken turns and Enhance has never run on it" aria-label="To enhance — has spoken turns and Enhance has never run on it">To enhance <span class="filter-count" data-count="enhance">0</span></button>
+        <button class="filter-chip" data-filter="summarize" aria-pressed="false" title="Has no summary on disk" aria-label="To summarize — has no summary on disk">To summarize <span class="filter-count" data-count="summarize">0</span></button>
+      </div>
+
+      <!-- Batch selection. Only rows without a transcript can be checked, so the
+           row stays hidden until at least one recording is selected — there is
+           nothing to say about an empty selection. -->
+      <div class="library-selection hidden" id="library-selection" role="group" aria-label="Selected recordings">
+        <span class="library-selection-label" id="library-selection-label">0 selected</span>
+        <button type="button" class="library-selection-link" id="library-selection-all">Select all</button>
+        <button type="button" class="library-selection-link primary" id="library-selection-transcribe">Transcribe…</button>
+        <button type="button" class="library-selection-link danger" id="library-selection-delete">Delete</button>
+        <button type="button" class="library-selection-link" id="library-selection-clear">Clear</button>
       </div>
 
       <!-- Meetings list -->
       <div id="library-list">
-        <div id="library-empty" class="library-empty hidden">
+        <!-- Live region: the text changes with the active chip, and a silent
+             swap would leave a screen reader on the previous sentence. -->
+        <div id="library-empty" class="library-empty hidden" role="status" aria-live="polite">
           <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
             <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
             <polyline points="14 2 14 8 20 8"/>
           </svg>
-          <p>No meetings yet</p>
+          <p id="library-empty-text">No meetings yet</p>
         </div>
       </div>
 
@@ -160,7 +198,7 @@
           </svg>
           Cancel changes
         </button>
-        <button class="btn btn-ghost btn-sm" id="btn-save-as" title="Save As (⌘⇧S)" disabled>
+        <button class="btn btn-ghost btn-sm" id="btn-save-as" title="Save As" disabled>
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/>
             <polyline points="17 21 17 13 7 13 7 21"/>
@@ -216,6 +254,23 @@
       <!-- Transcript view — rendered segments for audio sync, replaces textarea when audio is present -->
       <div id="transcript-view" class="hidden"></div>
 
+      <!-- Audio-only meeting: a recording with no transcript to open. The player
+           above plays it; this pane names the one action it has. -->
+      <div id="audio-only-state" class="hidden">
+        <div id="audio-only-icon">
+          <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+            <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+            <line x1="12" y1="19" x2="12" y2="23"/>
+          </svg>
+        </div>
+        <h2 id="audio-only-title">Recording</h2>
+        <p id="audio-only-sub">Not transcribed yet</p>
+        <div class="empty-actions">
+          <button class="btn btn-primary btn-lg" id="audio-only-transcribe">Transcribe…</button>
+        </div>
+      </div>
+
       <!-- Empty state -->
       <div id="empty-state">
         <div id="empty-icon">
@@ -252,7 +307,7 @@
           </svg>
           <span id="btn-rail-resummarize-label">Summarize</span>
         </button>
-        <button class="btn-rail-primary" id="btn-rail-ask-ai" type="button" title="Ask AI about this meeting (⌘/)">
+        <button class="btn-rail-primary" id="btn-rail-ask-ai" type="button" title="Ask AI about this meeting">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
           </svg>
@@ -312,8 +367,8 @@
 
           <div class="live-row">
             <label class="live-label">Model</label>
-            <!-- Same card style as the Record tab's batch settings; live UI
-                 keeps only the three smallest WhisperKit variants because
+            <!-- Same card style as the transcribe-settings screen (#transcribe-flow);
+                 live UI keeps only the three smallest WhisperKit variants because
                  real-time transcription cares much more about latency than
                  about the last few accuracy percent. -->
             <div id="live-model-grid" class="ts-model-grid live-model-grid">
@@ -357,11 +412,16 @@
 
           <div class="live-row">
             <label class="live-label">Language</label>
-            <div id="live-language" class="ts-seg-wrap">
-              <button type="button" class="ts-seg is-active" data-lang="ru">Russian</button>
-              <button type="button" class="ts-seg" data-lang="en">English</button>
-              <button type="button" class="ts-seg" data-lang="sr">Serbian</button>
-              <button type="button" class="ts-seg" data-lang="auto">Auto-detect</button>
+            <!-- Same seven options as the Record tab's two pickers; one
+                 vocabulary app-wide (test/language-pickers.test.js guards it). -->
+            <div id="live-language" class="ts-seg-wrap" role="radiogroup" aria-label="Transcription language">
+              <button type="button" class="ts-seg is-active" role="radio" aria-checked="true" data-lang="ru">Russian</button>
+              <button type="button" class="ts-seg" role="radio" aria-checked="false" data-lang="en">English</button>
+              <button type="button" class="ts-seg" role="radio" aria-checked="false" data-lang="sr">Serbian</button>
+              <button type="button" class="ts-seg" role="radio" aria-checked="false" data-lang="es">Spanish</button>
+              <button type="button" class="ts-seg" role="radio" aria-checked="false" data-lang="de">German</button>
+              <button type="button" class="ts-seg" role="radio" aria-checked="false" data-lang="fr">French</button>
+              <button type="button" class="ts-seg" role="radio" aria-checked="false" data-lang="auto">Auto-detect</button>
             </div>
           </div>
 
@@ -388,8 +448,9 @@
               </label>
             </div>
             <p class="live-perm-hint">
-              First launch: macOS will ask for Microphone and Screen Recording permission.
-              After granting Screen Recording you must <strong>fully quit</strong> (Cmd+Q) and relaunch the app.
+              <strong id="live-mic-status" class="live-perm-mic" aria-live="polite"></strong>
+              macOS asks for Microphone and Screen Recording permission before you can record — already-granted ones are simply skipped.
+              After granting Screen Recording you must <strong>fully quit</strong> and relaunch the app.
               <button type="button" class="live-perm-link" id="live-open-screen-settings">Open Privacy Settings →</button>
             </p>
             <details class="live-perm-troubleshoot">
@@ -398,7 +459,7 @@
                 <p>macOS sometimes desyncs between the Privacy &amp; Security toggle and the actual permission state — this happens when the app's signature changes between builds, or when a previous prompt was denied.</p>
                 <p>Reset the saved decisions and grant fresh:</p>
                 <ol>
-                  <li>Quit the app fully (<kbd>Cmd</kbd>+<kbd>Q</kbd>).</li>
+                  <li>Quit the app fully.</li>
                   <li>Open <strong>Terminal</strong> and run:
                     <pre><code id="live-tcc-reset-cmd">tccutil reset ScreenCapture com.transcriber.desktop &amp;&amp; tccutil reset Microphone com.transcriber.desktop</code></pre>
                     <button type="button" class="live-perm-link" id="live-copy-tcc-cmd">Copy command</button>
@@ -510,77 +571,56 @@
 
     <div id="record-main" class="hidden">
 
-      <!-- Sidebar: recordings library + batch CTA -->
-      <aside id="record-sidebar" class="record-sidebar">
-        <div class="record-sb-header">
-          <span>RECORDINGS</span>
-          <span class="record-sb-count" id="record-sb-count">0</span>
-        </div>
-        <div class="record-sb-selection" id="record-sb-selection">
-          <label class="record-sb-master">
-            <input type="checkbox" id="record-sb-master-cb" />
-            <span class="record-sb-master-visual"></span>
-          </label>
-          <span class="record-sb-summary-label" id="record-sb-summary-label">0 selected</span>
-          <button type="button" class="record-sb-link" data-action="select-all" id="record-sb-select-all">Select all</button>
-          <button type="button" class="record-sb-link" data-action="clear" id="record-sb-clear">Clear</button>
-          <button type="button" class="record-sb-link record-sb-link-danger hidden" data-action="delete" id="record-sb-delete">Delete</button>
-        </div>
-        <div id="record-sb-list" class="record-sb-list"></div>
-        <div id="record-sb-empty" class="record-sb-empty hidden">
-          No recordings yet.
-        </div>
-        <!-- Inline audio player — visible only while a recording is loaded -->
-        <div id="record-ap" class="record-ap hidden">
-          <audio id="record-audio-el" preload="metadata"></audio>
-          <button id="record-ap-play" class="ap-play" title="Play / Pause">
-            <svg id="record-ap-icon-play" width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-              <polygon points="5,3 19,12 5,21"/>
-            </svg>
-            <svg id="record-ap-icon-pause" width="18" height="18" viewBox="0 0 24 24" fill="currentColor" class="hidden">
-              <rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/>
-            </svg>
-          </button>
-          <div class="ap-main">
-            <div id="record-ap-waveform" class="ap-waveform"></div>
-            <span id="record-ap-time" class="ap-time">0:00 / 0:00</span>
-          </div>
-          <button id="record-ap-speed" class="ap-speed">1×</button>
-        </div>
-        <div class="record-sb-cta">
-          <button id="record-btn-transcribe-all" class="record-sb-cta-btn" disabled>
-            <span class="record-sb-cta-spark">✦</span>
-            <span id="record-sb-cta-label">Select recordings to transcribe</span>
-          </button>
-          <div class="record-sb-cta-meta">
-            <span id="record-sb-cta-eta">—</span>
-            <button type="button" class="record-sb-link" id="record-sb-settings">Settings…</button>
-          </div>
-        </div>
-      </aside>
-
       <!-- Right-pane container for the four phase sections -->
       <div class="record-main-pane">
 
-      <!-- Setup (idle) -->
+      <!-- Setup (idle) — deliberately the same form as #live-setup above:
+           the same `.live-setup-inner` column, `.live-row`/`.live-label`
+           groups, permission hint and troubleshoot disclosure. Live's Model
+           and Language rows are the two it does NOT mirror: the on-stop run is
+           always large-v3, and the language is picked on the recording screen,
+           where you can already hear which one it is. -->
       <section id="record-setup">
-        <div id="record-trans-active-banner" class="record-trans-active-banner hidden">
-          <span class="record-trans-active-dot"></span>
-          <span>Transcription in progress</span>
-          <button class="btn btn-ghost btn-xs" id="record-btn-view-queue">View queue</button>
-        </div>
-        <div class="record-setup-scroll">
-          <h2 class="record-setup-title">Record audio <kbd class="record-kbd">⌘R</kbd></h2>
-          <p class="record-setup-desc">Capture audio for transcription. You can record your microphone, system audio, or both.</p>
+        <div class="live-setup-inner">
+          <div id="record-trans-active-banner" class="record-trans-active-banner hidden">
+            <span class="record-trans-active-dot"></span>
+            <span>Transcription in progress</span>
+            <button class="btn btn-ghost btn-xs" id="record-btn-view-queue">View queue</button>
+          </div>
 
-          <div class="record-section">
-            <div class="record-section-label">SOURCES</div>
+          <h2>Record audio</h2>
+          <!-- Deliberately as short as Live's blurb — this screen is Live's twin,
+               and a wall of text is the fastest way to stop looking like one. The
+               things this used to spell out are said where they apply: the wav
+               path on the recording screen's file card, and what happens after
+               Stop & save in that screen's footer. -->
+          <p class="live-muted">Record your microphone and the call's system audio to disk — no live transcription, so it costs almost nothing while the call runs. On <strong>Stop &amp; save</strong> a large-v3 transcription starts on its own, in the language set below.</p>
+
+          <!-- Same row Live puts under its Model block. Set it here when you
+               already know the language; the recording screen carries the same
+               control for when you find out thirty seconds into the call. Both
+               write `batchSettings.language`, so neither is the master. -->
+          <div class="live-row">
+            <span class="live-label">Language</span>
+            <div id="record-setup-lang-seg" class="ts-seg-wrap" role="radiogroup" aria-label="Transcription language">
+              <button type="button" class="ts-seg is-active" role="radio" aria-checked="true" data-lang="ru">Russian</button>
+              <button type="button" class="ts-seg" role="radio" aria-checked="false" data-lang="en">English</button>
+              <button type="button" class="ts-seg" role="radio" aria-checked="false" data-lang="sr">Serbian</button>
+              <button type="button" class="ts-seg" role="radio" aria-checked="false" data-lang="es">Spanish</button>
+              <button type="button" class="ts-seg" role="radio" aria-checked="false" data-lang="de">German</button>
+              <button type="button" class="ts-seg" role="radio" aria-checked="false" data-lang="fr">French</button>
+              <button type="button" class="ts-seg" role="radio" aria-checked="false" data-lang="auto">Auto-detect</button>
+            </div>
+          </div>
+
+          <div class="live-row">
+            <span class="live-label">Sources</span>
             <div class="record-sources">
               <label class="record-source-card" id="record-source-mic">
                 <span class="record-source-icon">🎙</span>
                 <div class="record-source-text">
                   <div class="record-source-title">Microphone</div>
-                  <div class="record-source-sub">Your voice · MacBook Pro Microphone</div>
+                  <div class="record-source-sub">Your voice</div>
                 </div>
                 <input type="checkbox" id="record-src-mic" checked />
                 <span class="record-source-switch"></span>
@@ -595,32 +635,52 @@
                 <span class="record-source-switch"></span>
               </label>
             </div>
+            <p class="live-perm-hint">
+              <strong id="record-mic-status" class="live-perm-mic" aria-live="polite"></strong>
+              macOS asks for Microphone and Screen Recording permission before you can record — already-granted ones are simply skipped.
+              After granting Screen Recording you must <strong>fully quit</strong> and relaunch the app.
+              <button type="button" class="live-perm-link" id="record-open-screen-settings">Open Privacy Settings →</button>
+            </p>
+            <details class="live-perm-troubleshoot">
+              <summary>Already enabled but it still doesn't work?</summary>
+              <div class="live-perm-troubleshoot-body">
+                <p>macOS sometimes desyncs between the Privacy &amp; Security toggle and the actual permission state — this happens when the app's signature changes between builds, or when a previous prompt was denied.</p>
+                <p>Reset the saved decisions and grant fresh:</p>
+                <ol>
+                  <li>Quit the app fully.</li>
+                  <li>Open <strong>Terminal</strong> and run:
+                    <pre><code id="record-tcc-reset-cmd">tccutil reset ScreenCapture com.transcriber.desktop &amp;&amp; tccutil reset Microphone com.transcriber.desktop</code></pre>
+                    <button type="button" class="live-perm-link" id="record-copy-tcc-cmd">Copy command</button>
+                  </li>
+                  <li>Remove the existing <em>Unlimeety</em> entry from <em>Privacy &amp; Security → Screen Recording</em> using the <strong>−</strong> button.</li>
+                  <li>Relaunch the app and click <strong>Allow</strong> on the prompts that appear.</li>
+                </ol>
+              </div>
+            </details>
           </div>
 
-          <div class="record-section">
-            <div class="record-section-label">TITLE — OPTIONAL</div>
-            <input id="record-title" class="modal-input record-title-input" type="text" placeholder="defaults to date/time, e.g. Recording — 2026-05-13 10:42" />
+          <div class="live-row">
+            <label class="live-label" for="record-title">Title</label>
+            <input type="text" id="record-title" class="modal-input" placeholder="optional — defaults to date/time" />
             <button type="button" id="record-cal-btn" class="cal-pick-btn" title="Fill from calendar"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg> From calendar</button>
-          </div>
-
-          <div class="record-section">
-            <div class="record-section-label">SAVE TO</div>
-            <div class="record-folder-row">
-              <span class="record-folder-path" id="record-folder-label">~/Downloads/Meet_Transcripts</span>
-              <button type="button" id="record-btn-change-folder" class="record-folder-change">Change…</button>
-            </div>
-          </div>
-
-          <div class="record-perm-strip">
-            <div class="record-perm-head"><span class="record-perm-dot"></span><span>Permissions granted</span></div>
-            <div class="record-perm-body">Microphone ✓ · Screen Recording ✓ · Calendar ✓ · <button type="button" id="record-open-screen-settings" class="record-perm-link">Open Privacy Settings →</button></div>
           </div>
 
           <div id="record-setup-error" class="record-setup-error hidden"></div>
 
-          <div class="record-action-row">
-            <button id="record-btn-start" class="btn record-btn-start"><span class="record-btn-start-dot"></span>Start recording</button>
-            <button id="record-btn-import" class="btn btn-ghost record-btn-import">⬆ Import audio file…</button>
+          <div class="live-setup-actions">
+            <!-- Same classes and icon as #live-btn-start: two buttons that start
+                 a recording should not be two different colours. -->
+            <button class="btn btn-primary btn-lg" id="record-btn-start">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="6"/></svg>
+              Start recording
+            </button>
+            <button id="record-btn-import" class="btn btn-ghost">⬆ Import audio file…</button>
+            <button type="button" class="btn btn-ghost btn-icon" id="record-btn-settings" title="Transcribe settings (model, language, diarization)">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="3"/>
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+              </svg>
+            </button>
           </div>
         </div>
       </section>
@@ -663,6 +723,22 @@
           </div>
           <div class="record-rec-hero-title">Recording to disk…</div>
           <div class="record-waveform" id="record-waveform"></div>
+          <!-- Language for the transcription that starts on Stop & save. It sits
+               here rather than on the setup screen because thirty seconds into a
+               call you know which language it is; before it you often don't.
+               Shares `batchSettings.language` with #ts-lang-seg. -->
+          <div class="record-rec-lang">
+            <span class="record-rec-lang-label">Transcribe in</span>
+            <div id="record-rec-lang-seg" class="ts-seg-wrap" role="radiogroup" aria-label="Transcription language">
+              <button type="button" class="ts-seg is-active" role="radio" aria-checked="true" data-lang="ru">Russian</button>
+              <button type="button" class="ts-seg" role="radio" aria-checked="false" data-lang="en">English</button>
+              <button type="button" class="ts-seg" role="radio" aria-checked="false" data-lang="sr">Serbian</button>
+              <button type="button" class="ts-seg" role="radio" aria-checked="false" data-lang="es">Spanish</button>
+              <button type="button" class="ts-seg" role="radio" aria-checked="false" data-lang="de">German</button>
+              <button type="button" class="ts-seg" role="radio" aria-checked="false" data-lang="fr">French</button>
+              <button type="button" class="ts-seg" role="radio" aria-checked="false" data-lang="auto">Auto-detect</button>
+            </div>
+          </div>
           <div class="record-file-card">
             <div class="record-file-row"><div class="record-file-key">FILE</div><div class="record-file-val" id="record-file-name">—</div></div>
             <div class="record-file-row"><div class="record-file-key">PATH</div><div class="record-file-val" id="record-output-path">—</div></div>
@@ -679,9 +755,15 @@
             </div>
           </div>
         </div>
-        <div class="record-rec-footer">ⓘ Audio streams directly to disk — no live transcription. After Stop &amp; save, you can transcribe locally with Whisper.</div>
+        <div class="record-rec-footer">ⓘ Audio streams directly to disk — no live transcription while you record. On Stop &amp; save, a large-v3 transcription with speaker diarization starts automatically in the language above; it runs locally and ignores the batch settings screen. An Enhance pass follows through your configured summarizer. Watch both in the queue panel.</div>
       </section>
 
+      </div>
+    </div>
+  </main>
+
+  <!-- Transcribe flow (Variant C settings + progress) — lives on the Transcripts tab now, not Record -->
+  <div id="transcribe-flow" class="hidden" role="dialog" aria-modal="true" aria-label="Transcribe recordings">
       <!-- Transcribe settings (Variant C — batch / single-file confirmation) -->
       <section id="record-transcribe-settings" class="hidden">
         <div class="ts-scroll">
@@ -690,15 +772,12 @@
             <!-- Header -->
             <div class="ts-header">
               <div class="ts-header-text">
-                <div class="ts-crumb">
-                  <button class="ts-crumb-link" id="ts-crumb-back">Record</button>
-                  <span class="ts-crumb-sep">›</span>
-                  <span class="ts-crumb-tail"><span id="ts-crumb-count">0</span> recordings</span>
-                </div>
                 <h2 class="ts-title">Transcription settings</h2>
                 <p class="ts-muted">These settings apply to every recording in the batch. Runs locally on your Mac — nothing leaves the machine.</p>
               </div>
-              <kbd class="record-kbd ts-kbd">⌘⏎</kbd>
+              <div class="ts-header-right">
+                <button type="button" class="modal-close-btn ts-btn-close" id="ts-btn-close" title="Close" aria-label="Close">✕</button>
+              </div>
             </div>
 
             <!-- Batch summary -->
@@ -807,14 +886,14 @@
               <div class="ts-sec-hint">Pick a language explicitly — picking up-front avoids detection drift on the first 30 seconds and makes runs reproducible across the batch.</div>
             </div>
             <div class="ts-lang-row">
-              <div id="ts-lang-seg" class="ts-seg-wrap">
-                <button type="button" class="ts-seg is-active" data-lang="ru">Russian</button>
-                <button type="button" class="ts-seg" data-lang="en">English</button>
-                <button type="button" class="ts-seg" data-lang="sr">Serbian</button>
-                <button type="button" class="ts-seg" data-lang="es">Spanish</button>
-                <button type="button" class="ts-seg" data-lang="de">German</button>
-                <button type="button" class="ts-seg" data-lang="fr">French</button>
-                <button type="button" class="ts-seg is-dim" data-lang="more">More…</button>
+              <div id="ts-lang-seg" class="ts-seg-wrap" role="radiogroup" aria-label="Transcription language">
+                <button type="button" class="ts-seg is-active" role="radio" aria-checked="true" data-lang="ru">Russian</button>
+                <button type="button" class="ts-seg" role="radio" aria-checked="false" data-lang="en">English</button>
+                <button type="button" class="ts-seg" role="radio" aria-checked="false" data-lang="sr">Serbian</button>
+                <button type="button" class="ts-seg" role="radio" aria-checked="false" data-lang="es">Spanish</button>
+                <button type="button" class="ts-seg" role="radio" aria-checked="false" data-lang="de">German</button>
+                <button type="button" class="ts-seg" role="radio" aria-checked="false" data-lang="fr">French</button>
+                <button type="button" class="ts-seg" role="radio" aria-checked="false" data-lang="auto">Auto-detect</button>
               </div>
             </div>
 
@@ -921,17 +1000,6 @@
           <div class="live-progress"><div class="live-progress-bar" id="record-trans-progress-bar"></div></div>
         </div>
 
-        <div id="record-trans-queue" class="record-trans-queue hidden">
-          <div class="record-trans-now">
-            <span class="record-trans-now-label">NOW</span>
-            <span id="record-trans-now-file" class="record-trans-now-file">—</span>
-          </div>
-          <div id="record-trans-pending" class="record-trans-pending hidden">
-            <span class="record-trans-pending-label">NEXT</span>
-            <ul id="record-trans-pending-list" class="record-trans-pending-list"></ul>
-          </div>
-        </div>
-
         <div class="live-stream-wrap">
           <div id="record-trans-stream" class="live-stream"></div>
         </div>
@@ -941,20 +1009,7 @@
           <span>Transcription runs locally via WhisperKit + SpeakerKit. The result will be saved to <code>~/Downloads/Meet_Transcripts/</code>.</span>
         </footer>
       </section>
-
-      </div>
-    </div>
-  </main>
-
-  <!-- Status Bar -->
-  <footer id="status-bar">
-    <span id="status-path">No file open</span>
-    <div id="status-right">
-      <span id="status-words">–</span>
-      <span class="status-divider">·</span>
-      <span id="status-lines">–</span>
-    </div>
-  </footer>
+  </div>
 
   <!-- New Transcript Modal -->
   <div id="new-modal" class="modal-overlay hidden">
@@ -998,9 +1053,6 @@
       <!-- View: prompt editing -->
       <div id="modal-view-prompt">
         <div class="modal-body">
-          <div id="modal-busy-banner" class="modal-busy-banner hidden">
-            Wait for the current summarization to finish.
-          </div>
           <div class="preset-segmented" id="modal-preset-segmented" role="tablist">
             <button class="preset-segment" data-preset-id="meeting" aria-selected="true" role="tab">Meeting</button>
             <button class="preset-segment" data-preset-id="daily" role="tab">Daily</button>
@@ -1040,6 +1092,12 @@
         <div class="modal-body modal-loading">
           <div class="modal-spinner"></div>
           <span id="modal-loading-text">Reading the transcript…</span>
+        </div>
+        <!-- Shown only when the modal was reopened onto a run already in
+             flight — disk/cache loads reset this hidden. -->
+        <div class="modal-footer hidden" id="modal-loading-footer">
+          <span style="flex:1"></span>
+          <button class="btn btn-stop" id="modal-btn-loading-stop">Stop</button>
         </div>
       </div>
 
@@ -1087,23 +1145,6 @@
         <button class="modal-close-btn" id="settings-close" title="Close">✕</button>
       </div>
       <div class="modal-body">
-        <label class="modal-label">Appearance</label>
-        <div class="settings-provider-group" id="settings-theme-group">
-          <label class="settings-radio">
-            <input type="radio" name="settings-theme" value="dark" />
-            <span class="settings-radio-title">Dark</span>
-          </label>
-          <label class="settings-radio">
-            <input type="radio" name="settings-theme" value="light" />
-            <span class="settings-radio-title">Light</span>
-          </label>
-          <label class="settings-radio">
-            <input type="radio" name="settings-theme" value="system" />
-            <span class="settings-radio-title">System</span>
-            <span class="settings-radio-sub">Follow OS appearance</span>
-          </label>
-        </div>
-
         <label class="modal-label">Summarizer</label>
         <div class="settings-provider-group">
           <label class="settings-radio">
@@ -1152,6 +1193,10 @@
             <label class="modal-label" for="settings-ol-model">Model</label>
             <input type="text" id="settings-ol-model" class="modal-input" placeholder="llama3.1" />
           </div>
+          <div class="modal-row">
+            <label class="modal-label" for="settings-ol-ctx">Context size (tokens)</label>
+            <input type="number" id="settings-ol-ctx" class="modal-input" min="1" max="2000000" step="1" placeholder="leave blank for Ollama's default" />
+          </div>
         </div>
 
         <div id="settings-section-openai" class="settings-section hidden">
@@ -1174,19 +1219,55 @@
           </div>
         </div>
 
+        <label class="modal-label" style="margin-top:18px">Appearance</label>
+        <div class="settings-provider-group" id="settings-theme-group">
+          <label class="settings-radio">
+            <input type="radio" name="settings-theme" value="dark" />
+            <span class="settings-radio-title">Dark</span>
+          </label>
+          <label class="settings-radio">
+            <input type="radio" name="settings-theme" value="light" />
+            <span class="settings-radio-title">Light</span>
+          </label>
+          <label class="settings-radio">
+            <input type="radio" name="settings-theme" value="system" />
+            <span class="settings-radio-title">System</span>
+            <span class="settings-radio-sub">Follow OS appearance</span>
+          </label>
+        </div>
+        <div style="display:flex; gap:16px; margin-top:10px">
+          <div class="settings-provider-group" id="settings-date-order-group" style="flex:1">
+            <label class="settings-radio">
+              <input type="radio" name="settings-date-order" value="dmy" />
+              <span class="settings-radio-title">Day first</span>
+              <span class="settings-radio-sub">31/12/26</span>
+            </label>
+            <label class="settings-radio">
+              <input type="radio" name="settings-date-order" value="mdy" />
+              <span class="settings-radio-title">Month first</span>
+              <span class="settings-radio-sub">12/31/26</span>
+            </label>
+          </div>
+          <div class="settings-provider-group" id="settings-time-format-group" style="flex:1">
+            <label class="settings-radio">
+              <input type="radio" name="settings-time-format" value="24h" />
+              <span class="settings-radio-title">24-hour</span>
+              <span class="settings-radio-sub">18:14</span>
+            </label>
+            <label class="settings-radio">
+              <input type="radio" name="settings-time-format" value="12h" />
+              <span class="settings-radio-title">12-hour</span>
+              <span class="settings-radio-sub">6:14 PM</span>
+            </label>
+          </div>
+        </div>
+
         <!-- Calendars (macOS only): which calendars to pull meetings from -->
         <div id="settings-section-calendars" class="settings-section hidden" style="margin-top:18px">
           <label class="modal-label">Calendars</label>
           <div class="settings-radio-sub" style="margin-bottom:8px">Pull meeting title &amp; participants from these calendars.</div>
           <div id="settings-calendars-list"></div>
         </div>
-
-        <label class="modal-label" style="margin-top:18px" for="settings-glossary">Domain glossary</label>
-        <div class="settings-radio-sub" style="margin-bottom:8px">
-          Terms Enhance restores when speech recognition mangles them. One per line;
-          add known mishearings after a tab: <code>PayCore⇥пейкор⇥пей кор</code>.
-        </div>
-        <textarea id="settings-glossary" class="modal-textarea" rows="6" spellcheck="false" maxlength="16384" placeholder="PayCore&#9;пейкор&#10;эквайринг"></textarea>
 
         <label class="modal-label" style="margin-top:18px">Recording</label>
         <label class="settings-radio" style="cursor:pointer">
@@ -1195,7 +1276,16 @@
           <span class="settings-radio-sub">For online calls recorded with mic + system audio. Shows a 15 s countdown you can cancel.</span>
         </label>
 
+        <label class="modal-label" style="margin-top:18px" for="settings-glossary">Domain glossary</label>
+        <div class="settings-radio-sub" style="margin-bottom:8px">
+          Terms Enhance restores when speech recognition mangles them. One per line;
+          add known mishearings after a tab: <code>PayCore⇥пейкор⇥пей кор</code>.
+        </div>
+        <textarea id="settings-glossary" class="modal-textarea" rows="6" spellcheck="false" maxlength="16384" placeholder="PayCore&#9;пейкор&#10;эквайринг"></textarea>
+
         <div id="settings-error" class="modal-error-text hidden" style="margin-top:10px"></div>
+
+        <div id="settings-version" class="settings-radio-sub" style="margin-top:18px; text-align:center"></div>
       </div>
       <div class="modal-footer">
         <button class="btn btn-ghost" id="settings-cancel">Cancel</button>
@@ -1295,23 +1385,6 @@
           <button class="btn btn-primary" id="followup-btn-err-done">Done</button>
         </div>
       </div>
-    </div>
-  </div>
-
-  <!-- Background summarization toolbar -->
-  <div id="bg-summary-toolbar" class="bg-summary-toolbar hidden" data-state="idle">
-    <div class="bg-summary-icon">
-      <div class="bg-summary-spinner"></div>
-      <div class="bg-summary-check">✓</div>
-      <div class="bg-summary-cross">✕</div>
-    </div>
-    <div class="bg-summary-info">
-      <div class="bg-summary-title" id="bg-summary-title">Summarizing…</div>
-      <div class="bg-summary-subtitle" id="bg-summary-subtitle"></div>
-    </div>
-    <div class="bg-summary-actions">
-      <button class="btn btn-ghost btn-sm hidden" id="bg-summary-view">View</button>
-      <button class="btn btn-ghost btn-sm bg-summary-close-btn" id="bg-summary-close" title="Dismiss">✕</button>
     </div>
   </div>
 

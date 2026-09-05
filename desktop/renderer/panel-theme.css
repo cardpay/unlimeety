@@ -1,0 +1,93 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   Unlimeety — FLOATING PANEL THEME (desktop app)
+
+   The two frameless panels — the recording prompt (prompt/prompt.html) and the
+   live-notes widget (notes/notes.html) — are their own `file://` documents with
+   a locked-down CSP, so they cannot link style.css / theme-light.css. They do
+   share a card: same background, border, radius, title/muted ramp, hover fill
+   and shadow. This file is that shared palette, and the ONLY stylesheet either
+   panel links.
+
+     <script src="../theme-init.js"></script>        ← resolves data-theme
+     <link rel="stylesheet" href="../panel-theme.css" />
+
+   `:root` below holds the original dark values, so a panel with no data-theme
+   (or data-theme="dark") renders exactly as it always has. The light block
+   overrides every one of them with values borrowed from theme-light.css — the
+   app's light palette, not invented colors.
+
+   Panel-specific colors live here too rather than in one panel's inline
+   <style>: light overrides split across files are how the setup-screen fix
+   drifted (see test/setup-screens.test.js), and test/panel-theme.test.js now
+   fails if a color literal reappears in either panel.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+:root {
+    color-scheme: dark;
+
+    /* Card chrome — shared by both panels */
+    --panel-bg: #1b1b22;
+    --panel-border: #2B2B2B;
+    --panel-title: #FFFFFF;
+    --panel-muted: #C7CDD6;
+    --panel-hover: #25252e;
+    --panel-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+
+    /* prompt.html — Record / Stop now (red) and the ghost secondary */
+    --panel-primary: #d7263d;
+    --panel-primary-hover: #F04438;
+    --panel-primary-fg: #ffffff;
+    --panel-ghost-text: #C7CDD6;
+    --panel-ghost-border: #2B2B2B;
+
+    /* notes.html — note rows, the text input and its focus ring */
+    --panel-row-border: #171717;
+    --panel-note-time: #C7CDD6;
+    --panel-note-text: #FFFFFF;
+    --panel-input-bg: #171717;
+    --panel-input-border: #2B2B2B;
+    --panel-focus-border: #5a5aef;
+    --panel-dim: #838383;
+}
+
+/* Values from theme-light.css: --bg-surface, --bg-elevated, --bg-hover,
+   --border, --border-strong, --border-focus, --text-primary/secondary/muted,
+   --rec, --danger, --accent-fg, and its floating-popup shadow. */
+:root[data-theme="light"] {
+    color-scheme: light;
+
+    --panel-bg: #ffffff;
+    /* --border-strong, not --border: the card sits in 6px of margin inside a
+       transparent window, so most of the 0 12px 32px shadow is clipped and the
+       border is all that separates a white card from a bright desktop. Dark is
+       unaffected — its border is opaque. */
+    --panel-border: #DFE3E8;
+    --panel-title: #0C0C0C;
+    /* --text-secondary, not --text-muted: the prompt's countdown subtitle and
+       the ✕ have to stay readable at 12px on white. */
+    --panel-muted: #444444;
+    --panel-hover: #e7e5dd;
+    --panel-shadow: 0 12px 32px rgba(28, 26, 22, 0.16), 0 2px 6px rgba(28, 26, 22, 0.06);
+
+    --panel-primary: #dc2626;
+    /* Hover goes DARKER on light (danger-600) — the dark theme's lighter hover
+       would read as disabled against a white card. */
+    --panel-primary-hover: #c62323;
+    --panel-primary-fg: #ffffff;
+    --panel-ghost-text: #444444;
+    --panel-ghost-border: #DFE3E8;
+
+    --panel-row-border: #EEF0F3;
+    /* --text-secondary (≈7.3:1), not --text-muted (≈4.0:1, under the 4.5:1 AA
+       floor): this carries the 12.5px note timestamp. Same reasoning as
+       --panel-muted above. */
+    --panel-note-time: #444444;
+    --panel-note-text: #0C0C0C;
+    --panel-input-bg: #f1f0ea;
+    --panel-input-border: #DFE3E8;
+    /* Solid --accent, not --border-focus: at 1px over --panel-input-bg the
+       0.55 alpha lands near 2:1, under the 3:1 non-text minimum, where dark
+       had a solid #5a5aef. */
+    --panel-focus-border: #416BD6;
+    --panel-dim: #6b675c; /* theme-light.css's --text-muted, re-tuned for AA */
+}
