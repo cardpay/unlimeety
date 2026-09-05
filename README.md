@@ -226,9 +226,9 @@ through the Live tab like any other call.
 
 ### Step 5. Configure the summarizer (optional)
 
-Transcription is always local. The summarizer model is the one place a cloud service can be involved — and only if you pick one. It serves Summarize, Ask AI, follow-up drafts and **Enhance**, so with a cloud provider the transcript text of those runs leaves the Mac. Four providers, in **Settings → Summarizer**:
+Transcription is always local. The summarizer is the one place a cloud service can be involved — and out of the box it is one: the default **Claude Code** provider sends text to Anthropic. The summarizer serves Summarize, Ask AI, follow-up drafts and **Enhance**, so with a cloud provider the transcript text of those runs leaves the Mac. Only **Ollama** keeps summarization on-device. Four providers, in **Settings → Summarizer**:
 
-- **Claude Code** *(default)* — uses the `claude` CLI installed on your machine. See [Claude Code docs](https://docs.anthropic.com/en/docs/claude-code/overview). If `claude` is not in `PATH`, the app will tell you so on the first run.
+- **Claude Code** *(default)* — runs the `claude` CLI installed on your machine, but the CLI is a client, not a local model: it sends its prompts to Anthropic's API, so **transcript text leaves the Mac** and an active Claude plan or API credit is required. See [Claude Code docs](https://docs.anthropic.com/en/docs/claude-code/overview). If `claude` is not in `PATH`, the app will tell you so on the first run.
 - **Ollama** — fully local models, nothing leaves the Mac. Requires a running `ollama serve` at `http://localhost:11434` and a pulled model (default `llama3.1`).
 - **OpenRouter** — paste an API key from [openrouter.ai](https://openrouter.ai/), pick a model (default `anthropic/claude-3.5-sonnet`).
 - **OpenAI-compatible** — any base URL that speaks the OpenAI API, for self-hosted or corporate gateways.
@@ -383,12 +383,15 @@ unlimeety/
 
 ## Security & privacy notes
 
-- **All processing is local by default.** Transcription (WhisperKit) and diarization run
-  on-device; the browser extension saves transcripts to local files only and makes no
-  network requests.
-- **Cloud LLM providers are opt-in.** The default summarization provider is the local
-  `claude` CLI. If you configure a cloud provider (OpenRouter / OpenAI-compatible),
-  transcript text is sent to that provider's API over HTTPS.
+- **Audio and transcription never leave the Mac.** Transcription (WhisperKit) and
+  diarization run on-device on every configuration; the browser extension saves
+  transcripts to local files only and makes no network requests.
+- **Summarization talks to the cloud by default.** The default provider, Claude Code,
+  shells out to the locally installed `claude` CLI — but that CLI is a client for
+  Anthropic's API, not a local model, so Summarize, Ask AI, follow-up drafts and Enhance
+  send transcript text off the machine over HTTPS. OpenRouter and any hosted
+  OpenAI-compatible endpoint do the same. **Ollama is the only fully offline provider**;
+  select it if the summary must stay on-device.
 - **API key storage.** Provider API keys are encrypted with Electron `safeStorage`
   (Keychain on macOS, DPAPI on Windows). On Linux systems without a secret service,
   the key falls back to plaintext in the app's `config.json`.
