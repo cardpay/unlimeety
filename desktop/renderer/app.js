@@ -3,6 +3,15 @@
  * ─────────────────────────────────────────────────────────────────────────── */
 
 const api = window.transcriber;
+// NOT `const queueApi` — contextBridge exposes `queueApi` as a non-configurable
+// property on window, and a top-level lexical binding of the same name in a
+// classic script is a SyntaxError that kills this entire file. Same reason
+// `api` above is not called `transcriber`.
+const jobsApi = window.queueApi;
+// Same rule again: `recordApi` is a non-configurable window property, so the
+// binding has to be named something else. The library reads recordings through
+// it — every un-transcribed wav is a meeting card now.
+const recApi = window.recordApi;
 
 // ─── State ────────────────────────────────────────────────────────────────────
 let state = {
@@ -24,26 +33,50 @@ const summaryWarnings = new Map();
 // summary rail. It is derived from a transcript item returned by
 // api.listTranscripts(). The renderer-only shim below extends each item with a
 // status enum + artifact flags so the new UI can render uniformly. Fields the
-// current IPC does not expose (summaryPath, mtime-driven outdated,
-// recording/failed states) are left undefined until main.js is extended.
+// current IPC does not expose (summaryPath, recording/failed states) are left
+// undefined until main.js is extended.
 //
 // Status derivation, given today's IPC surface:
-//   transcribing  — id is in transcribeRunning
-//   summarized    — hasSummary === true
-//   transcribed   — otherwise (a transcript file exists by definition)
-// recording / audio_only / outdated / failed need IPC support and will appear
-// once added.
+//   outdated      — hasSummary === true but summaryOutdated === true (a later
+//                   Enhance/Re-transcribe rewrote the transcript since)
+//   summarized    — hasSummary === true and not outdated
+//   transcribed   — a transcript file exists
+//   audio_only    — a recording with no transcript yet (deriveMeetingFromRecording)
+// `transcribing` is painted by buildMeetingCard off the job queue, not derived
+// here: whether a run is in flight is queue state, not disk state. recording /
+// failed still need IPC support and will appear once added.
+//
+// Fields that drive the sidebar's work-queue chips, never undefined — from
+// transcripts:list for a transcript row, and pinned to false by
+// deriveMeetingFromRecording for a recording, where their absence is a finding:
+//   hasAudio        — re-transcribing is possible at all
+//   model           — which model produced it; absent on older/pasted ones
+//   enhancedAt      — Enhance has already run
+//   enhanceAttemptedAt — Enhance ran but proofreading rejected every part
+//                     (speaker naming may still have applied)
+//   hasSummary      — a summary exists on disk
+//   summaryOutdated — that summary predates a later Enhance/Re-transcribe
+//   hasSpokenTurns  — the body holds turns Enhance would act on
+//   readFailed      — the transcript could not be read, so every flag above is
+//                     a fabricated default rather than a finding
+//   audioPath / audioPaths — the one exception on a readFailed row: path
+//                     existence doesn't depend on the read that just failed,
+//                     so these stay real (hasAudio itself does not — nothing
+//                     here asserts that finding)
 
 let meetings = [];
 let activeMeetingId = null;
 let summaryRenderMode = "auto";       // 'auto' | 'structured' | 'markdown'
 let contextMenu = null;               // { x, y, meetingId } | null
-const summarizeRunning = new Set();   // meetingIds with a summarize job in flight
-const transcribeRunning = new Set();  // meetingIds with a transcribe job in flight
-
+// No `transcribeRunning` / `summarizeRunning` sets: job state lives in the
+// queue (jobsApi), and the cards read it through activeJobFor. The two Sets
+// that used to sit here were declared, checked, and never added to.
 function deriveStatus(m) {
-  if (transcribeRunning.has(m.id)) return "transcribing";
-  if (m.hasSummary) return "summarized";
+  // Checked first: every other flag on this row is a fabricated default, not
+  // a finding (see the field-list comment above) — none of them may drive
+  // the pill. `failed` was already a defined status/pill with no caller.
+  if (m.readFailed) return "failed";
+  if (m.hasSummary) return m.summaryOutdated ? "outdated" : "summarized";
   if (m.hasTranscript) return "transcribed";
   return "audio_only";
 }
@@ -51,12 +84,17 @@ function deriveStatus(m) {
 // Without a filePath we have no stable id and the matching DOM selector would
 // fall back to the empty string, which matches any card without the attribute.
 // Skip such items entirely so they never enter `meetings[]`.
+// ── meeting record (extracted verbatim by test/transcript-meta.test.js) ──
+// Pure mapping from one `transcripts:list` row to the record the cards render
+// from. Keep it free of the DOM so the test can pin the key names against what
+// main.js actually emits — a renamed field here fails silently otherwise.
 function deriveMeetingFromTranscript(item) {
   if (!item || !item.filePath) return null;
   const rawDate = item.createdAt || item.generated || item.mtime;
   const date = rawDate ? new Date(rawDate) : new Date();
   const hasTranscript = Boolean(item.filePath);
   const hasSummary = Boolean(item.hasSummary);
+  const summaryOutdated = Boolean(item.summaryOutdated);
   const m = {
     id: item.filePath,
     // Display the title from the on-disk filename (stem) rather than the
@@ -68,19 +106,116 @@ function deriveMeetingFromTranscript(item) {
     date: isNaN(date.getTime()) ? new Date() : date,
     durationSec: undefined,
     audioPath: item.audioPath || undefined,
+    // Every wav main.js could relate to this transcript, not just the first —
+    // a legacy-stem recording can have more than one, and mergeMeetings needs
+    // all of them to dedup correctly. Falls back to the single audioPath so a
+    // fixture or an older caller that only supplies that still works.
+    audioPaths: Array.isArray(item.audioPaths) ? item.audioPaths : (item.audioPath ? [item.audioPath] : []),
     transcriptPath: item.filePath,
     summaryPath: undefined,
     participants: Array.isArray(item.participants) ? item.participants : [],
     hasAudio: Boolean(item.hasAudio),
     hasTranscript,
     hasSummary,
+    summaryOutdated,
     language: item.language,
+    // Provenance, straight from the transcript header. Undefined on transcripts
+    // written before those lines existed and on pasted ones — the card renders
+    // that as unknown rather than assuming anything.
+    model: item.model || undefined,
+    enhancedAt: item.enhancedAt || undefined,
+    enhanceAttemptedAt: item.enhanceAttemptedAt || undefined,
+    // A cut-short run (<stem>.partial.txt) — the clearest re-transcribe
+    // candidate there is, and not worth enhancing/summarizing before the
+    // full run replaces its text. See meetingMatchesFilter.
+    interrupted: Boolean(item.interrupted),
+    // Whether the transcript holds anything Enhance would act on, decided in
+    // main by the very predicate the Enhance job uses. False on an unreadable
+    // transcript, so the "To enhance" filter leaves it out.
+    hasSpokenTurns: Boolean(item.hasSpokenTurns),
+    // The read itself failed: hasSummary / hasAudio / model above are the
+    // fallback's fabricated defaults, so no queue may act on them.
+    readFailed: Boolean(item.readFailed),
+    // The header block verbatim, for the card's info panel. Not the typed
+    // fields above: `parseTranscriptHeaderMain` only knows eight keys, and
+    // older extension builds wrote `Started:`, which no whitelist covers.
+    header: item.header || "",
     progress: undefined,
     failedReason: undefined,
   };
   m.status = deriveStatus(m);
   return m;
 }
+// Pure mapping from one `record:list` row to a meeting record. A recording that
+// has not been transcribed has no `.txt` to open, so the wav path is its id —
+// which is also what every `record:*` handler takes. Kept next to its transcript
+// twin so the two field lists stay visibly in sync.
+function deriveMeetingFromRecording(item) {
+  if (!item || !item.filePath) return null;
+  const rawDate = item.createdAt || item.mtime;
+  const date = rawDate ? new Date(rawDate) : new Date();
+  const m = {
+    id: item.filePath,
+    // The on-disk stem verbatim — NOT through stripMeetPrefix like the
+    // transcript twin. This title is what the rename popup pre-fills, and
+    // `record:rename` writes the submitted text straight to the filename: a
+    // stripped prefix would silently rename the wav and break its pairing.
+    title: (item.filename || "").replace(/\.wav$/i, ""),
+    project: undefined,
+    date: isNaN(date.getTime()) ? new Date() : date,
+    durationSec: undefined,
+    // record:list knows the byte size but not the duration — the card shows it
+    // so an audio-only row is not left with nothing but a timestamp.
+    sizeBytes: Number(item.size) || 0,
+    audioPath: item.filePath,
+    // Its own wav, and only that — a recording with no transcript can't have
+    // been related to a second one. Kept for shape-parity with the transcript
+    // twin's audioPaths, so a generic consumer of either union member is safe.
+    audioPaths: [item.filePath],
+    transcriptPath: null,
+    summaryPath: undefined,
+    participants: [],
+    hasAudio: true,
+    // The three flags every work queue reads. False here is a finding, not a
+    // default: there is no transcript, so there is nothing to enhance,
+    // summarize or re-transcribe from.
+    hasTranscript: false,
+    hasSummary: false,
+    summaryOutdated: false,
+    hasSpokenTurns: false,
+    language: undefined,
+    model: undefined,
+    enhancedAt: undefined,
+    enhanceAttemptedAt: undefined,
+    readFailed: false,
+    header: "",
+    progress: undefined,
+    failedReason: undefined,
+  };
+  m.status = deriveStatus(m);
+  return m;
+}
+
+// The union the library renders: every transcript, plus every recording that
+// does not have one. Pure, so the dedup rule below is testable without IPC.
+function mergeMeetings(transcriptRows, recordingRows) {
+  const fromTranscripts = (transcriptRows || []).map(deriveMeetingFromTranscript).filter(Boolean);
+  // A legacy recording is "<base>-YYYYMMDD-HHMMSS.wav" while its transcript is
+  // "<base>.txt", so `record:list` reports hasTranscript false for a wav that
+  // `transcripts:list` already claims as its audio. Without this check that
+  // recording gets a second, transcript-less card. Every related wav counts,
+  // not just the first — a legacy-stem recording can pair with more than
+  // one — and a transcript whose read failed still claims its own wav, since
+  // audioPaths is computed independently of whether the read succeeded.
+  const claimed = new Set(fromTranscripts.flatMap((m) => m.audioPaths));
+  const fromRecordings = (recordingRows || [])
+    .filter((r) => r && !r.hasTranscript && !claimed.has(r.filePath))
+    .map(deriveMeetingFromRecording)
+    .filter(Boolean);
+  // No global sort: groupMeetingsByDate already orders every bucket by newest.
+  return [...fromTranscripts, ...fromRecordings];
+}
+// ── end meeting record ──
 
 function getMeetingById(id) {
   return meetings.find((m) => m.id === id) || null;
@@ -658,16 +793,19 @@ const btnSave = document.getElementById("btn-save");
 const btnSaveAs = document.getElementById("btn-save-as");
 const editorToolbar = document.getElementById("editor-toolbar");
 const btnLibrary = document.getElementById("btn-library");
-const statusPath = document.getElementById("status-path");
-const statusWords = document.getElementById("status-words");
-const statusLines = document.getElementById("status-lines");
 const saveChip = document.getElementById("save-chip");
 
 // Library DOM refs
 const libraryPanel = document.getElementById("library-panel");
 const libraryList = document.getElementById("library-list");
 const libraryEmpty = document.getElementById("library-empty");
+const libraryEmptyText = document.getElementById("library-empty-text");
 const libraryCount = document.getElementById("library-count");
+const librarySelection = document.getElementById("library-selection");
+const librarySelectionLabel = document.getElementById("library-selection-label");
+const librarySelectionAll = document.getElementById("library-selection-all");
+const audioOnlyState = document.getElementById("audio-only-state");
+const audioOnlyTitle = document.getElementById("audio-only-title");
 
 // Audio player DOM refs
 const audioPlayer    = document.getElementById("audio-player");
@@ -779,7 +917,13 @@ function playerSetPlaying(playing) {
 
 async function playerShow(filePath) {
   if (!PLAYER_OK) return;
-  const audioPath = await api.getAudioPath(filePath);
+  playerShowPath(await api.getAudioPath(filePath));
+}
+
+// An audio-only meeting IS its wav — its id is the path — so there is no
+// transcript to resolve the audio from and nothing to await.
+function playerShowPath(audioPath) {
+  if (!PLAYER_OK) return;
   if (!audioPath) { audioPlayer.classList.add("hidden"); return; }
   audioEl.src = `file://${encodeURI(audioPath)}`;
   audioEl.load();
@@ -870,6 +1014,15 @@ function parseSegments(content) {
   return segments;
 }
 
+// An Enhance-bound entry keeps the address it was read from as a trailing
+// annotation — "Полина Зорина (Beta) <p.zorina@example.com>" — so a wrong
+// binding only mispairs a name next to a still-recoverable address instead of
+// destroying it (see transcript-enhance.js's renameParticipantsLine). Neither
+// consumer below wants that annotation: a rename suggestion must not offer to
+// rename someone's speaker chip to a string containing their email, and a
+// manual rename must recognise the entry by its display name alone.
+const HEADER_PARTICIPANT_ANNOTATION_RE = /\s*<[^<>]*>$/;
+
 // Names listed on the transcript's "Participants:" header line (used as
 // rename suggestions). Reads only the header block (up to the first blank line).
 function headerParticipants(content) {
@@ -877,7 +1030,7 @@ function headerParticipants(content) {
     if (line === "") break;
     if (line.startsWith("Participants: ")) {
       return line.slice("Participants: ".length)
-        .split(",").map(s => s.trim()).filter(Boolean);
+        .split(",").map(s => s.trim().replace(HEADER_PARTICIPANT_ANNOTATION_RE, "")).filter(Boolean);
     }
   }
   return [];
@@ -906,7 +1059,13 @@ function renameSpeakerInText(content, oldName, newName) {
       if (line.startsWith("Participants: ")) {
         const mapped = line.slice("Participants: ".length)
           .split(",").map(s => s.trim())
-          .map(n => (n === oldName ? newName : n)).filter(Boolean);
+          .map(n => {
+            const annotation = (n.match(HEADER_PARTICIPANT_ANNOTATION_RE) || [""])[0];
+            const display = annotation ? n.slice(0, -annotation.length) : n;
+            // The address survives a manual rename too — only the display
+            // name changes, same reasoning as the automated pass that wrote it.
+            return display === oldName ? newName + annotation : n;
+          }).filter(Boolean);
         const seen = new Set(); const out = [];
         for (const n of mapped) {
           const k = n.toLowerCase();
@@ -926,7 +1085,101 @@ function renameSpeakerInText(content, oldName, newName) {
   return lines.join("\n");
 }
 
-function renderTranscriptView(content) {
+// ── transcript meta (extracted verbatim by test/transcript-meta.test.js) ──
+// The header block above the first turn is reference data nobody reads twice,
+// so view mode drops it entirely and the library card carries an info panel
+// instead. This region stays free of the DOM and localStorage — `modelLabel`,
+// `formatMeetingStamp` and `escHtml` resolve from the enclosing scope, which
+// is what lets the test eval it with stubs for them. Keep the markers in
+// place when editing.
+
+// Only ISO values are ours to reformat. `Recorded-At` and `Enhanced` are ISO,
+// but `Generated` is written with toLocaleString() (main.js and the extension's
+// background.js), and new Date() either rejects that shape outright or
+// mis-reparses a US-looking one into a different instant.
+const META_ISO = /^\d{4}-\d{2}-\d{2}T/;
+
+// Display labels for keys whose on-disk name is clumsier than it needs to be.
+// The parsed key is untouched — this is presentation only. Unlinked to (and
+// not a subset of) parseTranscriptHeaderMain's own key list in main.js — a new
+// header line there needs its bespoke label/formatting, if any, added here too.
+const META_LABELS = { "Recorded-At": "Recorded" };
+
+// Display form of one header value: raw ids and ISO stamps are what the file
+// stores, the panel shows what the rest of the UI shows.
+function metaValue(key, value) {
+  if (key === "Model") return modelLabel(value);
+  if (META_ISO.test(value)) {
+    const d = new Date(value);
+    if (!isNaN(d.getTime())) return formatMeetingStamp(d);
+  }
+  return value;
+}
+
+// What view mode renders where the header block was. Normally just the
+// interruption warning — the rest is one click away on the card. But a file
+// opened from outside the transcripts folder (Open, drag-drop, deep link) has
+// no card at all, so for those the rows stay inline rather than becoming
+// reachable only by toggling to Edit.
+function transcriptMetaHtml(header, { inlineRows = false } = {}) {
+  const { rows, warn } = parseTranscriptMeta(header);
+  const showRows = inlineRows && rows.length;
+  if (!warn && !showRows) return "";
+  return `<div class="tv-meta">`
+    + (warn ? `<span class="tv-meta-warn">${escHtml(warn)}</span>` : "")
+    + (showRows ? `<div class="tv-meta-rows">${meetingMetaPanelHtml(rows)}</div>` : "")
+    + `</div>`;
+}
+
+// Header text → { rows: [{key, value}], warn }. Every line survives: one that
+// is not "Key: value" becomes a keyless row rather than being dropped. No
+// whitelist — `parseTranscriptHeaderMain` knows eight keys, but older extension
+// builds wrote `Started:` and nothing should make a line invisible just because
+// no one has typed its name into a table. `warn` is the interrupted-
+// transcription notice, pulled out to be rendered inline in the transcript
+// where a reader cannot miss it; it is the one line the card panel omits.
+function parseTranscriptMeta(header) {
+  const rows = [];
+  let warn = "";
+  for (const line of String(header || "").split("\n")) {
+    const text = line.trim();
+    if (!text) continue;
+    // Key chars only up to the colon, so free text ("draft notes: see below")
+    // stays a keyless row instead of being mangled into a labelled one — and a
+    // "//" value means the colon belonged to a URL scheme, not to a key.
+    const m = /^([A-Za-z][\w-]*):[ \t]*(.*)$/.exec(text);
+    if (!m || m[2].startsWith("//")) { rows.push({ key: "", value: text }); continue; }
+    const value = m[2].trim();
+    // Same "PARTIAL" prefix main.js's parseTranscriptHeaderMain checks for
+    // deriveMeetingFromTranscript's `interrupted` field — two independent
+    // regexes on one hardcoded value, unlinked. A changed write site
+    // (main.js's Status: line) needs both updated by hand.
+    if (m[1] === "Status" && /^PARTIAL\b/.test(value)) { warn = value; continue; }
+    rows.push({ key: m[1], value: metaValue(m[1], value) });
+  }
+  return { rows, warn };
+}
+
+// The card's panel rows. Read off the header the library IPC already carried —
+// the render path has no file content and must not acquire one per card.
+function meetingMetaRows(m) {
+  return parseTranscriptMeta(m?.header).rows;
+}
+
+function meetingMetaPanelHtml(rows) {
+  return rows.map((r) =>
+    `<div class="meta-row">`
+    + (r.key ? `<span class="meta-key">${escHtml(META_LABELS[r.key] || r.key)}</span>` : "")
+    + `<span class="meta-val">${escHtml(r.value)}</span></div>`).join("");
+}
+// ── end transcript meta ──
+
+// ── transcript view (extracted verbatim by test/transcript-meta.test.js) ──
+// Pure markup-building, split out of renderTranscriptView so the PARTIAL
+// warning's wiring (does a header even reach transcriptMetaHtml?) has
+// something to run without a DOM — deleting that one call used to leave the
+// whole test suite green.
+function buildTranscriptViewHtml(content, carded) {
   const firstTcMatch = /^\[\d[^\]]*\]/m.exec(content);
   let html = "";
   if (!firstTcMatch) {
@@ -935,7 +1188,11 @@ function renderTranscriptView(content) {
     if (content.trim()) html = `<div class="tv-plain">${escHtml(content)}</div>`;
   } else {
     const header = content.slice(0, firstTcMatch.index).trim();
-    if (header) html += `<div class="tv-header">${escHtml(header)}</div>`;
+    // A transcript in the library carries its header on its card; one opened
+    // from elsewhere has no card, so it keeps the rows inline.
+    if (header) {
+      html += transcriptMetaHtml(header, { inlineRows: !carded });
+    }
     for (const seg of parseSegments(content)) {
       // "Note" is the reserved label the recording UIs write for the user's own
       // typed notes — it's not a speaker, so it gets a plain label instead of a
@@ -956,7 +1213,13 @@ function renderTranscriptView(content) {
               `</div>`;
     }
   }
-  transcriptView.innerHTML = html;
+  return html;
+}
+// ── end transcript view ──
+
+function renderTranscriptView(content) {
+  const carded = meetings.some((mm) => mm.id === state.filePath);
+  transcriptView.innerHTML = buildTranscriptViewHtml(content, carded);
 }
 
 function showTranscriptView() {
@@ -1079,8 +1342,6 @@ function loadContent(filePath, content) {
 
   editor.value = content;
   showEditor();
-  updateUI();
-  updateStats();
 
   // All meetings render through the transcript-view; Edit toggles to textarea.
   if (PLAYER_OK) {
@@ -1095,6 +1356,11 @@ function loadContent(filePath, content) {
   else playerHide();
 
   updateCancelBtn();
+  // Covers navigating onto a file that already has an Enhance job running
+  // (started elsewhere, or queued before this file was opened) — locks the
+  // editor immediately rather than waiting for the user's first keystroke to
+  // race the run.
+  syncEditorReadOnly();
 }
 
 // Single source of truth for "which meeting is open".
@@ -1140,6 +1406,12 @@ async function saveFile() {
     saveChip.classList.remove("flash");
     void saveChip.offsetWidth; // restart CSS animation
     saveChip.classList.add("flash");
+    // The watcher suppresses its own writes (stampSelfWrite), so an autosave
+    // that just gave this transcript its first spoken turns would otherwise
+    // leave "To enhance" stale until something else happens to re-list.
+    // Debounced separately from autosave's own 1s pause — typing steadily
+    // would otherwise re-scan the whole folder every autosave.
+    scheduleLibraryRefresh();
   } else {
     // Typed during the write — stay dirty and commit the remainder.
     setDirty(true);
@@ -1166,6 +1438,17 @@ const AUTOSAVE_DELAY_MS = 1000;
 function scheduleAutosave() {
   clearTimeout(autosaveTimer);
   autosaveTimer = setTimeout(autosave, AUTOSAVE_DELAY_MS);
+}
+
+// Separate, longer debounce for re-listing the library after a save: steady
+// typing autosaves roughly every AUTOSAVE_DELAY_MS, and a full re-scan on
+// every one of those would be wasteful — this only fires once things go
+// quiet for a few seconds.
+let libraryRefreshTimer = null;
+const LIBRARY_REFRESH_DELAY_MS = 4000;
+function scheduleLibraryRefresh() {
+  clearTimeout(libraryRefreshTimer);
+  libraryRefreshTimer = setTimeout(() => { loadLibrary(); }, LIBRARY_REFRESH_DELAY_MS);
 }
 
 // Loading another note overwrites both editor.value and state.savedContent, so
@@ -1200,7 +1483,6 @@ async function saveAsFile() {
       setDirty(true);
       scheduleAutosave();
     }
-    updateUI();
     updateCancelBtn();
   }
   return !!result?.ok;
@@ -1217,7 +1499,6 @@ async function cancelChanges() {
     lastActiveSeg = null;
   }
   await saveFile();
-  updateStats();
   updateCancelBtn();
 }
 
@@ -1248,15 +1529,6 @@ function updateCancelBtn() {
   btnSave.disabled = !state.filePath || editor.value === state.baselineContent;
 }
 
-// ─── Stats ────────────────────────────────────────────────────────────────────
-function updateStats() {
-  const text = editor.value;
-  const lines = text === "" ? 0 : text.split("\n").length;
-  const words = text.trim() === "" ? 0 : text.trim().split(/\s+/).length;
-  statusWords.textContent = `${words.toLocaleString()} words`;
-  statusLines.textContent = `${lines.toLocaleString()} lines`;
-}
-
 // ─── Library panel ────────────────────────────────────────────────────────────
 let libraryOpen = true;
 let activeLibraryPath = null;
@@ -1267,9 +1539,50 @@ btnLibrary.addEventListener("click", () => {
   btnLibrary.classList.toggle("active", libraryOpen);
 });
 
-async function loadLibrary() {
-  const items = await api.listTranscripts();
-  meetings = (items || []).map(deriveMeetingFromTranscript).filter(Boolean);
+// What the library actually cares about in a recordings list: which files exist
+// and whether each has a transcript. Deliberately not size or mtime — a wav
+// being recorded into changes both several times a second.
+function recordingsSignature(recs) {
+  return (recs || []).map((r) => `${r?.filePath}|${r?.hasTranscript ? 1 : 0}`).join("\n");
+}
+let lastRecordingsSig = null;
+
+async function loadLibrary(prefetchedRecs) {
+  // Two sources, one list. `record:list` already returns every field a card
+  // needs, so the union happens here rather than inside `transcripts:list` —
+  // which would mean a second wav scan and a changed contract for its four
+  // other callers.
+  const [items, recs] = await Promise.all([
+    api.listTranscripts(),
+    // A failing recordings scan must cost the recordings, not the whole library.
+    prefetchedRecs || (recApi ? recApi.list().catch(() => []) : []),
+  ]);
+  lastRecordingsSig = recordingsSignature(recs);
+  meetings = mergeMeetings(items, recs);
+  // Drop selections for recordings that left the disk, so the batch CTA never
+  // counts a row nobody can see.
+  const present = new Set(meetings.map((m) => m.id));
+  for (const id of Array.from(selectedRecordings)) {
+    if (!present.has(id)) selectedRecordings.delete(id);
+  }
+  // The recording on screen is gone from the list. Two very different reasons:
+  // its transcription finished (a transcript row now claims that wav), or the
+  // file left the disk. Nothing else notices either.
+  if (audioOnlyState && !audioOnlyState.classList.contains("hidden")
+      && !meetings.some((m) => m.id === activeMeetingId)) {
+    const transcribed = meetings.find((m) => m.audioPath === activeMeetingId);
+    if (transcribed) {
+      // Exactly what the user asked for when they hit Transcribe — open it
+      // rather than making them find it again in the list.
+      api.openFromLibrary(transcribed.id);
+    } else {
+      audioOnlyState.classList.add("hidden");
+      emptyState.classList.remove("hidden");
+      if (PLAYER_OK) playerHide();
+      activeMeetingId = null;
+      activeLibraryPath = null;
+    }
+  }
   renderMeetings();
 }
 
@@ -1282,20 +1595,93 @@ let chatHistory = [];  // { role: 'user'|'assistant', content: string }[]
 let chatTarget = null;
 
 // ─── Sidebar: filter + search state ───────────────────────────────────────────
-let activeFilter = "all";   // 'all' | 'audio' | 'transcribed' | 'summarized'
+let activeFilter = "all";   // 'all' | 'transcribe' | 'retranscribe' | 'enhance' | 'summarize' (+ dormant 'audio')
+// Meeting ids checked for the batch transcribe CTA. Only audio-only rows can be
+// checked, so every id in here is a wav path — exactly what `record:*` takes.
+const selectedRecordings = new Set();
 let searchQuery = "";
 let searchDebounceTimer = null;
 let contentMatches = new Map(); // filePath -> snippet (from full-text content search)
 let searchToken = 0;            // guards against out-of-order async search responses
 
+// Worth re-transcribing means "not the most accurate model available", so this
+// is deliberately NOT modelIsStrong(): that one is `/large/i`, which counts the
+// app's own default `large-v3_turbo` as strong and would leave the queue empty
+// for everyone who never hand-picked a smaller model — while turbo → large-v3 is
+// the one upgrade users actually have. Kept separate because modelIsStrong also
+// colours the provenance chip, and that must not change here.
+function modelWorthRedoing(id) {
+  // modelLabel() already strips the vendor prefix for the provenance chip; its
+  // underscore-to-space pass does not change the comparison below.
+  const variant = modelLabel(id).trim().toLowerCase();
+  // Empty means unknown, not weak — absence of a model line is no evidence.
+  // Everything that is not large-v3 proper is: turbo, medium, small, base, tiny.
+  // WhisperKit also ships size-suffixed ids ("large-v3_947MB"); that IS the best
+  // model, and re-transcribing would only reproduce the same id, so the queue
+  // would never clear. Turbo keeps its own suffixed forms and stays in.
+  return variant !== "" && !/^large-v3( \d+mb)?$/.test(variant);
+}
+
+// One source of truth per work-queue chip: its match predicate and its
+// empty-state line. computeFilterCounts, the count-loop in renderMeetings and
+// FILTER_EMPTY_TEXT all derive from this instead of separately restating the
+// same four keys — previously five places spelled the filter set, and ~90
+// lines of test existed only to police the drift between them. "all" and the
+// dormant "audio" (no chip yet — see deferred-work.md) stay special-cased in
+// meetingMatchesFilter itself, since neither is a queue of work with an empty
+// state or a count-loop entry.
+const FILTERS = {
+  // The one queue an audio-only row belongs to, and the only one that is not
+  // about improving a transcript that already exists. A queue also excludes a
+  // row already being worked on — same job-in-flight check the menu item
+  // disables on (activeJobFor), so a queue never asks the user to start what
+  // is already running.
+  transcribe: {
+    match: (m) => m.hasTranscript === false && !activeJobFor("transcribe", m.id),
+    empty: "Nothing to transcribe",
+  },
+  // Re-transcribable: either a weak model, or an interrupted/partial run —
+  // incomplete text is worth re-running regardless of which model produced
+  // it, large-v3 included. Gated on hasAudio too, same as the menu item.
+  retranscribe: {
+    match: (m) => m.hasAudio === true && (m.interrupted === true || modelWorthRedoing(m.model))
+      && !activeJobFor("transcribe", m.audioPath || m.id),
+    empty: "Nothing to re-transcribe",
+  },
+  // enhanceAttemptedAt: proofreading rejected every part on an earlier run —
+  // a re-run hits the same rejection, so it must not sit in the queue forever.
+  // interrupted: a partial's text is about to be replaced by the full
+  // re-transcription — proofreading it now is wasted work.
+  enhance: {
+    match: (m) => !m.enhancedAt && !m.enhanceAttemptedAt && !m.interrupted && m.hasSpokenTurns === true
+      && !activeJobFor("enhance", m.id),
+    empty: "Nothing to enhance",
+  },
+  // The hasTranscript gate is what keeps un-transcribed recordings out: they
+  // have no summary either, so `!m.hasSummary` alone would sweep every one of
+  // them into a queue whose action they cannot run. A summary that predates a
+  // later Enhance/Re-transcribe (summaryOutdated) belongs back in the queue
+  // too — it exists on disk, but no longer reflects the current transcript.
+  // interrupted: same reasoning as enhance above — summarizing a partial is
+  // wasted work once the full re-transcription replaces its text.
+  summarize: {
+    match: (m) => m.hasTranscript === true && !m.interrupted && (!m.hasSummary || m.summaryOutdated === true)
+      && !activeJobFor("summarize", m.id),
+    empty: "Nothing to summarize",
+  },
+};
+
+// The chips answer "what is still waiting", not "what did I already do", so
+// every FILTERS entry is a queue of work left to do on that meeting.
 function meetingMatchesFilter(m, filter) {
   if (filter === "all") return true;
   if (filter === "audio") return m.hasAudio === true;
-  if (filter === "transcribed") {
-    return m.status === "transcribed" || m.status === "summarized" || m.status === "outdated";
-  }
-  if (filter === "summarized") return m.status === "summarized" || m.status === "outdated";
-  return true;
+  // A queue never lists work whose action is known to fail. On a read failure
+  // every flag the queues read is the fallback's fabricated default — the
+  // summary and audio checks never even ran — so every queue excludes the
+  // row. It still shows under All, which is the branch above.
+  if (m.readFailed === true) return false;
+  return FILTERS[filter] ? FILTERS[filter].match(m) : true;
 }
 
 function meetingMatchesSearch(m, q) {
@@ -1319,12 +1705,41 @@ function highlightSnippet(snippet, q) {
   return out + escapeHtml(snippet.slice(from));
 }
 
+// What the placeholder says when nothing is visible. Read by renderMeetings only;
+// the queue lines (from FILTERS) are the "you are done" case, not the "nothing
+// here" one. `all` is unreachable in practice (filter "all" matches every
+// meeting, so a non-empty library with no search query can never be empty
+// under it) but is kept as the deliberate fallback emptyStateText()'s tests
+// pin it as, rather than falling through to the generic "No matches".
+const FILTER_EMPTY_TEXT = {
+  all: "No meetings yet",
+  ...Object.fromEntries(Object.keys(FILTERS).map((key) => [key, FILTERS[key].empty])),
+};
+
+function emptyStateText() {
+  if (!meetings.length) return "No meetings yet";
+  if (searchQuery) return "No matches";
+  return FILTER_EMPTY_TEXT[activeFilter] || "No matches";
+}
+
+// Exactly one chip is the selected one. The class is paint; aria-pressed is what
+// a screen reader reads, so both move together or the two disagree.
+function markActiveChip(filter) {
+  document.querySelectorAll(".filter-chip").forEach((c) => {
+    const on = c.dataset.filter === filter;
+    c.classList.toggle("active", on);
+    c.setAttribute("aria-pressed", on ? "true" : "false");
+  });
+}
+
 function computeFilterCounts(list) {
-  const counts = { all: list.length, audio: 0, transcribed: 0, summarized: 0 };
+  const counts = { all: list.length, audio: 0 };
+  for (const key of Object.keys(FILTERS)) counts[key] = 0;
   for (const m of list) {
-    if (m.hasAudio) counts.audio++;
-    if (meetingMatchesFilter(m, "transcribed")) counts.transcribed++;
-    if (meetingMatchesFilter(m, "summarized")) counts.summarized++;
+    if (meetingMatchesFilter(m, "audio")) counts.audio++;
+    for (const key of Object.keys(FILTERS)) {
+      if (meetingMatchesFilter(m, key)) counts[key]++;
+    }
   }
   return counts;
 }
@@ -1366,6 +1781,11 @@ function stripMeetPrefix(title) {
 
 // ─── Sidebar render ───────────────────────────────────────────────────────────
 function renderMeetings() {
+  // The panel is body-level and anchored to a card that is about to be
+  // replaced: left open it floats with rows for a card that no longer exists,
+  // and its overlay keeps swallowing clicks.
+  closeMeetingMeta();
+
   // Clear list contents (keep the #library-empty placeholder).
   Array.from(libraryList.children).forEach((el) => {
     if (el.id !== "library-empty") el.remove();
@@ -1376,17 +1796,37 @@ function renderMeetings() {
 
   // Update filter chip counts (off the unfiltered/unsearched meeting list).
   const counts = computeFilterCounts(meetings);
-  for (const kind of ["all", "audio", "transcribed", "summarized"]) {
+  for (const kind of ["all", ...Object.keys(FILTERS)]) {
     const el = document.querySelector(`.filter-count[data-count="${kind}"]`);
-    if (el) el.textContent = String(counts[kind]);
+    // `?? 0` so a kind/chip mismatch shows a wrong number rather than painting
+    // the literal string "undefined" into the chip.
+    if (el) el.textContent = String(counts[kind] ?? 0);
   }
 
-  // Apply filter + search.
+  // Apply filter + search. The open meeting stays pinned against the filter
+  // (not the search box) — finishing Enhance on the meeting you are reading
+  // should not make its card vanish out from under you mid-session.
   const visible = meetings.filter(
-    (m) => meetingMatchesFilter(m, activeFilter) && meetingMatchesSearch(m, searchQuery),
+    (m) => meetingMatchesSearch(m, searchQuery)
+      && (m.id === activeMeetingId || meetingMatchesFilter(m, activeFilter)),
   );
 
+  // The batch selection is pruned to what a filter or search change still
+  // shows — Delete/Transcribe read straight from this set, and silently
+  // acting on a row the user can no longer see is worse than losing the
+  // selection. Before renderSelectionBar so its count already reflects it.
+  if (selectedRecordings.size) {
+    const visibleIds = new Set(visible.map((m) => m.id));
+    for (const id of Array.from(selectedRecordings)) {
+      if (!visibleIds.has(id)) selectedRecordings.delete(id);
+    }
+  }
+  renderSelectionBar();
+
   if (!visible.length) {
+    // "No meetings yet" is a lie over a full library whose active queue simply
+    // ran dry — and an exhausted queue is the good outcome, not an empty app.
+    libraryEmptyText.textContent = emptyStateText();
     libraryEmpty.classList.remove("hidden");
     return;
   }
@@ -1410,42 +1850,141 @@ function renderMeetings() {
   }
 }
 
+// ─── Batch selection ─────────────────────────────────────────────────────────
+// The bar is the whole UI for the selection, so it hides at zero rather than
+// sitting there saying "0 selected" above a library nobody is batching.
+function renderSelectionBar() {
+  if (!librarySelection) return;
+  const n = selectedRecordings.size;
+  librarySelection.classList.toggle("hidden", n === 0);
+  if (librarySelectionLabel) {
+    librarySelectionLabel.textContent = n === 1 ? "1 recording selected" : `${n} recordings selected`;
+  }
+  // Hidden once everything selectable on screen is already picked, so the link
+  // never sits there doing nothing.
+  const all = selectableVisible();
+  librarySelectionAll?.classList.toggle("hidden", all.length === 0 || all.every((m) => selectedRecordings.has(m.id)));
+}
+
+// The rows a user could tick right now: transcript-less, and past both the
+// active chip and the search box. Select all must not reach beyond what is on
+// screen — the bar's count is the only feedback there is.
+function selectableVisible() {
+  return meetings.filter(
+    (m) => m.hasTranscript === false
+      && meetingMatchesFilter(m, activeFilter)
+      && meetingMatchesSearch(m, searchQuery),
+  );
+}
+
+// Hand the paths to the transcribe-settings screen — the same entry point
+// the ⋯ menu's Transcribe… uses, and the same one the removed Record sidebar
+// used for its batch CTA. N ≥ 1 is all one case there. enterTranscribeSettings
+// itself makes sure the Transcripts tab is the one showing underneath.
+function sendToTranscribeSettings(paths) {
+  if (!paths.length) return;
+  window.recordTab?.enterTranscribeSettings?.(paths);
+}
+
+document.getElementById("library-selection-transcribe")?.addEventListener("click", () => {
+  const paths = Array.from(selectedRecordings);
+  // Cleared before the hand-off, not after: the settings screen owns the batch
+  // from here, and a selection left behind would re-send on the next click.
+  selectedRecordings.clear();
+  renderMeetings();
+  sendToTranscribeSettings(paths);
+});
+
+document.getElementById("library-selection-delete")?.addEventListener("click", async () => {
+  const paths = Array.from(selectedRecordings);
+  if (!paths.length) return;
+  if (!recApi) return;
+  const result = await recApi.deleteMany(paths);
+  // Cancelling the confirmation is not a failure and keeps the selection.
+  if (result?.canceled) return;
+  if (!result?.ok) {
+    window.alert(`Couldn't delete the recordings: ${result?.error || "unknown error"}`);
+  } else if (result.errors?.length) {
+    // ok:true only means *something* was deleted. Reporting the whole batch as
+    // gone would leave files on disk the user believes they removed.
+    window.alert(`${result.errors.length} of ${paths.length} recordings could not be deleted: ${result.errors[0].error}`);
+  }
+  // Reload either way: a partial failure still removed some of them.
+  selectedRecordings.clear();
+  loadLibrary();
+});
+
+document.getElementById("library-selection-all")?.addEventListener("click", () => {
+  for (const m of selectableVisible()) selectedRecordings.add(m.id);
+  renderMeetings();
+});
+
+document.getElementById("library-selection-clear")?.addEventListener("click", () => {
+  selectedRecordings.clear();
+  renderMeetings();
+});
+
 function buildMeetingCard(m) {
   const isActive = m.id === activeMeetingId;
+  // The transcribe lane keys its jobs on the wav path, which is exactly a
+  // recording's id.
+  const transcribing = m.hasTranscript === false && Boolean(activeJobFor("transcribe", m.id));
+  // Only a recording without a transcript is batch-transcribable, so only those
+  // rows get a checkbox — a library-wide multi-select with one applicable
+  // action would just be a trap. One already in the transcribe lane is out too:
+  // re-submitting it queues the same wav twice, and deleting it kills the run.
+  const selectable = m.hasTranscript === false && !transcribing;
+  const selected = selectable && selectedRecordings.has(m.id);
   const card = document.createElement("div");
   card.className = "meeting-card" + (isActive ? " active" : "");
   card.dataset.meetingId = m.id;
-  card.dataset.status = m.status;
+  // The status a card paints is not always the one derived from disk: a
+  // transcribe job in flight is queue state, which deriveStatus cannot see.
+  const status = transcribing ? "transcribing" : m.status;
+  card.dataset.status = status;
 
   // Show a content-match snippet only when the query hit the body but not the
   // title/participants (otherwise the match is already obvious from the card).
   const snippet = contentMatches.get(m.id);
   const metaHay = [m.title, ...(m.participants || [])].join(" ").toLowerCase();
   const showSnippet = searchQuery && snippet && !metaHay.includes(searchQuery);
+  // Only whether there is anything to show; the rows themselves are built when
+  // the panel opens, so they cannot go stale in this closure after an Enhance.
+  const hasMeta = Boolean(m.header && m.header.trim());
 
   card.innerHTML = `
     <span class="meeting-active-bar"></span>
     <div class="meeting-card-row1">
+      ${selectable ? `<label class="meeting-pick"><input type="checkbox" ${selected ? "checked" : ""} aria-label="Select ${escapeHtml(m.title || "recording")} for batch transcription" /><span class="meeting-pick-box" aria-hidden="true"></span></label>` : ""}
       <span class="meeting-title">${escapeHtml(m.title || "Untitled")}</span>
+      ${hasMeta ? `<button class="meeting-info" type="button" title="Transcript details" aria-expanded="false">${iconSvg("info", { size: 12 })}</button>` : ""}
       <button class="meeting-more" type="button" aria-label="More actions">${iconSvg("more", { size: 14 })}</button>
     </div>
     ${showSnippet ? `<div class="meeting-snippet">${highlightSnippet(snippet, searchQuery)}</div>` : ""}
     <div class="meeting-card-row2">
-      <span class="meeting-time tnum">${escapeHtml(formatMeetingTime(m.date))}</span>
+      <span class="meeting-time tnum">${escapeHtml(formatMeetingStamp(m.date))}</span>
       ${m.durationSec ? `<span class="dot">·</span><span class="meeting-duration tnum">${escapeHtml(formatMeetingDuration(m.durationSec))}</span>` : ""}
+      ${!m.durationSec && m.sizeBytes ? `<span class="dot">·</span><span class="meeting-duration tnum">${escapeHtml(formatMeetingSize(m.sizeBytes))}</span>` : ""}
       ${m.participants?.length ? avatarStackHtml(m.participants, 3) : ""}
     </div>
-    ${m.status === "transcribing" ? `
+    ${status === "transcribing" ? `
       <div class="meeting-progress">
         <div class="meeting-progress-bar" style="width: ${Math.round((m.progress || 0.4) * 100)}%"></div>
       </div>` : ""}
     <div class="meeting-card-row3">
-      ${statusPillHtml(m.status)}
-      <div class="artifact-chips">
+      ${statusPillHtml(status)}
+      ${m.readFailed
+        // Every flag below is a fabricated default on a readFailed row (see
+        // the field-list comment above), not a finding — a real audio/summary
+        // chip here would be lying. One honest badge instead.
+        ? `<span class="artifact-chip artifact-chip--error" title="This transcript could not be read from disk">${iconSvg("info", { size: 11 })} Couldn't read</span>`
+        : `<div class="artifact-chips">
+        ${modelChipHtml(m)}
         <span class="artifact-chip" data-kind="audio" data-present="${m.hasAudio ? "true" : "false"}" title="Audio">${iconSvg("mic", { size: 11 })}</span>
         <span class="artifact-chip" data-kind="transcript" data-present="${m.hasTranscript ? "true" : "false"}" title="Transcript">${iconSvg("text", { size: 11 })}</span>
+        <span class="artifact-chip" data-kind="enhance" data-present="${m.enhancedAt ? "true" : "false"}" title="${escapeHtml(enhancedChipTitle(m.enhancedAt))}">${iconSvg("check", { size: 11 })}</span>
         <span class="artifact-chip" data-kind="summary" data-present="${m.hasSummary ? "true" : "false"}" title="Summary">${iconSvg("sparkle", { size: 11 })}</span>
-      </div>
+      </div>`}
     </div>
   `;
 
@@ -1463,8 +2002,87 @@ function buildMeetingCard(m) {
     openMeetingMenu(r.right, r.bottom + 4, m);
   });
 
+  // On the label, not the input: the input is visually replaced by the box span,
+  // so the click the user makes never starts on the input. Stopping it only
+  // there caught the label's synthetic forward, while the real click had already
+  // bubbled to the card and opened the meeting.
+  card.querySelector(".meeting-pick")?.addEventListener("click", (e) => {
+    e.stopPropagation();
+  });
+  const pick = card.querySelector(".meeting-pick input");
+  pick?.addEventListener("change", (e) => {
+    if (e.target.checked) selectedRecordings.add(m.id);
+    else selectedRecordings.delete(m.id);
+    renderSelectionBar();
+  });
+
+  const metaBtn = card.querySelector(".meeting-info");
+  metaBtn?.addEventListener("click", (e) => {
+    // Without this the card's own handler opens the meeting underneath.
+    e.stopPropagation();
+    openMeetingMeta(metaBtn, meetingMetaRows(m));
+  });
+
   return card;
 }
+
+// ─── Meeting info panel ──────────────────────────────────────────────────────
+// A body-level popover rather than a panel inside the card: #library-list is
+// `overflow-y: auto`, so anything anchored inside a card is clipped at the
+// sidebar edge. Same shape as the ⋯ menu one row above — overlay for the
+// outside click, coordinates clamped to the viewport.
+function closeMeetingMeta() {
+  const root = document.getElementById("meeting-meta-root");
+  if (!root) return;
+  root.remove();
+  const btn = document.querySelector('.meeting-info[aria-expanded="true"]');
+  if (btn) {
+    btn.setAttribute("aria-expanded", "false");
+    // Escape and outside-click both land here; without this, focus is left on
+    // a removed subtree and tabbing restarts from the top of the document.
+    if (document.activeElement === document.body) btn.focus();
+  }
+}
+
+function openMeetingMeta(anchor, rows) {
+  closeMeetingMeta();
+  closeMeetingMenu();
+  if (!rows.length) return;
+
+  const root = document.createElement("div");
+  root.id = "meeting-meta-root";
+  root.innerHTML = `
+    <div class="meeting-menu-overlay"></div>
+    <div class="meta-panel" id="meeting-meta-panel" role="dialog" aria-label="Transcript details" tabindex="-1">
+      ${meetingMetaPanelHtml(rows)}
+    </div>
+  `;
+  document.body.appendChild(root);
+
+  // Measured, not estimated: `.meta-val` wraps long Source paths, so a row
+  // count says nothing about the real height, and the width and max-height
+  // belong to the stylesheet rather than to a constant that drifts from it.
+  const panel = root.querySelector(".meta-panel");
+  const a = anchor.getBoundingClientRect();
+  const box = panel.getBoundingClientRect();
+  panel.style.left = `${Math.max(8, Math.min(a.left, window.innerWidth - box.width - 8))}px`;
+  panel.style.top = `${Math.max(8, Math.min(a.bottom + 4, window.innerHeight - box.height - 8))}px`;
+
+  anchor.setAttribute("aria-expanded", "true");
+  panel.focus();
+  root.querySelector(".meeting-menu-overlay").addEventListener("click", closeMeetingMeta);
+}
+
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape" || !document.getElementById("meeting-meta-root")) return;
+  // stopImmediatePropagation, not just closing: the find bar's own Escape
+  // handler sits further down this same document listener chain and skips
+  // itself via anyOverlayOpen() — which is already false by the time it runs
+  // if this one has merely removed the panel. Without it, one Escape closes
+  // the panel and throws away the user's search with it.
+  e.stopImmediatePropagation();
+  closeMeetingMeta();
+});
 
 // ─── Meeting context menu (minimal — full set lands in a later phase) ────────
 function closeMeetingMenu() {
@@ -1473,8 +2091,14 @@ function closeMeetingMenu() {
   contextMenu = null;
 }
 
+// A disabled menu item says why on hover; an enabled one gets no title at all.
+function reasonTitle(reason) {
+  return reason ? ` title="${escapeHtml(reason)}"` : "";
+}
+
 function openMeetingMenu(x, y, m) {
   closeMeetingMenu();
+  closeMeetingMeta();
   contextMenu = { x, y, meetingId: m.id };
 
   // Clamp so the popover stays on-screen.
@@ -1483,23 +2107,53 @@ function openMeetingMenu(x, y, m) {
   const left = Math.max(8, Math.min(x, window.innerWidth - W - 8));
   const top = Math.max(8, Math.min(y, window.innerHeight - H - 8));
 
+  // An audio-only row is a recording with no transcript on disk. Everything
+  // that reads or writes a `.txt` is unavailable on it, and every remaining
+  // action goes through `record:*` against the wav rather than `transcripts:*`.
+  const noTranscript = m.hasTranscript === false;
   const summarizeLabel = m.hasSummary ? "Re-summarize" : "Summarize";
-  const audioDisabled = !m.hasAudio;
-  const summaryDisabled = !m.hasSummary;
+  // Both of these greyed out silently before; a control that does that just
+  // looks broken. One string per cause, driving the gate and the tooltip.
+  const audioReason = m.hasAudio ? "" : "No audio file for this meeting";
+  const summaryReason = m.hasSummary ? "" : "No summary yet";
   // Every one of these changes the file or its name under a run that reads it
   // from disk, and the run would be thrown away at the end.
-  const enhancing = runningEnhance?.filePath === m.id;
+  const enhancing = Boolean(activeJobFor("enhance", m.id));
+  // The chips' invariant applies to the menu too: never offer an action whose
+  // failure is already known. On a read-failed row hasSummary/hasAudio are the
+  // fallback's fabricated defaults, so Summarize would fail on the same read —
+  // and each reason is spelled out, because a control that greys out without
+  // saying why just looks broken.
+  // Same reasoning as meetingMatchesFilter's queue exclusion: a partial's text
+  // is about to be replaced by the full re-transcription, so working on it
+  // now — from the menu, not just the queue chip — is wasted work.
+  const summarizeReason = noTranscript ? "Not transcribed yet"
+    : m.readFailed ? "Transcript could not be read"
+    : m.interrupted ? "Transcription is incomplete — re-transcribe first"
+    : "";
+  const enhanceReason = noTranscript ? "Not transcribed yet"
+    : m.readFailed ? "Transcript could not be read"
+    : m.interrupted ? "Transcription is incomplete — re-transcribe first"
+    : enhancing ? "Enhance is already running on this transcript"
+    : !m.hasSpokenTurns ? "No spoken turns to enhance"
+    : "";
+  const enhanceDisabled = Boolean(enhanceReason);
+  // The same wav is the transcribe queue's job key, so a run already in flight
+  // is visible from here.
+  const transcribeReason = activeJobFor("transcribe", m.audioPath || m.id)
+    ? "A transcription is already running on this recording" : "";
+  const transcriptReason = noTranscript ? "Not transcribed yet" : "";
 
   const root = document.createElement("div");
   root.id = "meeting-menu-root";
   root.innerHTML = `
     <div class="meeting-menu-overlay"></div>
     <div class="meeting-menu" role="menu" style="left:${left}px;top:${top}px;">
-      <button class="meeting-menu-item" data-action="summarize" type="button" role="menuitem">
+      <button class="meeting-menu-item" data-action="summarize" type="button" role="menuitem" ${summarizeReason ? "disabled" : ""}${reasonTitle(summarizeReason)}>
         <span class="meeting-menu-icon" style="color:var(--accent-lime)">${iconSvg("sparkle", { size: 13 })}</span>
         <span>${escapeHtml(summarizeLabel)}</span>
       </button>
-      <button class="meeting-menu-item" data-action="enhance" type="button" role="menuitem" ${enhancing ? "disabled" : ""}>
+      <button class="meeting-menu-item" data-action="enhance" type="button" role="menuitem" ${enhanceDisabled ? "disabled" : ""}${reasonTitle(enhanceReason)}>
         <span class="meeting-menu-icon">${iconSvg("text", { size: 13 })}</span>
         <span>Enhance</span>
       </button>
@@ -1507,20 +2161,25 @@ function openMeetingMenu(x, y, m) {
         <span class="meeting-menu-icon">${iconSvg("pencil", { size: 13 })}</span>
         <span>Rename…</span>
       </button>
-      <button class="meeting-menu-item" data-action="retranscribe" type="button" role="menuitem" ${audioDisabled || enhancing ? "disabled" : ""}>
+      <button class="meeting-menu-item" data-action="retranscribe" type="button" role="menuitem" ${audioReason || enhancing || transcribeReason ? "disabled" : ""}${reasonTitle(transcribeReason || audioReason)}>
         <span class="meeting-menu-icon">${iconSvg("mic", { size: 13 })}</span>
-        <span>Re-transcribe…</span>
+        <span>${noTranscript ? "Transcribe…" : "Re-transcribe…"}</span>
       </button>
+      ${noTranscript ? `
+      <button class="meeting-menu-item" data-action="reveal" type="button" role="menuitem">
+        <span class="meeting-menu-icon">${iconSvg("folder", { size: 13 })}</span>
+        <span>Show in Finder</span>
+      </button>` : ""}
       <div class="meeting-menu-divider"></div>
-      <button class="meeting-menu-item danger" data-action="delete-audio" type="button" role="menuitem" ${audioDisabled || enhancing ? "disabled" : ""}>
+      <button class="meeting-menu-item danger" data-action="delete-audio" type="button" role="menuitem" ${audioReason || enhancing ? "disabled" : ""}${reasonTitle(audioReason)}>
         <span class="meeting-menu-icon">${iconSvg("trash", { size: 13 })}</span>
         <span>Delete audio</span>
       </button>
-      <button class="meeting-menu-item danger" data-action="delete-transcript" type="button" role="menuitem" ${enhancing ? "disabled" : ""}>
+      <button class="meeting-menu-item danger" data-action="delete-transcript" type="button" role="menuitem" ${enhancing || transcriptReason ? "disabled" : ""}${reasonTitle(transcriptReason)}>
         <span class="meeting-menu-icon">${iconSvg("trash", { size: 13 })}</span>
         <span>Delete transcript</span>
       </button>
-      <button class="meeting-menu-item danger" data-action="delete-summary" type="button" role="menuitem" ${summaryDisabled || enhancing ? "disabled" : ""}>
+      <button class="meeting-menu-item danger" data-action="delete-summary" type="button" role="menuitem" ${summaryReason || enhancing ? "disabled" : ""}${reasonTitle(summaryReason)}>
         <span class="meeting-menu-icon">${iconSvg("trash", { size: 13 })}</span>
         <span>Delete summary</span>
       </button>
@@ -1543,7 +2202,13 @@ function openMeetingMenu(x, y, m) {
         const card = libraryList.querySelector(`[data-meeting-id="${CSS.escape(m.id)}"]`);
         const newTitle = await openRenamePopup(m.title, card?.getBoundingClientRect());
         if (!newTitle || newTitle === m.title) return;
-        const result = await api.renameTranscript(m.id, newTitle);
+        // Two renames, two handlers: `record:rename` moves the wav and its notes
+        // sidecar, `transcripts:rename` moves the .txt and everything paired
+        // with it. Both answer { ok, newFilePath }, so the id fixups below are
+        // shared.
+        const result = noTranscript
+          ? await recApi?.rename(m.id, newTitle)
+          : await api.renameTranscript(m.id, newTitle);
         if (!result?.ok) {
           window.alert(`Couldn't rename: ${result?.error || "unknown error"}`);
           return;
@@ -1551,17 +2216,25 @@ function openMeetingMenu(x, y, m) {
         if (state.filePath === m.id) state.filePath = result.newFilePath;
         if (activeMeetingId === m.id) activeMeetingId = result.newFilePath;
         if (activeLibraryPath === m.id) activeLibraryPath = result.newFilePath;
+        // The batch selection is keyed on the path too, and loadLibrary prunes
+        // ids that no longer exist — without this the row silently unticks.
+        if (selectedRecordings.delete(m.id)) selectedRecordings.add(result.newFilePath);
         summaryStore.delete(m.id);
-        loadLibrary();
-      } else if (action === "retranscribe") {
-        // Re-transcribe lives on the Record tab; hand it the source audio and
-        // jump there so the user lands on the transcribe-settings screen.
-        if (m.audioPath) {
-          document.querySelector('.tab-btn[data-tab="record"]')?.click();
-          window.recordTab?.enterTranscribeSettings?.([m.audioPath]);
+        await loadLibrary();
+        // The open pane kept the old name, and the player kept a src pointing at
+        // a file that has moved.
+        const renamed = getMeetingById(result.newFilePath);
+        if (noTranscript && renamed && activeMeetingId === renamed.id
+            && audioOnlyState && !audioOnlyState.classList.contains("hidden")) {
+          if (audioOnlyTitle) audioOnlyTitle.textContent = renamed.title || "Recording";
+          playerShowPath(renamed.audioPath);
         }
+      } else if (action === "retranscribe") {
+        if (m.audioPath) sendToTranscribeSettings([m.audioPath]);
+      } else if (action === "reveal") {
+        recApi?.showInFinder(m.id);
       } else if (action === "delete-audio") {
-        await deleteMeetingArtifact(m, "audio");
+        await deleteMeetingArtifact(m, noTranscript ? "recording" : "audio");
       } else if (action === "delete-transcript") {
         await deleteMeetingArtifact(m, "transcript");
       } else if (action === "delete-summary") {
@@ -1578,7 +2251,13 @@ document.addEventListener("keydown", (e) => {
 
 async function deleteMeetingArtifact(m, kind) {
   let result;
-  if (kind === "audio") {
+  if (kind === "recording") {
+    // No transcript to resolve the audio from: the meeting id IS the wav.
+    result = await recApi?.delete(m.id);
+    // The pane and the player are reset by loadLibrary below, which is also
+    // what an external delete goes through.
+    if (result?.ok) selectedRecordings.delete(m.id);
+  } else if (kind === "audio") {
     result = await api.deleteAudioOnly(m.id);
   } else if (kind === "summary") {
     result = await api.deleteSummaryOnly(m.id);
@@ -1688,6 +2367,9 @@ function openRenamePopup(currentTitle, anchorRect) {
 
 async function handleMeetingClick(m) {
   if (m.id === activeMeetingId) return;
+  // No `.txt` to open: `transcripts:openFile` would fail on a wav path, and
+  // there is nothing for the editor to load. Play it instead.
+  if (m.hasTranscript === false) return showAudioOnly(m);
   // Flushing and moving the selection both belong to the file:opened path
   // (flushBeforeReplace, then loadContent → setActiveMeetingId): doing either
   // here as well prompted twice for one click, and left the sidebar pointing at
@@ -1695,12 +2377,159 @@ async function handleMeetingClick(m) {
   await api.openFromLibrary(m.id);
 }
 
+// Selecting an audio-only recording replaces whatever the editor held, so it
+// owes the open transcript the same flush the file:opened path performs.
+async function showAudioOnly(m) {
+  if (!(await flushBeforeReplace())) return;
+  clearTimeout(autosaveTimer);
+  state.filePath = null;
+  state.savedContent = "";
+  state.baselineContent = "";
+  setDirty(false);
+  editor.value = "";
+  editor.classList.add("hidden");
+  editorToolbar.classList.add("hidden");
+  emptyState.classList.add("hidden");
+  summaryRail.classList.add("hidden");
+  if (PLAYER_OK) transcriptView.classList.add("hidden");
+  setActiveMeetingId(m.id);
+  // showEditor() is the only thing that enables these, and nothing turns them
+  // back off — they would act on an empty buffer with no path.
+  btnSaveAs.disabled = true;
+  btnExport.disabled = true;
+  if (audioOnlyTitle) audioOnlyTitle.textContent = m.title || "Recording";
+  audioOnlyState?.classList.remove("hidden");
+  playerShowPath(m.audioPath);
+}
+
+document.getElementById("audio-only-transcribe")?.addEventListener("click", () => {
+  const m = getMeetingById(activeMeetingId);
+  if (m?.audioPath) sendToTranscribeSettings([m.audioPath]);
+});
+
 // ─── Sidebar formatters ──────────────────────────────────────────────────────
-function formatMeetingTime(date) {
+// Date order and clock are view preferences, stored and applied exactly like
+// the theme (see applyTheme): localStorage, live on change, outside the
+// summarizer's Save/Cancel flow.
+//
+// ── date-time formatting (extracted verbatim by test/meeting-date-format.test.js) ──
+// Everything between these markers stays free of localStorage and the DOM so the
+// test can eval the region under node. Keep the markers in place when editing.
+const DATE_ORDER_KEY = "uds-date-order";    // 'dmy' (day first) | 'mdy' (month first)
+const TIME_FORMAT_KEY = "uds-time-format";  // '24h' | '12h'
+
+// renderMeetings() reruns on every search keystroke and builds one card per
+// meeting, so the formatter pair for each preference combination is built once
+// and reused rather than twice per card per repaint.
+const meetingFormatterCache = new Map();
+
+function meetingFormatters(order, clock) {
+  const key = `${order}|${clock}`;
+  let pair = meetingFormatterCache.get(key);
+  if (!pair) {
+    pair = {
+      // The clock keeps its own locale rather than inheriting the date's: en-GB
+      // with hour12 renders "06:14 pm" and en-US without it renders "18:14", so
+      // mixing them would make AM/PM casing and zero-padding depend on the date
+      // preference.
+      day: new Intl.DateTimeFormat(order === "mdy" ? "en-US" : "en-GB", {
+        day: "2-digit", month: "2-digit", year: "2-digit",
+      }),
+      time: clock === "12h"
+        ? new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit", hour12: true })
+        : new Intl.DateTimeFormat("en-GB", { hour: "2-digit", minute: "2-digit", hour12: false }),
+    };
+    meetingFormatterCache.set(key, pair);
+  }
+  return pair;
+}
+
+function formatMeetingDateTime(date, order, clock) {
   if (!(date instanceof Date) || isNaN(date.getTime())) return "";
-  const hh = String(date.getHours()).padStart(2, "0");
-  const mm = String(date.getMinutes()).padStart(2, "0");
-  return `${hh}:${mm}`;
+  try {
+    const f = meetingFormatters(order, clock);
+    // ICU 72+ separates the meridiem with U+202F — normalised to a plain space
+    // so the card text stays copy-pasteable.
+    return `${f.day.format(date)}, ${f.time.format(date).replace(/\u202f/g, " ")}`;
+  } catch (_) {
+    // A build without usable ICU data would otherwise throw once per card and
+    // take the whole sidebar down with it; a bare clock is the better failure.
+    return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+  }
+}
+
+// Defaults follow the OS locale so an unconfigured machine already reads right.
+function systemDateOrder() {
+  try {
+    const parts = new Intl.DateTimeFormat(undefined, {
+      day: "2-digit", month: "2-digit", year: "2-digit",
+    }).formatToParts(new Date());
+    const month = parts.findIndex((p) => p.type === "month");
+    const day = parts.findIndex((p) => p.type === "day");
+    return month >= 0 && day >= 0 && month < day ? "mdy" : "dmy";
+  } catch (_) {
+    return "dmy";
+  }
+}
+
+function systemTimeFormat() {
+  try {
+    return new Intl.DateTimeFormat(undefined, { hour: "numeric" }).resolvedOptions().hour12
+      ? "12h"
+      : "24h";
+  } catch (_) {
+    return "24h";
+  }
+}
+// ── end date-time formatting ──
+
+// Storage access is guarded the same way as the summary-preset reads below: a
+// browsing context with site data blocked throws on access rather than
+// returning null, and that must not cost the user the sidebar.
+function readFormatPref(key, systemDefault) {
+  try {
+    return localStorage.getItem(key) || systemDefault();
+  } catch (_) {
+    return systemDefault();
+  }
+}
+
+function dateOrderPref() {
+  return readFormatPref(DATE_ORDER_KEY, systemDateOrder);
+}
+
+function timeFormatPref() {
+  return readFormatPref(TIME_FORMAT_KEY, systemTimeFormat);
+}
+
+function formatMeetingStamp(date) {
+  return formatMeetingDateTime(date, dateOrderPref(), timeFormatPref());
+}
+
+// Time only, honoring the same 12h/24h preference as the Transcripts sidebar —
+// for the Record and Live tabs' own timestamps (record.js, live.js), which
+// otherwise called toLocaleTimeString() directly and ignored it.
+function formatClockTime(date) {
+  if (!(date instanceof Date) || isNaN(date.getTime())) return "";
+  try {
+    return meetingFormatters("dmy", timeFormatPref()).time.format(date).replace(/ /g, " ");
+  } catch (_) {
+    return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+  }
+}
+
+// An audio-only row has no duration — `record:list` reports bytes, not seconds,
+// and deriving seconds from bytes would only be right for wavs this app wrote
+// itself. Bytes are a fact; a guessed runtime is not.
+function formatMeetingSize(bytes) {
+  if (!bytes) return "";
+  const kb = bytes / 1024;
+  // Below a megabyte the MB form rounds to "0.0 MB", which reads as an empty
+  // file — exactly the case (a truncated recording) worth telling apart.
+  if (kb < 1024) return `${Math.max(1, Math.round(kb))} KB`;
+  const mb = kb / 1024;
+  if (mb >= 1024) return `${(mb / 1024).toFixed(1)} GB`;
+  return mb >= 10 ? `${Math.round(mb)} MB` : `${mb.toFixed(1)} MB`;
 }
 
 function formatMeetingDuration(seconds) {
@@ -1767,13 +2596,41 @@ const STATUS_LABELS = {
   transcribed: "Transcribed",
   summarized: "Summarized",
   outdated: "Outdated",
-  failed: "Failed",
+  failed: "Couldn't read",
 };
 
 function statusPillHtml(status) {
   const label = STATUS_LABELS[status] || status;
   const hasDot = status === "recording" || status === "transcribing" || status === "audio_only";
   return `<span class="status-pill" data-status="${status}">${hasDot ? '<span class="status-dot"></span>' : ""}${escapeHtml(label)}</span>`;
+}
+
+// ─── Provenance chips (which model transcribed it, did Enhance run) ──────────
+// The header stores the raw WhisperKit id; dropping the vendor prefix and
+// unescaping the variant suffix reproduces every label the Record tab's own
+// model picker shows ("large-v3 turbo", "medium", "base", …), so there is no
+// second table to keep in sync.
+function modelLabel(id) {
+  return String(id || "").replace(/^openai_whisper-/, "").replace(/_/g, " ");
+}
+
+// The `large-*` variants are the accurate ones; everything below them trades
+// accuracy for speed. That is the distinction worth seeing from the list — the
+// exact variant is in the chip's text and tooltip either way.
+function modelIsStrong(id) {
+  return /large/i.test(String(id || ""));
+}
+
+function modelChipHtml(m) {
+  if (!m.model) return "";
+  return `<span class="model-chip" data-strong="${modelIsStrong(m.model) ? "true" : "false"}"`
+    + ` title="Transcribed with ${escapeHtml(m.model)}">${escapeHtml(modelLabel(m.model))}</span>`;
+}
+
+function enhancedChipTitle(enhancedAt) {
+  if (!enhancedAt) return "Not enhanced";
+  const at = new Date(enhancedAt);
+  return isNaN(at.getTime()) ? "Enhanced" : `Enhanced ${at.toLocaleString()}`;
 }
 
 // ─── Tiny inline-SVG icon helper (Lucide-style paths) ────────────────────────
@@ -1785,6 +2642,8 @@ const ICON_PATHS = {
   check:   '<polyline points="20 6 9 17 4 12"/>',
   trash:   '<polyline points="3 6 5 6 21 6"/><path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/>',
   pencil:  '<path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/>',
+  info:    '<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>',
+  folder:  '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>',
 };
 
 function iconSvg(name, opts = {}) {
@@ -1804,8 +2663,62 @@ const btnRailResummarizeLabel = document.getElementById("btn-rail-resummarize-la
 // so a quick file-switch doesn't write the stale result into the rail.
 let railLoadToken = 0;
 
+// ── rail sections (extracted verbatim by test/rail-sections.test.js) ──
+// Everything down to the end marker is pure string work: the seven presets in
+// PROMPTS are the only spec for what a summary looks like, and this region turns
+// their `##` headings into rail markup. `escapeHtml`, `iconSvg` and `avatarHtml`
+// resolve from the enclosing scope — which is what lets the test eval the region
+// with stubs for them. Keep the markers in place when editing.
+
+// One heading → one slug, shared by the gate and the parser so the two can never
+// disagree about what "recognised" means. Non-letters collapse, digits included,
+// so "For next 1-1" is `for_next` and "TL;DR" is `tl_dr`.
+function railSlug(heading) {
+  return String(heading).toLowerCase().replace(/[^a-z]+/g, "_").replace(/^_|_$/g, "");
+}
+
+// Which render each preset section gets, keyed by slug. The five tone names are
+// bullet lists differing only in glyph and colour; the rest name a renderer.
+// A heading missing from here — a custom prompt's, or a translated one, since the
+// presets print this structure in English and translate only the prose — falls
+// through to a labelled plain-markdown section, exactly as it did before.
+// Null-prototype: these are looked up with model-written text, and a plain
+// object would answer `constructor` (and friends) with an inherited value.
+const RAIL_SECTIONS = Object.assign(Object.create(null), {
+  // prose. `brief` is no preset's heading — it is kept for summaries saved by
+  // an older prompt that emitted "## Brief".
+  summary: "plain", tl_dr: "plain", notes: "plain", brief: "plain",
+  hardest_problem_solved: "plain", career_growth: "plain", mood_well_being: "plain",
+  // dedicated renderers
+  speaker_mapping: "map", root_causes: "map", scorecard: "plain",
+  action_items: "actions", milestones_timeline: "dated",
+  status: "status", participants: "people",
+  recommendation: "recommendation",
+  // settled / positive
+  decisions: "good", agreed_terms: "good", progress: "good",
+  what_went_well: "good", strong_answers: "good", strengths: "good",
+  // problems
+  risks: "bad", red_flags: "bad", what_didn_t_go_well: "bad",
+  weak_concerning_answers: "bad", weaknesses_risks: "bad",
+  // needs attention, but not yet a problem
+  blockers_dependencies: "warn", open_unresolved_points: "warn", scope_changes: "warn",
+  // forward-looking
+  experiments_to_try: "idea", for_next: "idea",
+  open_questions_for_follow_up: "idea", concessions_movement: "idea",
+  // plain enumerations
+  topics: "neutral", discussion: "neutral", feedback: "neutral", motivation: "neutral",
+  candidate_preferences: "neutral", parties_positions: "neutral", asks_offers: "neutral",
+  leverage_batna_notes: "neutral",
+});
+
+// Structured as soon as one heading is one we know how to draw. Deliberately not
+// "has any ## heading": freeform output keeps the plain-markdown path, and a
+// preset that skipped Decisions and Action Items still qualifies on the rest.
 function shouldRenderStructured(md) {
-  return /^##\s+(decisions|action items|risks|recommendation|scorecard|tl;dr|participants)\b/im.test(md || "");
+  for (const m of String(md || "").matchAll(/^##[^\S\r\n]+(.+?)[^\S\r\n]*$/gm)) {
+    if (RAIL_SECTIONS[railSlug(m[1])]) return true;
+  }
+  return false;
 }
 
 // Inline markdown → HTML (bold / em / inline code).
@@ -1853,7 +2766,7 @@ function parseStructured(md) {
     }
     const h2 = l.match(/^##\s+(.+)/);
     if (h2) {
-      const slug = h2[1].toLowerCase().replace(/[^a-z]+/g, "_").replace(/^_|_$/g, "");
+      const slug = railSlug(h2[1]);
       current = { slug, heading: h2[1], lines: [] };
       sections.push(current);
       continue;
@@ -1876,6 +2789,7 @@ function renderMarkdown(md) {
   const out = [];
   let listBuf = null;
   let para = [];
+  let tableBuf = null;
 
   const flushList = () => {
     if (listBuf) {
@@ -1889,10 +2803,22 @@ function renderMarkdown(md) {
       para = [];
     }
   };
+  // Pipe tables reach the rail from more than the interview scorecard, so they
+  // belong to the base renderer rather than to one section's special case.
+  const flushTable = () => {
+    if (!tableBuf) return;
+    // A block of pipes that parses to nothing (a stray separator, a bare "|")
+    // is still text the model wrote — render it rather than discard it.
+    out.push(renderTableHtml(tableBuf) || `<p>${renderMarkdownInline(tableBuf.join(" "))}</p>`);
+    tableBuf = null;
+  };
 
   for (const raw of lines) {
     const l = raw.trimEnd();
-    if (!l) { flushList(); flushPara(); continue; }
+    if (!l) { flushList(); flushPara(); flushTable(); continue; }
+    const piped = l.trimStart();
+    if (piped.startsWith("|")) { flushList(); flushPara(); (tableBuf ||= []).push(piped); continue; }
+    flushTable();
     let m;
     if ((m = l.match(/^#\s+(.+)/))) {
       flushList(); flushPara();
@@ -1906,7 +2832,7 @@ function renderMarkdown(md) {
     } else if ((m = l.match(/^>\s*(.+)/))) {
       flushList(); flushPara();
       out.push(`<blockquote>${renderMarkdownInline(m[1])}</blockquote>`);
-    } else if ((m = l.match(/^- (.+)/))) {
+    } else if ((m = l.match(RAIL_BULLET_RE))) {
       flushPara();
       (listBuf ||= []).push(m[1]);
     } else {
@@ -1914,7 +2840,7 @@ function renderMarkdown(md) {
       para.push(l);
     }
   }
-  flushList(); flushPara();
+  flushList(); flushPara(); flushTable();
   return out.join("");
 }
 
@@ -1927,17 +2853,63 @@ function buildRailHeaderHtml(filePath, statusChip) {
     <div class="rail-header">
       <span class="rail-header-sparkle">${iconSvg("sparkle", { size: 14 })}</span>
       <span class="rail-header-title">Summary</span>
+      ${path ? `<span class="rail-header-info" title="${path}" aria-label="${path}" role="img">${iconSvg("info", { size: 13 })}</span>` : ""}
       ${chip}
     </div>
-    ${path ? `<div class="rail-path" title="${path}">${path}</div>` : ""}
   `;
 }
 
-function parseSimpleBullets(lines) {
-  return (lines || [])
-    .map((x) => x.match(/^- (.+)/))
-    .filter(Boolean)
-    .map((m) => m[1]);
+// The wrapper every section shares, so a new render kind cannot invent its own
+// heading treatment. `count` is omitted for prose sections.
+function railSection(label, body, count) {
+  if (!body) return "";
+  const badge = count ? ` <span class="rail-section-count">${count}</span>` : "";
+  return `
+    <div class="rail-section">
+      ${label ? `<div class="rail-section-label">${escapeHtml(label)}${badge}</div>` : ""}
+      ${body}
+    </div>
+  `;
+}
+
+// The one bullet shape the module recognises: "-", "*" or "1." / "1)", indented
+// or not. Models are not consistent about which they reach for, and a section
+// whose bullets go unrecognised loses its whole layout.
+const RAIL_BULLET_RE = /^[ \t]*(?:[-*]|\d+[.)])[ \t]+(.+)$/;
+
+// Bullets and the prose around them, kept apart and kept in place: a lead-in
+// sentence stays above the list, a closing note stays below it, and neither is
+// dropped or turned into a bullet of its own.
+function partitionBullets(lines) {
+  const bullets = [];
+  const before = [];
+  const after = [];
+  // No preset asks for nesting, but a model can still indent a sub-point —
+  // rendering stays flat (a real nested <ul> is a bigger change), but an
+  // indented line must not count as its own item in the section's badge.
+  let topLevelCount = 0;
+  for (const raw of lines || []) {
+    const m = String(raw).match(RAIL_BULLET_RE);
+    if (m) {
+      bullets.push(m[1].trim());
+      if (!/^[ \t]/.test(raw)) topLevelCount++;
+      continue;
+    }
+    (bullets.length ? after : before).push(raw);
+  }
+  return { bullets, before: before.join("\n").trim(), after: after.join("\n").trim(), topLevelCount };
+}
+
+// A letter or a digit, in any script — used where a prefix match has to stop at
+// a word end. `\b` is defined by [A-Za-z0-9_] and so is blind to Cyrillic.
+const RAIL_WORDISH = /[\p{L}\p{N}]/u;
+
+// A trailing " — *Jun 30*". Shared by action items and milestones so a date
+// lands in the same pill wherever a preset appends one.
+function splitDue(body) {
+  const m = String(body).match(/\s+[—–-]\s+\*([^*]+)\*\s*$/);
+  if (!m) return { text: String(body).trim(), due: null };
+  return { text: String(body).slice(0, m.index).trim(), due: m[1].trim() };
 }
 
 // Parse "- [ ] **Owner** — task — *due*" where the checkbox, the **owner** and
@@ -1945,13 +2917,9 @@ function parseSimpleBullets(lines) {
 // (the model isn't perfectly consistent — e.g. a deadline with no owner).
 function parseActionItems(lines) {
   const out = [];
-  for (const raw of lines || []) {
-    const m = String(raw).trim().match(/^- (.+)$/);
-    if (!m) continue;
-    let body = m[1].trim().replace(/^\[[ xX]\]\s*/, ""); // strip optional checkbox
-    let due = null;
-    const dm = body.match(/\s+[—–-]\s+\*([^*]+)\*\s*$/);  // optional trailing " — *due*"
-    if (dm) { due = dm[1].trim(); body = body.slice(0, dm.index).trim(); }
+  for (const bullet of partitionBullets(lines).bullets) {
+    // checkbox, then the optional trailing " — *due*", then the optional owner
+    let { text: body, due } = splitDue(bullet.replace(/^\[[ xX]\]\s*/, ""));
     let who = null;
     const wm = body.match(/^\*\*([^*]+)\*\*\s+[—–-]\s+(.+)$/); // optional leading "**owner** — "
     if (wm) { who = wm[1].trim(); body = wm[2].trim(); }
@@ -1960,33 +2928,190 @@ function parseActionItems(lines) {
   return out;
 }
 
-function renderDecisionsSection(items) {
-  if (!items.length) return "";
-  const list = items
-    .map((d) => `<li><span class="rail-decision-bullet">${iconSvg("check", { size: 10 })}</span><span>${renderMarkdownInline(d)}</span></li>`)
-    .join("");
-  return `
-    <div class="rail-section">
-      <div class="rail-section-label">Decisions <span class="rail-section-count">${items.length}</span></div>
-      <ul class="rail-list">${list}</ul>
-    </div>
-  `;
+// Five tones, one glyph each, so a list of wins never reads like a list of
+// risks. `good` keeps the tinted circle the Decisions list has always had.
+const RAIL_BULLETS = {
+  good:    { cls: "rail-bullet--good", glyph: null },
+  bad:     { cls: "rail-bullet--bad", glyph: "◆" },
+  warn:    { cls: "rail-bullet--warn", glyph: "▲" },
+  idea:    { cls: "rail-bullet--idea", glyph: "→" },
+  neutral: { cls: "rail-bullet--neutral", glyph: "•" },
+};
+const RAIL_TONES = Object.keys(RAIL_BULLETS);
+
+function railBullet(tone) {
+  const b = RAIL_BULLETS[tone] || RAIL_BULLETS.neutral;
+  const inner = b.glyph ? escapeHtml(b.glyph) : iconSvg("check", { size: 10 });
+  return `<span class="rail-bullet ${b.cls}" aria-hidden="true">${inner}</span>`;
 }
 
-function renderRisksSection(items) {
-  if (!items.length) return "";
-  const list = items
-    .map((r) => `<li><span class="rail-risk-bullet" aria-hidden="true">◆</span><span>${renderMarkdownInline(r)}</span></li>`)
-    .join("");
-  return `
-    <div class="rail-section">
-      <div class="rail-section-label">Risks <span class="rail-section-count">${items.length}</span></div>
-      <ul class="rail-list">${list}</ul>
-    </div>
-  `;
+// Shared body of every list section: the prose the model wrote above the list,
+// the list, then the prose below it. Nothing in a section is silently
+// discarded. `count` defaults to the item count for callers with no nesting
+// concept of their own; renderBulletSection/renderDatedSection/renderMapSection
+// pass partitionBullets' topLevelCount instead, so an indented sub-bullet
+// (flattened into its own <li> for now, same as ever) does not inflate it.
+function railListSection(heading, items, before, after, count = items.length) {
+  const md = (t) => (t ? `<div class="rail-md">${renderMarkdown(t)}</div>` : "");
+  return railSection(heading, md(before) + `<ul class="rail-list">${items.join("")}</ul>` + md(after), count);
 }
 
-function renderActionItemsSection(cards) {
+function renderBulletSection(heading, lines, tone) {
+  const { bullets, before, after, topLevelCount } = partitionBullets(lines);
+  if (!bullets.length) return renderPlainSection(heading, lines);
+  const items = bullets.map((t) => `<li>${railBullet(tone)}<span class="rail-li-text">${renderMarkdownInline(t)}</span></li>`);
+  return railListSection(heading, items, before, after, topLevelCount);
+}
+
+// "— *Jun 30*" on a milestone becomes the same due pill an action item gets.
+function renderDatedSection(heading, lines) {
+  const { bullets, before, after, topLevelCount } = partitionBullets(lines);
+  if (!bullets.length) return renderPlainSection(heading, lines);
+  const items = bullets.map((b) => {
+    const { text, due } = splitDue(b);
+    return `<li>${railBullet("neutral")}<span class="rail-li-text">${renderMarkdownInline(text)}</span>`
+      + (due ? `<span class="rail-due-pill">${escapeHtml(due)}</span>` : "")
+      + `</li>`;
+  });
+  return railListSection(heading, items, before, after, topLevelCount);
+}
+
+// "Alpha → Anna (introduced at 00:02)" and "slow deploys → CI runs everything".
+// The parenthesised tail is evidence, not part of the mapping.
+function parseMapRow(text) {
+  const parts = String(text).split(/\s*(?:→|->)\s*/);
+  if (parts.length < 2) return null;
+  let to = parts.slice(1).join(" → ").trim();
+  let note = null;
+  const nm = to.match(/\s*\(([^()]*)\)\s*$/);
+  if (nm) { note = nm[1].trim(); to = to.slice(0, nm.index).trim(); }
+  // "Alpha →" with nothing after it is not a mapping — an empty cell reads as a
+  // rendering bug, and the row would still be counted in the badge.
+  if (!parts[0].trim() || !to) return null;
+  return { from: parts[0].trim(), to, note };
+}
+
+function renderMapSection(heading, lines) {
+  const { bullets, before, after, topLevelCount } = partitionBullets(lines);
+  if (!bullets.length) return renderPlainSection(heading, lines);
+  const items = bullets.map((b) => {
+    const row = parseMapRow(b);
+    // No arrow: the model wrote a plain observation, so let it be a plain row.
+    // No bullet glyph either — the mapped rows in this same list have none, and
+    // one marked row among unmarked ones renders ragged.
+    if (!row) return `<li><span class="rail-li-text">${renderMarkdownInline(b)}</span></li>`;
+    return `<li><span class="rail-map">`
+      + `<span class="rail-map-from">${renderMarkdownInline(row.from)}</span>`
+      + `<span class="rail-map-arrow" aria-hidden="true">→</span>`
+      + `<span class="rail-map-to">${renderMarkdownInline(row.to)}</span>`
+      + (row.note ? `<span class="rail-map-note">${renderMarkdownInline(row.note)}</span>` : "")
+      + `</span></li>`;
+  });
+  return railListSection(heading, items, before, after, topLevelCount);
+}
+
+// Chip verdicts: match a leading phrase, but only when the line actually ends
+// the phrase there. Longest form first, so "заблокировано" wins over the
+// shorter stem. Returns null when nothing matches, and the caller falls back to
+// prose — which is also what happens to any wording not listed here.
+function matchChip(line, table) {
+  const head = String(line).trim();
+  const lower = head.toLowerCase();
+  for (const [word, cls] of table) {
+    if (!lower.startsWith(word.toLowerCase())) continue;
+    const after = head.slice(word.length);
+    // "On tracked to slip" is a sentence, not an on-track status.
+    if (after && RAIL_WORDISH.test(after[0])) continue;
+    // Strip the separator, then drop a remainder that is only punctuation —
+    // "On track." must not leave a paragraph containing just a full stop.
+    const rest = after.replace(/^\s*[—–:-]\s*/, "").trim();
+    return { label: head.slice(0, word.length), cls, rest: RAIL_WORDISH.test(rest) ? rest : "" };
+  }
+  return null;
+}
+
+// The project preset asks for "on track / at risk / blocked" plus a reason. The
+// Russian forms are a best guess at what the preset's "write it in Russian"
+// rule produces — a miss costs nothing, the section just stays prose.
+const RAIL_STATUS = [
+  ["on track", "status-on-track"], ["в графике", "status-on-track"], ["по плану", "status-on-track"],
+  ["at risk", "status-at-risk"], ["под угрозой", "status-at-risk"], ["есть риск", "status-at-risk"],
+  ["blocked", "status-blocked"], ["заблокировано", "status-blocked"], ["заблокирован", "status-blocked"],
+];
+
+function renderStatusSection(heading, lines) {
+  const text = (lines || []).join("\n").trim();
+  if (!text) return "";
+  const [first, ...tail] = text.split("\n");
+  const hit = matchChip(first, RAIL_STATUS);
+  if (!hit) return renderPlainSection(heading, lines);
+  const body = [hit.rest, ...tail].join("\n").trim();
+  return railSection(heading,
+    `<span class="rail-verdict ${hit.cls}">${escapeHtml(hit.label)}</span>`
+    + (body ? `<div class="rail-md rail-rec-body">${renderMarkdown(body)}</div>` : ""));
+}
+
+// Daily's Participants is "### Person" then labelled bullets. One card per
+// person beats one long blob when six people report in a row.
+function parsePeople(lines) {
+  const people = [];
+  const lead = [];
+  let current = null;
+  for (const raw of lines || []) {
+    const m = String(raw).match(/^###[ \t]+(.+?)[ \t]*$/);
+    if (m) { current = { name: m[1], lines: [] }; people.push(current); continue; }
+    if (current) current.lines.push(raw);
+    else lead.push(raw);
+  }
+  return { people, lead: lead.join("\n").trim() };
+}
+
+function renderPeopleSection(heading, lines) {
+  const { people, lead } = parsePeople(lines);
+  if (!people.length) return renderPlainSection(heading, lines);
+  const cards = people.map((p) => {
+    const body = p.lines.join("\n").trim();
+    return `<div class="rail-person">`
+      + `<div class="rail-person-name">${avatarHtml(p.name)}<span>${renderMarkdownInline(p.name)}</span></div>`
+      + (body ? `<div class="rail-md rail-person-body">${renderMarkdown(body)}</div>` : "")
+      + `</div>`;
+  }).join("");
+  const prose = lead ? `<div class="rail-md">${renderMarkdown(lead)}</div>` : "";
+  return railSection(heading, prose + cards, people.length);
+}
+
+// Any pipe table. The interview scorecard's Rating column is tinted; it is found
+// by name so reordering or renaming the column drops the tint instead of
+// colouring whichever column happens to sit second.
+const RAIL_RATINGS = Object.assign(Object.create(null),
+  { strong: "sc-strong", mixed: "sc-mixed", weak: "sc-weak", "not assessed": "sc-na" });
+
+function parseTableRows(lines) {
+  const rows = [];
+  for (const l of lines || []) {
+    const t = String(l).trim();
+    if (!t.startsWith("|")) continue;
+    if (/^\|[-:| ]+\|?$/.test(t)) continue; // the |---|---| separator
+    rows.push(t.replace(/^\||\|$/g, "").split("|").map((c) => c.trim()));
+  }
+  return rows;
+}
+
+function renderTableHtml(lines) {
+  const rows = parseTableRows(lines);
+  if (!rows.length) return "";
+  const [header, ...body] = rows;
+  const rateCol = header.findIndex((h) => /^rating$/i.test(h));
+  const ths = header.map((h) => `<th>${renderMarkdownInline(h)}</th>`).join("");
+  const trs = body.map((r) => `<tr>${r.map((c, i) => {
+    if (i !== rateCol) return `<td>${renderMarkdownInline(c)}</td>`;
+    return `<td class="sc-rating ${RAIL_RATINGS[c.toLowerCase()] || ""}">${renderMarkdownInline(c)}</td>`;
+  }).join("")}</tr>`).join("");
+  // The rail is 360px wide; a wide table has to be reachable, not clipped.
+  return `<div class="rail-table-wrap"><table class="rail-table"><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table></div>`;
+}
+
+function renderActionItemsSection(heading, cards) {
   if (!cards.length) return "";
   const items = cards.map((a) => `
     <div class="rail-action">
@@ -2002,82 +3127,39 @@ function renderActionItemsSection(cards) {
       ` : ""}
     </div>
   `).join("");
-  return `
-    <div class="rail-section">
-      <div class="rail-section-label">Action items <span class="rail-section-count">${cards.length}</span></div>
-      ${items}
-    </div>
-  `;
+  return railSection(heading, items, cards.length);
 }
 
+// A heading the model left empty renders nothing at all: the presets say "skip
+// this section if none", and an empty label is worse than a missing one.
 function renderPlainSection(heading, lines) {
   const text = (lines || []).join("\n").trim();
-  if (!text && !heading) return "";
-  return `
-    <div class="rail-section">
-      ${heading ? `<div class="rail-section-label">${escapeHtml(heading)}</div>` : ""}
-      <div class="rail-md">${renderMarkdown(text)}</div>
-    </div>
-  `;
-}
-
-function renderScorecardSection(lines) {
-  const rows = [];
-  for (const l of lines) {
-    const t = l.trim();
-    if (!t.startsWith("|")) continue;
-    if (/^\|[-:| ]+\|/.test(t)) continue;
-    const cells = t.replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
-    rows.push(cells);
-  }
-  if (!rows.length) return "";
-  const [header, ...body] = rows;
-  const RATING_CLS = { strong: "sc-strong", mixed: "sc-mixed", weak: "sc-weak", "not assessed": "sc-na" };
-  const ths = header.map((h) => `<th>${renderMarkdownInline(h)}</th>`).join("");
-  const trs = body.map((r) => {
-    const tds = r.map((c, i) => {
-      if (i === 1) {
-        const cls = RATING_CLS[c.toLowerCase()] || "";
-        return `<td class="sc-rating ${cls}">${renderMarkdownInline(c)}</td>`;
-      }
-      return `<td>${renderMarkdownInline(c)}</td>`;
-    }).join("");
-    return `<tr>${tds}</tr>`;
-  }).join("");
-  return `
-    <div class="rail-section">
-      <div class="rail-section-label">Scorecard</div>
-      <table class="rail-scorecard"><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>
-    </div>
-  `;
-}
-
-function renderRecommendationSection(lines) {
-  const text = lines.join("\n").trim();
   if (!text) return "";
-  const VERDICTS = [
-    ["Strong hire", "verdict-hire-strong"],
-    ["Hire", "verdict-hire"],
-    ["Lean no", "verdict-lean-no"],
-    ["No hire", "verdict-no-hire"],
-    ["Insufficient signal", "verdict-signal"],
-  ];
-  let badge = "";
-  let rest = text;
-  for (const [v, cls] of VERDICTS) {
-    if (text.startsWith(v)) {
-      badge = `<span class="rail-verdict ${cls}">${escapeHtml(v)}</span>`;
-      rest = text.slice(v.length).replace(/^\s*[—–-]\s*/, "");
-      break;
-    }
-  }
-  return `
-    <div class="rail-section">
-      <div class="rail-section-label">Recommendation</div>
-      ${badge}
-      ${rest ? `<div class="rail-md rail-rec-body">${renderMarkdown(rest)}</div>` : ""}
-    </div>
-  `;
+  return railSection(heading, `<div class="rail-md">${renderMarkdown(text)}</div>`);
+}
+
+// "No hire" before "Hire" and "Strong hire" before both — matchChip takes the
+// first entry that fits, so the longer verdict has to come first or "Hire"
+// would swallow "Hire — …" out of "Strong hire — …".
+const RAIL_VERDICTS = [
+  ["Strong hire", "verdict-hire-strong"],
+  ["No hire", "verdict-no-hire"],
+  ["Lean no", "verdict-lean-no"],
+  ["Insufficient signal", "verdict-signal"],
+  ["Hire", "verdict-hire"],
+];
+
+function renderRecommendationSection(heading, lines) {
+  const text = (lines || []).join("\n").trim();
+  if (!text) return "";
+  const [first, ...tail] = text.split("\n");
+  const hit = matchChip(first, RAIL_VERDICTS);
+  // No recognisable verdict: the paragraph is still the recommendation.
+  if (!hit) return renderPlainSection(heading, lines);
+  const body = [hit.rest, ...tail].join("\n").trim();
+  return railSection(heading,
+    `<span class="rail-verdict ${hit.cls}">${escapeHtml(hit.label)}</span>`
+    + (body ? `<div class="rail-md rail-rec-body">${renderMarkdown(body)}</div>` : ""));
 }
 
 function buildStructuredHtml(parsed) {
@@ -2092,8 +3174,9 @@ function buildStructuredHtml(parsed) {
   }
 
   // Display order: pinned sections first, then everything else in source order.
-  // Covers meeting / daily / interview presets without rewriting source files.
-  const RAIL_ORDER = ["speaker_mapping", "summary", "tl_dr", "participants", "scorecard", "action_items", "decisions", "recommendation"];
+  // The actionable block stays on top for every preset; `status` joins it because
+  // a project note is read for its state before anything else.
+  const RAIL_ORDER = ["speaker_mapping", "summary", "tl_dr", "status", "participants", "scorecard", "action_items", "decisions", "recommendation"];
   const orderedSections = [...parsed.sections].sort((a, b) => {
     const ai = RAIL_ORDER.indexOf(a.slug);
     const bi = RAIL_ORDER.indexOf(b.slug);
@@ -2103,33 +3186,32 @@ function buildStructuredHtml(parsed) {
     return ai - bi;
   });
 
-  for (const sec of orderedSections) {
-    if (sec.slug === "decisions") {
-      out.push(renderDecisionsSection(parseSimpleBullets(sec.lines)));
-    } else if (sec.slug === "action_items") {
-      out.push(renderActionItemsSection(parseActionItems(sec.lines)));
-    } else if (sec.slug === "risks") {
-      out.push(renderRisksSection(parseSimpleBullets(sec.lines)));
-    } else if (sec.slug === "scorecard") {
-      out.push(renderScorecardSection(sec.lines));
-    } else if (sec.slug === "recommendation") {
-      out.push(renderRecommendationSection(sec.lines));
-    } else if (sec.slug === "brief") {
-      const text = (sec.lines || []).join("\n").trim();
-      if (!text) continue;
-      out.push(`
-        <div class="rail-section">
-          <div class="rail-section-label">Brief</div>
-          <div class="rail-md rail-brief-md">${renderMarkdown(text)}</div>
-        </div>
-      `);
-    } else {
-      out.push(renderPlainSection(sec.heading, sec.lines));
-    }
-  }
+  for (const sec of orderedSections) out.push(renderRailSection(sec));
 
   return out.join("");
 }
+
+// One section → its markup. The registry decides; a slug it does not carry lands
+// on renderPlainSection, which is what keeps custom prompts rendering as before.
+function renderRailSection(sec) {
+  const kind = RAIL_SECTIONS[sec.slug];
+  if (RAIL_TONES.includes(kind)) return renderBulletSection(sec.heading, sec.lines, kind);
+  switch (kind) {
+    case "actions": {
+      // Every other kind degrades to plain markdown when its shape does not
+      // parse; without this the whole section would vanish from the rail.
+      const cards = parseActionItems(sec.lines);
+      return cards.length ? renderActionItemsSection(sec.heading, cards) : renderPlainSection(sec.heading, sec.lines);
+    }
+    case "map": return renderMapSection(sec.heading, sec.lines);
+    case "dated": return renderDatedSection(sec.heading, sec.lines);
+    case "status": return renderStatusSection(sec.heading, sec.lines);
+    case "people": return renderPeopleSection(sec.heading, sec.lines);
+    case "recommendation": return renderRecommendationSection(sec.heading, sec.lines);
+    default: return renderPlainSection(sec.heading, sec.lines);
+  }
+}
+// ── end rail sections ──
 
 function setSummaryWarning(filePath, warning) {
   if (warning) summaryWarnings.set(filePath, warning);
@@ -2163,7 +3245,6 @@ function buildNoSummaryHtml() {
     <div class="rail-empty">
       <span class="rail-empty-icon">${iconSvg("sparkle", { size: 22 })}</span>
       <h3>No summary yet</h3>
-      <p>Summarize this meeting locally — extract decisions, action items, and a brief.</p>
     </div>
   `;
 }
@@ -2213,11 +3294,14 @@ async function renderSummaryRail(filePath) {
 
   if (shouldRenderStructured(summaryText)) {
     const parsed = parseStructured(summaryText);
-    if (!parsed.fallback) {
+    // Empty sections render nothing, so a summary of nothing but headings comes
+    // back as an empty string — show the raw markdown rather than a blank rail.
+    const structured = parsed.fallback ? "" : buildStructuredHtml(parsed);
+    if (structured) {
       summaryRailBody.innerHTML =
         buildRailHeaderHtml(filePath, presetName ? { label: presetName } : { label: "Structured" }) +
         buildRailWarningHtml(filePath) +
-        buildStructuredHtml(parsed);
+        structured;
       if (btnRailResummarizeLabel) btnRailResummarizeLabel.textContent = "Re-summarize";
       return;
     }
@@ -2530,6 +3614,11 @@ function buildExportHtml(kind, text) {
     li { margin: 2px 0; }
     blockquote { margin: 0 0 10px; padding: 4px 12px; border-left: 3px solid #ccc; color: #555; }
     code { background: #f0f0f0; padding: 1px 4px; border-radius: 3px; font-size: 12px; }
+    /* renderMarkdown emits pipe tables, and this document does not load the
+       renderer stylesheet — without these a scorecard prints borderless. */
+    table { border-collapse: collapse; width: 100%; margin: 0 0 10px; font-size: 12px; }
+    th { text-align: left; padding: 4px 8px 4px 0; border-bottom: 1px solid #999; }
+    td { padding: 4px 8px 4px 0; border-bottom: 1px solid #e0e0e0; vertical-align: top; }
     pre.tr { white-space: pre-wrap; word-wrap: break-word;
       font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 12px; }
   </style></head><body>${bodyHtml}</body></html>`;
@@ -2638,12 +3727,14 @@ if (summaryShareBtnDocx) {
 
 // ─── Sidebar wire-up: New, search, filter chips ──────────────────────────────
 const meetingSearchInput = document.getElementById("meeting-search");
+const meetingSearchClear = document.getElementById("meeting-search-clear");
 const btnMeetingNew = document.getElementById("btn-meeting-new");
 
 if (btnMeetingNew) btnMeetingNew.addEventListener("click", openNewModal);
 
 if (meetingSearchInput) {
   meetingSearchInput.addEventListener("input", () => {
+    meetingSearchClear?.classList.toggle("hidden", !meetingSearchInput.value);
     clearTimeout(searchDebounceTimer);
     searchDebounceTimer = setTimeout(async () => {
       searchQuery = meetingSearchInput.value.trim().toLowerCase();
@@ -2660,14 +3751,20 @@ if (meetingSearchInput) {
   });
 }
 
+if (meetingSearchClear) {
+  meetingSearchClear.addEventListener("click", () => {
+    meetingSearchInput.value = "";
+    meetingSearchInput.dispatchEvent(new Event("input"));
+    meetingSearchInput.focus();
+  });
+}
+
 document.querySelectorAll(".filter-chip").forEach((chip) => {
   chip.addEventListener("click", () => {
     const filter = chip.dataset.filter;
     if (!filter || filter === activeFilter) return;
     activeFilter = filter;
-    document.querySelectorAll(".filter-chip").forEach((c) => {
-      c.classList.toggle("active", c.dataset.filter === filter);
-    });
+    markActiveChip(filter);
     renderMeetings();
   });
 });
@@ -2676,19 +3773,28 @@ document.querySelectorAll(".filter-chip").forEach((chip) => {
 api.watchTranscripts();
 loadLibrary();
 api.onTranscriptsChanged(loadLibrary);
+// Recordings are half the library now, so it has to watch their folder too.
+// `record:watch` is idempotent in main, so the Record tab starting the same
+// watcher costs nothing.
+recApi?.watch();
+recApi?.onListChanged(async () => {
+  // fs.watch fires for every write, so a recording in progress reports a change
+  // several times a second for as long as it runs. Only the file set matters
+  // here; reloading on a growing wav would re-read every transcript on disk and
+  // rebuild the whole list, over and over, for a card that did not change.
+  const recs = await recApi.list().catch(() => []);
+  if (recordingsSignature(recs) === lastRecordingsSig) return;
+  loadLibrary(recs);
+});
 
 // ─── UI helpers ───────────────────────────────────────────────────────────────
 function showEditor() {
   emptyState.classList.add("hidden");
+  audioOnlyState?.classList.add("hidden");
   editor.classList.remove("hidden");
   editorToolbar.classList.remove("hidden");
   btnSaveAs.disabled = false;
   btnExport.disabled = false;
-}
-
-function updateUI() {
-  if (!state.filePath) return;
-  statusPath.textContent = state.filePath;
 }
 
 // ─── Editor events ────────────────────────────────────────────────────────────
@@ -2697,7 +3803,6 @@ editor.addEventListener("input", () => {
   else if (state.isDirty && editor.value === state.savedContent)
     setDirty(false);
   scheduleAutosave();
-  updateStats();
   updateCancelBtn();
 });
 
@@ -2735,7 +3840,6 @@ editor.addEventListener("keydown", (e) => {
     // chip keeps claiming "Saved".
     setDirty(true);
     scheduleAutosave();
-    updateStats();
   }
 });
 
@@ -2800,7 +3904,7 @@ dropOverlay.addEventListener("drop", async (e) => {
 // Anything layered over the editor: the six .modal-overlay modals plus the two
 // popovers built in JS (meeting rename, speaker rename).
 function anyOverlayOpen() {
-  return !!document.querySelector(".modal-overlay:not(.hidden), .rename-overlay, .spk-rename");
+  return !!document.querySelector(".modal-overlay:not(.hidden), .rename-overlay, .spk-rename, #meeting-meta-root, #transcribe-flow:not(.hidden)");
 }
 
 document.addEventListener("keydown", (e) => {
@@ -2809,12 +3913,19 @@ document.addEventListener("keydown", (e) => {
     e.preventDefault();
     e.shiftKey ? saveAsFile() : saveFile();
   }
+  // These three open a modal, body-level like the ⋯ meeting menu's own
+  // overlay — which only closes on Escape, an outside click, or picking an
+  // item, none of which these shortcuts trigger. Left open, the new modal
+  // renders underneath it, still covered by the overlay's click-swallowing
+  // div. Closing it here is cheap: it is a popover, not state.
   if (mod && e.key === "o") {
     e.preventDefault();
+    if (contextMenu) closeMeetingMenu();
     openFile();
   }
   if (mod && e.key === "n") {
     e.preventDefault();
+    if (contextMenu) closeMeetingMenu();
     openNewModal();
   }
   if (mod && e.key === "k") {
@@ -2840,6 +3951,7 @@ document.addEventListener("keydown", (e) => {
   if (mod && e.key === "/") {
     e.preventDefault();
     if (state.filePath) {
+      if (contextMenu) closeMeetingMenu();
       const m = getMeetingById(state.filePath);
       openChatModal({ kind: "file", filePath: state.filePath }, m?.title || null);
     }
@@ -2867,10 +3979,14 @@ api.onFileOpened(async (data) => {
 
 // ─── Record tab finished a transcription (single file, or last of a batch) ───
 // Jump to the Transcripts tab and open the freshly created transcript.
-document.addEventListener("transcript:created", (e) => {
+document.addEventListener("transcript:created", async (e) => {
   const filePath = e.detail?.filePath;
   if (!filePath) return;
   document.querySelector('.tab-btn[data-tab="editor"]')?.click();
+  // Refresh the library first so the new file has a card by the time it opens —
+  // otherwise renderTranscriptView's `carded` check (see transcriptMetaHtml)
+  // misses it and the meta block renders inline instead of behind the card icon.
+  await loadLibrary();
   api.openFromLibrary(filePath);
 });
 
@@ -2884,6 +4000,9 @@ const modalViewPrompt = document.getElementById("modal-view-prompt");
 const modalViewLoading = document.getElementById("modal-view-loading");
 const modalViewResult = document.getElementById("modal-view-result");
 const modalViewError = document.getElementById("modal-view-error");
+const modalLoadingText = document.getElementById("modal-loading-text");
+const modalLoadingFooter = document.getElementById("modal-loading-footer");
+const modalLoadingStopBtn = document.getElementById("modal-btn-loading-stop");
 const modalPromptInput = document.getElementById("modal-prompt-input");
 const modalFolderLabel = document.getElementById("modal-folder-label");
 const modalResultText = document.getElementById("modal-result-text");
@@ -3031,8 +4150,22 @@ async function openSummarizeModal(filePath, meetingTitle) {
   modalTitleEl.textContent = cleanTitle
     ? `Summarize — ${cleanTitle}`
     : "Summarize meeting";
-  if (modalBusyBanner) modalBusyBanner.classList.add("hidden");
   summarizeModal.classList.remove("hidden");
+
+  // The loading footer's Stop button only applies to the in-flight branch
+  // below; every other path (cache, disk, reset on next open) keeps it hidden.
+  modalLoadingFooter.classList.add("hidden");
+  modalLoadingText.textContent = "Reading the transcript…";
+
+  // A job already running on this file wins over cache/disk — the header
+  // panel may not be open, and this is then the only way back to it, instead
+  // of landing on an empty prompt form mid-run.
+  if (activeJobFor("summarize", filePath)) {
+    modalLoadingText.textContent = "Summarizing…";
+    showModalView(modalViewLoading);
+    modalLoadingFooter.classList.remove("hidden");
+    return;
+  }
 
   // Try memory cache first
   if (summaryStore.has(filePath)) {
@@ -3250,56 +4383,6 @@ function renderFrontmatterTable(rows) {
   return `<table class="fm-table"><tbody>${cells}</tbody></table>`;
 }
 
-// Render a markdown table (e.g. the interview Scorecard) into modal styling.
-function renderModalTable(lines) {
-  const rows = [];
-  for (const l of lines || []) {
-    const t = l.trim();
-    if (!t.startsWith("|")) continue;
-    if (/^\|[-:| ]+\|/.test(t)) continue; // separator row
-    rows.push(t.replace(/^\||\|$/g, "").split("|").map((c) => c.trim()));
-  }
-  if (!rows.length) return "";
-  const [header, ...body] = rows;
-  const ths = header.map((h) => `<th>${renderMarkdownInline(h)}</th>`).join("");
-  const trs = body
-    .map((r) => `<tr>${r.map((c) => `<td>${renderMarkdownInline(c)}</td>`).join("")}</tr>`)
-    .join("");
-  return `<table class="smr-table"><thead><tr>${ths}</tr></thead><tbody>${trs}</tbody></table>`;
-}
-
-function renderModalSection(sec) {
-  const heading = `<h3 class="smr-section-heading">${escapeHtml(sec.heading)}</h3>`;
-  if (sec.slug === "action_items") {
-    const items =
-      typeof parseActionItems === "function"
-        ? parseActionItems(sec.lines)
-        : null;
-    if (items?.length) {
-      const lis = items
-        .map((it) => {
-          const who = it.who ? `<strong>${escapeHtml(it.who)}</strong> — ` : "";
-          const what = renderMarkdownInline(it.what || "");
-          const due = it.due
-            ? ` <em style="color:var(--text-muted)">(due: ${escapeHtml(it.due)})</em>`
-            : "";
-          return `<li><span class="smr-action-checkbox">☐</span> ${who}${what}${due}</li>`;
-        })
-        .join("");
-      return `<section class="smr-section">${heading}<ul class="smr-list">${lis}</ul></section>`;
-    }
-  }
-  // Markdown tables (e.g. the interview Scorecard) get table styling.
-  if ((sec.lines || []).some((l) => l.trim().startsWith("|"))) {
-    const table = renderModalTable(sec.lines);
-    if (table) return `<section class="smr-section">${heading}${table}</section>`;
-  }
-  // Everything else: full markdown — paragraphs, ### sub-headings, lists,
-  // blockquotes, and inline **bold** / *italic* / `code`.
-  const body = renderMarkdown((sec.lines || []).join("\n").trim());
-  return `<section class="smr-section">${heading}<div class="smr-md">${body}</div></section>`;
-}
-
 function renderModalSummary(md, subtitleText) {
   const subtitleEl = document.getElementById("modal-result-subtitle");
   if (subtitleEl) subtitleEl.textContent = subtitleText || "";
@@ -3317,9 +4400,9 @@ function renderModalSummary(md, subtitleText) {
     if (!parsed.fallback) structured = parsed;
   }
   if (structured) {
-    for (const sec of structured.sections) {
-      html += renderModalSection(sec);
-    }
+    // Same 41-kind section renderer the rail uses (status pills, people
+    // avatars, recommendation chips, etc.), not a second flat implementation.
+    html += buildStructuredHtml(structured);
   } else {
     html += `<pre class="modal-result-text" style="white-space:pre-wrap;margin:0">${escapeHtml(body)}</pre>`;
   }
@@ -3341,76 +4424,201 @@ const PROVIDER_LOADING_TEXT = {
   ollama:       "Ollama is reading the transcript…",
 };
 
-// ─── Background summarization ────────────────────────────────────────────────
-// One job at a time. The modal is just a launcher — the actual run is awaited
-// outside the modal's lifetime so the user can keep working.
+// ─── Job queue (transcribe / enhance / summarize) ─────────────────────────────
+// One queue in main owns every long-running run; this is the panel that shows
+// it. Submitting always succeeds — there is no more "already running" refusal
+// anywhere below, and no more shared bottom-right toolbar arbitrating Enhance
+// against Summarize. `queueJobs` is refreshed on every `queue:changed`
+// broadcast and is the single source of truth for "is X running on file Y".
+let queueJobs = [];
 
-let runningSummarize = null;
+// jobId → what to do once that job settles (done/failed/canceled). Enhance
+// reloads the editor with the result; Summarize saves it to disk — neither
+// side effect lives in main, so the renderer still has to run it once the
+// job is known to have finished. Keyed by jobId (not filePath) so a re-submit
+// of the same file — a fresh job with a fresh id — can't be confused with a
+// stale one still being watched.
+const pendingEnhance = new Map();
+const pendingSummarize = new Map();
 
-const bgToolbar = document.getElementById("bg-summary-toolbar");
-const bgTitle = document.getElementById("bg-summary-title");
-const bgSubtitle = document.getElementById("bg-summary-subtitle");
-const bgViewBtn = document.getElementById("bg-summary-view");
-const bgCloseBtn = document.getElementById("bg-summary-close");
-const modalBusyBanner = document.getElementById("modal-busy-banner");
-
-function showBgToolbar(state, title, subtitle) {
-  bgToolbar.dataset.state = state;
-  bgTitle.textContent = title;
-  bgSubtitle.textContent = subtitle || "";
-  bgSubtitle.title = subtitle || "";
-  bgToolbar.classList.remove("hidden");
+function activeJobFor(type, filePath) {
+  return queueJobs.find(
+    (j) => j.type === type && j.filePath === filePath && (j.status === "queued" || j.status === "running")
+  );
 }
 
-function hideBgToolbar() {
-  bgToolbar.classList.add("hidden");
-  bgToolbar.dataset.state = "idle";
-  bgViewBtn.classList.add("hidden");
-  bgViewBtn.onclick = null;
+// Read-only for the duration of an Enhance on the file currently open:
+// otherwise a keystroke at the wrong moment either kills the run (the file no
+// longer matches what was read) or survives as a dirty buffer whose autosave
+// writes the pre-enhance text back over the finished result.
+function syncEditorReadOnly() {
+  editor.readOnly = Boolean(state.filePath && activeJobFor("enhance", state.filePath));
 }
 
-bgCloseBtn.addEventListener("click", () => {
-  // While running, the close button just hides the toolbar — work continues.
-  hideBgToolbar();
+// ─── Header panel ──────────────────────────────────────────────────────────
+const queueIndicatorBtn = document.getElementById("queue-indicator-btn");
+const queueIndicatorBadge = document.getElementById("queue-indicator-badge");
+const queuePanel = document.getElementById("queue-panel");
+const queuePanelList = document.getElementById("queue-panel-list");
+
+const JOB_TYPE_LABEL = { transcribe: "Transcribe", enhance: "Enhance", summarize: "Summarize" };
+
+function jobStatusText(job) {
+  if (job.status === "queued") return "Waiting…";
+  if (job.status === "running") {
+    if (job.canceling) return "Stopping…";
+    if (job.type === "enhance" && job.progress?.phase === "speakers") {
+      return "Identifying speakers…";
+    }
+    if (job.type === "enhance" && job.progress?.total) {
+      return `Enhancing — part ${job.progress.done + 1} of ${job.progress.total}`;
+    }
+    if (job.type === "transcribe" && job.progress?.label) return job.progress.label;
+    return `${JOB_TYPE_LABEL[job.type] || job.type}…`;
+  }
+  if (job.status === "canceled") return "Stopped";
+  if (job.status === "failed") return job.error || "Failed";
+  // done — "generated", not "ready": Summarize's actual disk write is a
+  // separate renderer-side step (finishSummarize) that can fail or, on a
+  // reload, never run at all — this job status only means the model call
+  // itself succeeded.
+  if (job.type === "enhance") {
+    const named = job.result?.namedSpeakers
+      ? `, ${job.result.namedSpeakers} speaker${job.result.namedSpeakers > 1 ? "s" : ""} named`
+      // Distinct from silence: placeholders were left unnamed on purpose,
+      // not indistinguishable from "nothing needed naming".
+      : job.result?.speakerNamingFailed
+        ? ", speaker naming failed"
+        : "";
+    return (job.result?.changed === false ? "Nothing to fix" : "Enhanced") + named;
+  }
+  if (job.type === "summarize") return "Summary generated";
+  return "Done";
+}
+
+// Cheap, always runs: the indicator/badge must reflect reality even while
+// the panel itself is closed (in particular, a background FAILURE has to
+// stay visible until dismissed — that's the whole point of this feature).
+function renderQueueBadge() {
+  const active = queueJobs.filter((j) => j.status === "queued" || j.status === "running");
+  const failed = queueJobs.filter((j) => j.status === "failed");
+  const showBadge = active.length > 0 || failed.length > 0;
+  queueIndicatorBadge.classList.toggle("hidden", !showBadge);
+  queueIndicatorBadge.classList.toggle("queue-indicator-badge--danger", active.length === 0 && failed.length > 0);
+  queueIndicatorBadge.textContent = String(active.length > 0 ? active.length : failed.length);
+}
+
+// Full row rebuild — resets scroll position, so this only runs while the
+// panel is actually visible (see renderQueuePanel) or right as it opens.
+function renderQueueList() {
+  if (!queueJobs.length) {
+    queuePanelList.innerHTML = '<li class="queue-panel-empty">Nothing running</li>';
+    return;
+  }
+  const scrollTop = queuePanelList.scrollTop;
+  // Most recent first — what's currently happening belongs at the top.
+  const ordered = [...queueJobs].sort((a, b) => b.createdAt - a.createdAt);
+  queuePanelList.innerHTML = ordered
+    .map((job) => {
+      const cancelable = job.status === "queued" || (job.status === "running" && !job.canceling);
+      const dismissable = !cancelable && job.status !== "running";
+      const typeLabel = escapeHtml(JOB_TYPE_LABEL[job.type] || job.type);
+      const title = escapeHtml(job.title || job.filePath);
+      const actionBtn = cancelable
+        ? '<button class="btn btn-ghost queue-job-cancel" data-action="cancel" type="button">Cancel</button>'
+        : dismissable
+          ? '<button class="btn btn-ghost queue-job-cancel" data-action="dismiss" type="button" title="Dismiss">✕</button>'
+          : "";
+      const statusText = escapeHtml(jobStatusText(job));
+      return `
+        <li class="queue-job" data-status="${job.status}" data-job-id="${escapeHtml(job.id)}">
+          <div class="queue-job-row1">
+            <span class="queue-job-title" title="${title}">${typeLabel} — ${title}</span>
+            ${actionBtn}
+          </div>
+          <div class="queue-job-meta" title="${statusText}">${statusText}</div>
+        </li>`;
+    })
+    .join("");
+  queuePanelList.scrollTop = scrollTop;
+}
+
+function renderQueuePanel() {
+  renderQueueBadge();
+  // A progress tick fires this on every chunk of every running job — full
+  // innerHTML rebuilds are cheap enough, but resetting scroll position on
+  // every one of them while the user is reading the list is not. Only pay
+  // for it while the panel is open; openQueuePanel() renders fresh on open.
+  if (!queuePanel.classList.contains("hidden")) renderQueueList();
+}
+
+queuePanelList.addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-action]");
+  if (!btn) return;
+  const jobId = btn.closest(".queue-job")?.dataset.jobId;
+  if (!jobId) return;
+  if (btn.dataset.action === "cancel") jobsApi.cancel(jobId);
+  else if (btn.dataset.action === "dismiss") jobsApi.dismiss(jobId);
 });
+
+function openQueuePanel() {
+  renderQueueList();
+  queuePanel.classList.remove("hidden");
+  queueIndicatorBtn.setAttribute("aria-expanded", "true");
+}
+function closeQueuePanel() {
+  queuePanel.classList.add("hidden");
+  queueIndicatorBtn.setAttribute("aria-expanded", "false");
+}
+queueIndicatorBtn.addEventListener("click", (e) => {
+  e.stopPropagation();
+  if (queuePanel.classList.contains("hidden")) openQueuePanel();
+  else closeQueuePanel();
+});
+document.addEventListener("click", (e) => {
+  if (queuePanel.classList.contains("hidden")) return;
+  if (queueIndicatorBtn.contains(e.target) || queuePanel.contains(e.target)) return;
+  closeQueuePanel();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !queuePanel.classList.contains("hidden")) closeQueuePanel();
+});
+// record.js's "View queue" button (idle-screen banner) opens this same panel
+// — the mirror of window.recordTab, which app.js calls the other way.
+// Deferred by a tick on purpose: the caller's own click is still bubbling
+// toward the outside-click handler above, and that handler counts any target
+// outside the indicator as "outside" — so opening synchronously opened and
+// closed the panel in the same click, which read as the button doing nothing.
+window.queuePanel = { open: () => setTimeout(openQueuePanel, 0) };
 
 // ─── Enhance (LLM proofreading pass over the transcript) ─────────────────────
 // Overwrites the transcript in place: no diff to confirm, no second copy. The
 // safety net is in main — every turn keeps its original marker, and a chunk the
 // model mangles is left exactly as it was.
-let runningEnhance = null;
+function finishEnhance(info, job) {
+  const result = job.result || (job.error ? { ok: false, error: job.error } : { ok: false });
+  if (!result.ok) return; // failed/canceled — the panel row already shows why
 
-api.onEnhanceProgress((p) => {
-  if (!runningEnhance || runningEnhance.filePath !== p?.filePath) return;
-  Object.assign(runningEnhance, { done: p.done, total: p.total, skipped: p.skipped });
-  showEnhanceProgress();
-});
+  // Load the new text straight into the editor rather than reopening the file:
+  // the reopen path flushes the editor first, and a keystroke landing during the
+  // IPC round-trip would put the pre-enhance buffer back on disk.
+  const onScreen = state.filePath === info.filePath;
+  const reloaded = onScreen && !state.isDirty && typeof result.content === "string";
+  if (reloaded) {
+    // Keep the baseline pointing at the pre-Enhance text: "Cancel changes" is the
+    // only undo this feature has, and loadContent would move it to the new text.
+    const baseline = state.baselineContent;
+    loadContent(info.filePath, result.content);
+    state.baselineContent = baseline;
+    updateCancelBtn();
+  }
+}
 
 async function runEnhance(m) {
-  if (runningEnhance) {
-    showEnhanceProgress();
-    return;
-  }
-  // The background toolbar and its one button are shared with Summarize. Rather
-  // than arbitrate two jobs over one slot, wait: a summary takes one call, this
-  // takes hundreds.
-  if (runningSummarize) {
-    showBgToolbar("running", "Summarizing…", "Enhance can start once the summary is done");
-    return;
-  }
   // flushBeforeReplace, not saveFile: a keystroke landing during the save leaves
   // a remainder that saveFile only schedules, and that autosave would then change
   // the file a second into the run and cost the whole pass.
   if (state.filePath === m.id && !(await flushBeforeReplace())) return;
-
-  runningEnhance = { filePath: m.id, title: m.title, done: 0, total: 0 };
-  // Read-only for the duration. Otherwise a keystroke at the wrong moment either
-  // kills the run (the file no longer matches what was read) or, worse, survives
-  // as a dirty buffer whose autosave writes the pre-enhance text back over the
-  // finished result — with no backup, that is the enhancement gone.
-  const wasOpen = state.filePath === m.id;
-  if (wasOpen) editor.readOnly = true;
-  showEnhanceProgress();
 
   let result;
   try {
@@ -3418,158 +4626,38 @@ async function runEnhance(m) {
   } catch (err) {
     result = { ok: false, error: err?.message || String(err) };
   }
-  runningEnhance = null;
-  if (wasOpen) editor.readOnly = false;
-  clearEnhanceButton();
-
   if (!result?.ok) {
-    // Same special case Summarize makes: with the default provider the CLI is
-    // simply missing, and "Enhance failed" says nothing about what to do.
-    if (result?.notInstalled) {
-      showBgToolbar("error", "Claude Code not found", "Install it, or pick another provider in Settings");
-      return;
-    }
-    if (result?.canceled) {
-      showBgToolbar("done", "Enhance stopped", `${m.title} — nothing was written`);
-      return;
-    }
-    showBgToolbar("error", "Enhance failed", result?.error || m.title);
+    console.error("Enhance: could not submit job:", result?.error);
     return;
   }
-
-  // Load the new text straight into the editor rather than reopening the file:
-  // the reopen path flushes the editor first, and a keystroke landing during the
-  // IPC round-trip would put the pre-enhance buffer back on disk.
-  const onScreen = state.filePath === m.id;
-  const reloaded = onScreen && !state.isDirty && typeof result.content === "string";
-  if (reloaded) {
-    // Keep the baseline pointing at the pre-Enhance text: "Cancel changes" is the
-    // only undo this feature has, and loadContent would move it to the new text.
-    const baseline = state.baselineContent;
-    loadContent(m.id, result.content);
-    state.baselineContent = baseline;
-    updateCancelBtn();
-  }
-
-  const label = result.canceled
-    ? `Enhance stopped — ${result.applied} of ${result.total} parts applied`
-    : result.skipped
-      ? `Enhanced — ${result.skipped} of ${result.total} parts left as-is`
-      : !result.changed
-        ? "Nothing to fix"
-        : "Transcript enhanced";
-  const subtitle = onScreen && !reloaded
-    ? `${m.title} — reopen the note to see it`
-    : m.title;
-  showBgToolbar("done", label, subtitle);
-  if (!reloaded) {
-    bgViewBtn.classList.remove("hidden");
-    bgViewBtn.textContent = "Open";
-    bgViewBtn.onclick = () => {
-      hideBgToolbar();
-      api.openFromLibrary(m.id);
-    };
-  }
+  pendingEnhance.set(result.jobId, { filePath: m.id, title: m.title });
+  // Lock immediately — don't wait for the queue:changed round-trip, or a
+  // keystroke in that gap races the run that just started reading this file.
+  if (state.filePath === m.id) editor.readOnly = true;
 }
 
-// Redrawn from `runningEnhance` rather than set once, so a Summarize toolbar or a
-// closed toolbar in between cannot leave the run without its Stop button.
-function showEnhanceProgress() {
-  const job = runningEnhance;
-  if (!job) return;
-  const part = job.total ? ` — part ${job.done + 1} of ${job.total}` : "";
-  showBgToolbar("running", job.stopping ? "Stopping after this part…" : "Enhancing transcript…",
-    `${job.title}${part}${job.skipped ? ` (${job.skipped} left as-is)` : ""}`);
-  if (job.stopping) {
-    bgViewBtn.classList.add("hidden");
-    return;
-  }
-  // Stop takes effect between parts, not mid-call: with a slow local model that
-  // wait is a minute, so the label changes as soon as it is pressed.
-  bgViewBtn.classList.remove("hidden");
-  bgViewBtn.textContent = "Stop";
-  bgViewBtn.onclick = () => {
-    job.stopping = true;
-    api.cancelEnhance();
-    showEnhanceProgress();
-  };
-}
-
-function clearEnhanceButton() {
-  // Only if it is still ours: a Summarize that finished during the run owns the
-  // button now.
-  if (bgViewBtn.textContent === "Stop") {
-    bgViewBtn.classList.add("hidden");
-    bgViewBtn.onclick = null;
-  }
-}
-
-async function runSummarize() {
-  const filePath = modalCurrentFilePath;
-  const instruction = modalPromptInput.value.trim();
-  if (!filePath || !instruction) return;
-
-  if (runningSummarize) {
-    modalBusyBanner.classList.remove("hidden");
-    return;
-  }
-  modalBusyBanner.classList.add("hidden");
-
-  const titleText = modalTitleEl.textContent || "";
-  const meetingTitle = titleText.startsWith("Summarize — ")
-    ? titleText.slice("Summarize — ".length)
-    : "";
-  const folder = getEffectiveFolder();
-  const customName = null;
-
-  runningSummarize = { filePath, meetingTitle, instruction, folder, customName };
-  showBgToolbar("running", "Summarizing…", meetingTitle);
-  bgViewBtn.classList.remove("hidden");
-  bgViewBtn.textContent = "View";
-  bgViewBtn.onclick = () => {
-    // Work is still running — open the modal but keep the toolbar visible.
-    openSummarizeModal(filePath, meetingTitle);
-  };
-  closeSummarizeModal();
-
-  let result;
-  try {
-    result = await api.summarize(filePath, instruction);
-  } catch (err) {
-    result = { ok: false, error: err?.message || String(err) };
-  }
+// ─── Summarize ────────────────────────────────────────────────────────────────
+async function finishSummarize(info, job) {
+  const { filePath, meetingTitle, instruction, folder, customName } = info;
+  const result = job.result || (job.error ? { ok: false, error: job.error } : { ok: false });
+  const modalOnThisFile = !summarizeModal.classList.contains("hidden") && modalCurrentFilePath === filePath;
 
   if (result?.notInstalled) {
-    runningSummarize = null;
-    showBgToolbar("error", "Claude Code not found", "Install it or switch provider in Settings");
-    bgViewBtn.classList.remove("hidden");
-    bgViewBtn.textContent = "Details";
-    bgViewBtn.onclick = () => {
+    if (modalOnThisFile) {
       modalErrorText.innerHTML =
         "<strong>Claude Code not found.</strong><br>" +
         "Install it from <strong>claude.ai/code</strong>, or switch the summarizer in <strong>Settings</strong>.";
-      modalCurrentFilePath = filePath;
-      modalTitleEl.textContent = meetingTitle ? `Summarize — ${meetingTitle}` : "Summarize meeting";
-      summarizeModal.classList.remove("hidden");
       showModalView(modalViewError);
-      hideBgToolbar();
-    };
+    }
     return;
   }
-
   if (!result?.ok) {
-    runningSummarize = null;
-    showBgToolbar("error", "Summarization failed", meetingTitle);
-    bgViewBtn.classList.remove("hidden");
-    bgViewBtn.textContent = "Details";
-    bgViewBtn.onclick = () => {
-      modalErrorText.textContent = result?.error || "Summarization failed.";
-      modalCurrentFilePath = filePath;
-      modalTitleEl.textContent = meetingTitle ? `Summarize — ${meetingTitle}` : "Summarize meeting";
-      summarizeModal.classList.remove("hidden");
+    if (modalOnThisFile) {
+      modalErrorText.textContent = result?.canceled
+        ? "Summary stopped — nothing was written."
+        : (result?.error || "Summarization failed.");
       showModalView(modalViewError);
-      hideBgToolbar();
-    };
+    }
     return;
   }
 
@@ -3580,17 +4668,16 @@ async function runSummarize() {
 
   if (customName) await api.setSummaryName(filePath, customName);
   const saved = await api.saveSummary(filePath, summaryText, folder);
-  // Only now: the guard has to outlive the write, or a second Summarize started
-  // during it gets its toolbar clobbered by this job finishing.
-  runningSummarize = null;
   if (!saved?.ok) {
-    showBgToolbar("error", "Could not save summary", saved?.error || meetingTitle);
-    bgViewBtn.classList.add("hidden");
+    if (modalOnThisFile) {
+      modalErrorText.textContent = saved?.error || "Could not save summary.";
+      showModalView(modalViewError);
+    }
     return;
   }
 
-  // After the write, not before — otherwise a failed save leaves the rail and the
-  // result modal rendering a summary that is not on disk.
+  // After the write, not before — otherwise a failed save leaves the rail and
+  // the result modal rendering a summary that is not on disk.
   summaryStore.set(filePath, summaryText);
   setSummaryWarning(filePath, saved.warning);
 
@@ -3605,20 +4692,110 @@ async function runSummarize() {
   // Re-render the rail if the summarized file is the one currently open.
   if (state.filePath === filePath) renderSummaryRail(filePath);
 
-  // The warning goes in the label, not the subtitle: the subtitle is the only
-  // thing that says WHICH file finished, and this toolbar is shared by jobs on
-  // different meetings.
-  const label = saved.warning ? "Summary ready — frontmatter unusable"
-    : result.repairs?.length ? "Summary ready (frontmatter repaired)"
-    : "Summary ready";
-  showBgToolbar("done", label, meetingTitle);
-  bgViewBtn.classList.remove("hidden");
-  bgViewBtn.textContent = "View";
-  bgViewBtn.onclick = () => {
-    hideBgToolbar();
-    openSummarizeModal(filePath, meetingTitle);
-  };
+  // Re-render whatever's on screen for this file — summaryStore is warm now,
+  // so this lands straight on the result view.
+  if (modalOnThisFile) openSummarizeModal(filePath, meetingTitle);
 }
+
+// Shared by the panel's per-job Cancel button and the modal's own Stop button.
+function stopSummarizeWithFeedback() {
+  const job = activeJobFor("summarize", modalCurrentFilePath);
+  if (job) jobsApi.cancel(job.id);
+}
+
+async function runSummarize() {
+  const filePath = modalCurrentFilePath;
+  const instruction = modalPromptInput.value.trim();
+  if (!filePath || !instruction) return;
+
+  const titleText = modalTitleEl.textContent || "";
+  const meetingTitle = titleText.startsWith("Summarize — ")
+    ? titleText.slice("Summarize — ".length)
+    : "";
+  const folder = getEffectiveFolder();
+  const customName = null;
+
+  closeSummarizeModal();
+
+  let result;
+  try {
+    result = await api.summarize(filePath, instruction);
+  } catch (err) {
+    result = { ok: false, error: err?.message || String(err) };
+  }
+  if (!result?.ok) {
+    console.error("Summarize: could not submit job:", result?.error);
+    return;
+  }
+  pendingSummarize.set(result.jobId, { filePath, meetingTitle, instruction, folder, customName });
+}
+
+// Transcribe and Enhance are the two jobs that write provenance (`Model:` /
+// `Enhanced:`) into a transcript header, and Enhance's write suppresses the
+// library watcher's own broadcast (main.js stamps lastSelfWrite for it) — so the
+// list has to be refreshed from here, or the new chips only appear on the next
+// unrelated reload. Terminal jobs stay in the panel until dismissed, so refresh
+// on the transition and remember which ids were already handled.
+const provenanceSeen = new Set();
+
+// ─── Wiring: one broadcast drives the panel and both finish-handlers ─────────
+function onQueueChanged(jobs) {
+  queueJobs = jobs;
+  renderQueuePanel();
+  syncEditorReadOnly();
+  // The work queues (meetingMatchesFilter) exclude a row already being worked
+  // on — re-render so a job starting or finishing moves it in or out live,
+  // not just whenever loadLibrary() next happens to run.
+  renderMeetings();
+  const presentIds = new Set(jobs.map((j) => j.id));
+  let refreshLibrary = false;
+  for (const job of jobs) {
+    if (job.status === "queued" || job.status === "running") continue;
+    if ((job.type === "transcribe" || job.type === "enhance") && !provenanceSeen.has(job.id)) {
+      provenanceSeen.add(job.id);
+      refreshLibrary = true;
+    }
+    if (job.type === "enhance" && pendingEnhance.has(job.id)) {
+      const info = pendingEnhance.get(job.id);
+      pendingEnhance.delete(job.id);
+      finishEnhance(info, job);
+    } else if (job.type === "summarize" && pendingSummarize.has(job.id)) {
+      const info = pendingSummarize.get(job.id);
+      pendingSummarize.delete(job.id);
+      finishSummarize(info, job);
+    }
+  }
+  // A job canceled while still queued is dropped outright, not marked
+  // (job-queue.js) — it never appears above with a terminal status, so a
+  // pending Enhance/Summarize for it would otherwise wait forever with no
+  // "stopped" feedback and never clean up its own map entry.
+  if (pendingEnhance.size) {
+    const canceledJob = { result: { ok: false, canceled: true }, error: null };
+    for (const [jobId, info] of pendingEnhance) {
+      if (presentIds.has(jobId)) continue;
+      pendingEnhance.delete(jobId);
+      finishEnhance(info, canceledJob);
+    }
+  }
+  if (pendingSummarize.size) {
+    const canceledJob = { result: { ok: false, canceled: true }, error: null };
+    for (const [jobId, info] of pendingSummarize) {
+      if (presentIds.has(jobId)) continue;
+      pendingSummarize.delete(jobId);
+      finishSummarize(info, canceledJob);
+    }
+  }
+  // Job ids are never reused, so a dismissed job can be forgotten outright.
+  for (const jobId of provenanceSeen) {
+    if (!presentIds.has(jobId)) provenanceSeen.delete(jobId);
+  }
+  // Last: finishEnhance above may have reloaded the editor, and loadLibrary only
+  // rebuilds the meetings list, so the order between them does not matter — but
+  // one refresh per broadcast does.
+  if (refreshLibrary) loadLibrary();
+}
+jobsApi.onChanged(onQueueChanged);
+jobsApi.list().then(onQueueChanged);
 
 // ── Preset segmented control ─────────────────────────────────────────────────
 const presetMenu = document.getElementById("modal-preset-menu");
@@ -3705,6 +4882,12 @@ document
 document.getElementById("modal-btn-back").addEventListener("click", () => {
   showModalView(modalViewPrompt);
   populateModalPrompt();
+});
+// Same job the toolbar's Stop button cancels — the modal is just the other
+// way to reach it once the toolbar has been dismissed.
+modalLoadingStopBtn.addEventListener("click", () => {
+  stopSummarizeWithFeedback();
+  closeSummarizeModal();
 });
 document.getElementById("modal-btn-err-back").addEventListener("click", () => {
   showModalView(modalViewPrompt);
@@ -3886,6 +5069,7 @@ const settingsOrModel = document.getElementById("settings-or-model");
 const settingsOrUrl = document.getElementById("settings-or-url");
 const settingsOlUrl = document.getElementById("settings-ol-url");
 const settingsOlModel = document.getElementById("settings-ol-model");
+const settingsOlCtx = document.getElementById("settings-ol-ctx");
 const settingsOaiUrl = document.getElementById("settings-oai-url");
 const settingsOaiKey = document.getElementById("settings-oai-key");
 const settingsOaiModel = document.getElementById("settings-oai-model");
@@ -3915,11 +5099,32 @@ settingsProviderRadios.forEach((r) =>
 const settingsThemeRadios = document.querySelectorAll('input[name="settings-theme"]');
 const lightThemeMQ = window.matchMedia("(prefers-color-scheme: light)");
 
+// Same try/catch-with-fallback shape as readFormatPref() above — a storage
+// backend that refuses reads/writes must not stop the theme from applying
+// live, only from surviving a reload.
+function readThemePref() {
+  try {
+    return localStorage.getItem("uds-theme") || "dark";
+  } catch (_) {
+    return "dark";
+  }
+}
+function writeThemePref(pref) {
+  try {
+    localStorage.setItem("uds-theme", pref);
+  } catch (_) {
+    // Unpersisted — theme-init.js's own guard falls back to dark on reload.
+  }
+}
+
 function applyTheme(pref) {
   // pref: 'light' | 'dark' | 'system'
-  localStorage.setItem("uds-theme", pref);
+  writeThemePref(pref);
   const effective = pref === "system" ? (lightThemeMQ.matches ? "light" : "dark") : pref;
   document.documentElement.dataset.theme = effective;
+  // The floating notes window is a separate document and only resolves this
+  // once at load — tell main so it can relay the change.
+  window.themeApi.notifyChanged();
 }
 
 settingsThemeRadios.forEach((r) =>
@@ -3930,8 +5135,27 @@ settingsThemeRadios.forEach((r) =>
 
 // While 'system' is selected, follow OS appearance changes live.
 lightThemeMQ.addEventListener("change", () => {
-  if ((localStorage.getItem("uds-theme") || "dark") === "system") applyTheme("system");
+  if (readThemePref() === "system") applyTheme("system");
 });
+
+// ─── Date & time format (view preferences) ──────────────────────────────────
+// Same contract as the theme: picking a radio takes effect immediately and
+// survives Cancel — these never travel through the summarizer's Save.
+const settingsDateOrderRadios = document.querySelectorAll('input[name="settings-date-order"]');
+const settingsTimeFormatRadios = document.querySelectorAll('input[name="settings-time-format"]');
+
+function bindFormatRadios(radios, key) {
+  radios.forEach((r) =>
+    r.addEventListener("change", () => {
+      if (!r.checked) return;
+      try { localStorage.setItem(key, r.value); } catch (_) {}
+      renderMeetings();
+    }),
+  );
+}
+
+bindFormatRadios(settingsDateOrderRadios, DATE_ORDER_KEY);
+bindFormatRadios(settingsTimeFormatRadios, TIME_FORMAT_KEY);
 
 settingsPresetBtns.forEach((btn) =>
   btn.addEventListener("click", () => {
@@ -4007,21 +5231,32 @@ async function openSettingsModal() {
   settingsProviderRadios.forEach((r) => {
     r.checked = r.value === provider;
   });
-  const theme = localStorage.getItem("uds-theme") || "dark";
+  const theme = readThemePref();
   settingsThemeRadios.forEach((r) => {
     r.checked = r.value === theme;
+  });
+  const dateOrder = dateOrderPref();
+  settingsDateOrderRadios.forEach((r) => {
+    r.checked = r.value === dateOrder;
+  });
+  const timeFormat = timeFormatPref();
+  settingsTimeFormatRadios.forEach((r) => {
+    r.checked = r.value === timeFormat;
   });
   settingsOrKey.value = cfg?.openrouter?.apiKey || "";
   settingsOrModel.value = cfg?.openrouter?.model || "";
   settingsOrUrl.value = cfg?.openrouter?.baseUrl || "";
   settingsOlUrl.value = cfg?.ollama?.baseUrl || "";
   settingsOlModel.value = cfg?.ollama?.model || "";
+  settingsOlCtx.value = cfg?.ollama?.contextTokens || "";
   settingsOaiUrl.value = cfg?.openaiCompatible?.baseUrl || "";
   settingsOaiKey.value = cfg?.openaiCompatible?.apiKey || "";
   settingsOaiModel.value = cfg?.openaiCompatible?.model || "";
   const autoStopEl = document.getElementById("settings-autostop");
   if (autoStopEl && api.getAutoStop) autoStopEl.checked = await api.getAutoStop();
   settingsGlossary.value = (await api.getGlossary?.()) || "";
+  const versionEl = document.getElementById("settings-version");
+  if (versionEl && api.getAppVersion) versionEl.textContent = `Unlimeety ${await api.getAppVersion()}`;
   settingsError.classList.add("hidden");
   settingsError.textContent = "";
   updateSettingsSections();
@@ -4047,6 +5282,18 @@ async function saveSettings() {
     settingsError.textContent = "Ollama requires a model name.";
     settingsError.classList.remove("hidden");
     return;
+  }
+  if (provider === "ollama" && settingsOlCtx.value.trim()) {
+    // Mirrors main.js's parsePositiveInt/MAX_OLLAMA_CONTEXT_TOKENS — whole
+    // number only, so a value isn't silently floored after save with no
+    // indication it changed.
+    const n = Number(settingsOlCtx.value.trim());
+    if (!(Number.isInteger(n) && n > 0 && n <= 2000000)) {
+      settingsError.textContent =
+        "Context size must be a whole number between 1 and 2,000,000.";
+      settingsError.classList.remove("hidden");
+      return;
+    }
   }
   if (provider === "openai-compatible") {
     if (!settingsOaiUrl.value.trim()) {
@@ -4081,6 +5328,7 @@ async function saveSettings() {
     ollama: {
       baseUrl: settingsOlUrl.value.trim(),
       model: settingsOlModel.value.trim(),
+      contextTokens: settingsOlCtx.value.trim(),
     },
     openaiCompatible: {
       apiKey: settingsOaiKey.value.trim(),

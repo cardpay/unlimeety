@@ -116,6 +116,17 @@ actor FileTranscriber {
         let results = try await kit.transcribe(audioArray: samples, decodeOptions: options)
         if cancelled { return }
 
+        // Report what WhisperKit actually decoded in, not just what was asked
+        // for — "auto" tells the model to detect it, and the caller needs the
+        // answer to write an accurate `Language:` header instead of "auto".
+        // A long recording is chunked into several 30s windows, each with its
+        // own `language`; the most common one across chunks is a steadier
+        // answer than the first chunk alone, which could be silence or a
+        // short intro in a different language than the rest of the meeting.
+        if let detected = Self.mostCommonLanguage(in: results) {
+            Helper.emit(["type": "languageDetected", "language": detected])
+        }
+
         // Flatten and emit. Speaker label starts as "…" — filled in after
         // diarization, same convention as live mode.
         var segs: [LiveSession.FinalizedSegment] = []
@@ -229,6 +240,18 @@ actor FileTranscriber {
         // The `try!` is justified: the pattern is a compile-time constant.
         return try! NSRegularExpression(pattern: #"<\|?[^<>|\s]*\|?>"#, options: [])
     }()
+
+    // Mode across chunk results, not just the first — ties keep whichever
+    // language appeared first, which is as good a tiebreak as any here.
+    private static func mostCommonLanguage(in results: [TranscriptionResult]) -> String? {
+        var counts: [String: Int] = [:]
+        var order: [String] = []
+        for r in results where !r.language.isEmpty {
+            if counts[r.language] == nil { order.append(r.language) }
+            counts[r.language, default: 0] += 1
+        }
+        return order.max { counts[$0]! < counts[$1]! }
+    }
 
     private static func cleanText(_ raw: String) -> String {
         let range = NSRange(raw.startIndex..., in: raw)

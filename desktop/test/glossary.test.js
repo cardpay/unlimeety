@@ -2,7 +2,8 @@
 // node test/glossary.test.js
 
 const assert = require('assert');
-const { parse, select, render, blockFor, MAX_ENTRIES } = require('../glossary');
+const { parse, select, render, blockFor, withinDistance, MAX_ENTRIES, REFERENCE_HEADING }
+    = require('../glossary');
 
 // ─── parse ────────────────────────────────────────────────────────────────────
 {
@@ -81,10 +82,38 @@ const { parse, select, render, blockFor, MAX_ENTRIES } = require('../glossary');
 {
     const entries = parse('PayCore\tпейкор\nэквайринг');
     const block = render(entries);
-    assert.match(block, /^Domain terms/m, 'block is labelled');
+    assert.strictEqual(
+        block.split('\n')[0],
+        'Domain terms — restore these spellings when the transcript mangles them:',
+        'the proofreading block still carries the proofreading imperative');
     assert.match(block, /- PayCore \(heard as: пейкор\)/, 'aliases are shown to the model');
     assert.match(block, /- эквайринг$/m, 'a term without aliases renders bare');
     assert.strictEqual(render([]), '', 'nothing selected → no block');
+
+    // The heading is the block's imperative, and the speaker naming pass must
+    // not inherit the proofreading one — it answers `Placeholder -> Name` and an
+    // imperative dangling at the end of its prompt is an instruction it follows.
+    // Pinned by exact first line: both headings open with "Domain terms", so a
+    // /^Domain terms/ match passes for either, and hard-coding the proofreading
+    // heading back inside `render` would leave every other test green.
+    assert.strictEqual(
+        render(entries, REFERENCE_HEADING).split('\n')[0],
+        'Domain terms and names that come up in this meeting, spelled correctly:',
+        'the naming block states the terms and commands nothing');
+    assert.strictEqual(render([], REFERENCE_HEADING), '', 'and an empty one leaves no heading behind');
+}
+
+// ─── withinDistance ───────────────────────────────────────────────────────────
+// transcript-enhance.js binds a name to an email segment with this, across a
+// module boundary, so the contract is pinned here: (a, b, max), max inclusive,
+// and a length difference costs an edit like any other.
+{
+    assert.ok(withinDistance('zorina', 'zorina', 0), 'equal strings need no budget');
+    assert.ok(withinDistance('kostyaeva', 'kostiaeva', 1), 'one substitution inside a budget of one');
+    assert.ok(!withinDistance('kostyaeva', 'kostiaeva', 0), 'and outside a budget of none');
+    assert.ok(!withinDistance('zorin', 'zorina', 0), 'a trailing letter is an edit');
+    assert.ok(withinDistance('zorin', 'zorina', 1), 'which a budget of one pays for');
+    assert.ok(!withinDistance('zorin', 'zorinaa', 1), 'two are two');
 }
 
 // ─── blockFor ─────────────────────────────────────────────────────────────────

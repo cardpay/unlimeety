@@ -11,6 +11,7 @@ const {
     mergeEnhanced,
     assembleTranscript,
     spokenTargets,
+    stampHeaderLine,
     matchLineEndings,
     MARKER_RE,
     ENHANCE_PROMPT,
@@ -340,6 +341,86 @@ const TRANSCRIPT = [
     const blocks = parseBlocks('[00:30] Заметка:\nмой текст\n');
     assert.deepStrictEqual(spokenTargets(blocks, 'Заметка'), [], 'a renamed label is honoured');
     assert.strictEqual(spokenTargets(blocks, 'Note').length, 1, 'and only that label');
+}
+
+// ─── length bounds ────────────────────────────────────────────────────────────
+// The gate that decides whether a reply is proofreading or rewriting. Its bounds
+// have to hold at both ends of the length scale at once: a 7000-character
+// monologue and a two-letter "ок" go through the same check.
+{
+    const turn = (text) => parseBlocks(`[00:00] Alpha:\n${text}\n`);
+    const reply = (chunk, text) => mergeEnhanced(chunk, `${chunk[0].marker}\n${text}`);
+
+    // A long turn, proofread. Measured on a real run: restored punctuation,
+    // casing and domain terms add 3-5%. This is the case that used to fail —
+    // the old bounds allowed 0.5% here, so Enhance died on every long monologue.
+    const long = 'слово '.repeat(1200).trim();            // 7199 chars
+    assert.strictEqual(reply(turn(long), long + ', и вот ещё двести пятьдесят символов сверху.'.repeat(5)).ok,
+        true, 'a long turn may grow by a few percent');
+
+    // The failures the bounds still have to catch at that length.
+    assert.strictEqual(reply(turn(long), long.slice(0, 3000)).ok, false,
+        'a long turn cut in half is a summary, not a proofread');
+    assert.strictEqual(reply(turn(long), long + ' ' + long).ok, false,
+        'a long turn that doubled is the model rewriting');
+
+    // The short end, where a ratio alone would allow anything.
+    const short = 'ок';
+    assert.strictEqual(reply(turn(short), 'Ок.').ok, true, 'a two-letter turn may gain a period');
+    assert.strictEqual(reply(turn(short), 'Ок. Hope this helps!').ok, false,
+        'a pleasantry welded onto a short turn still trips the ceiling');
+}
+
+// ─── stampHeaderLine ──────────────────────────────────────────────────────────
+// The provenance stamp Enhance writes: it must land inside the header block, not
+// in the blank line that ends it, and a second Enhance must not stack a second
+// line.
+{
+    const header = 'Meeting: Weekly sync\nGenerated: 19.08.2026, 12:00:00\n\n';
+    const once = stampHeaderLine(header, 'Enhanced', '2026-08-24T10:00:00.000Z');
+    assert.strictEqual(once,
+        'Meeting: Weekly sync\nGenerated: 19.08.2026, 12:00:00\nEnhanced: 2026-08-24T10:00:00.000Z\n\n',
+        'added after the last real header line, before the separating blank line');
+
+    const twice = stampHeaderLine(once, 'Enhanced', '2026-08-24T11:00:00.000Z');
+    assert.strictEqual(twice,
+        'Meeting: Weekly sync\nGenerated: 19.08.2026, 12:00:00\nEnhanced: 2026-08-24T11:00:00.000Z\n\n',
+        're-enhancing replaces the stamp instead of stacking a second one');
+
+    // A transcript that starts at its first marker has no header to append to.
+    assert.strictEqual(stampHeaderLine('', 'Enhanced', 'X'), 'Enhanced: X\n\n',
+        'an empty header becomes a header block of its own');
+    assert.strictEqual(stampHeaderLine('\n', 'Enhanced', 'X'), 'Enhanced: X\n\n',
+        'so does a header that is only whitespace');
+
+    assert.strictEqual(
+        stampHeaderLine('Meeting: Weekly sync\r\n\r\n', 'Enhanced', 'X'),
+        'Meeting: Weekly sync\r\nEnhanced: X\r\n\r\n',
+        'a CRLF header keeps CRLF');
+
+    // `Source:` values are paths and can contain anything, including something
+    // that looks like another key — matching is anchored to the line start.
+    const withSource = stampHeaderLine('Meeting: x\nSource: /tmp/Enhanced: nope.wav\n\n', 'Enhanced', 'X');
+    assert.strictEqual(withSource,
+        'Meeting: x\nSource: /tmp/Enhanced: nope.wav\nEnhanced: X\n\n',
+        'a key spelled inside another line\'s value is not mistaken for the key');
+}
+
+// The whole write path Enhance runs on a no-op pass: split, stamp, reassemble.
+// The transcript must come back byte-identical apart from the one header line —
+// this is the guard against the stamp reflowing turns or eating the blank line.
+{
+    for (const sample of [TRANSCRIPT, TRANSCRIPT.replace(/\n/g, '\r\n')]) {
+        const { header, body } = splitTranscript(sample);
+        const blocks = parseBlocks(body);
+        const stamped = stampHeaderLine(header, 'Enhanced', '2026-08-24T10:00:00.000Z');
+        const out = matchLineEndings(assembleTranscript(stamped, blocks), sample);
+        const eol = sample.includes('\r\n') ? '\r\n' : '\n';
+        assert.strictEqual(out.split(eol).filter((l) => l.startsWith('Enhanced: ')).length, 1,
+            'exactly one stamp');
+        assert.strictEqual(out.replace(`Enhanced: 2026-08-24T10:00:00.000Z${eol}`, ''), sample,
+            'removing the stamp gives back the original byte for byte');
+    }
 }
 
 // ─── matchLineEndings ─────────────────────────────────────────────────────────
