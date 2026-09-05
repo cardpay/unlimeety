@@ -473,6 +473,10 @@ const emails = (...list) => ({
 }
 
 // ─── the naming prompt ──────────────────────────────────────────────────────
+// spec-security-model-isolation.md: meetingTitle/participants are calendar-
+// sourced and attacker-reachable, same as the transcript — they moved to the
+// call site's EVIDENCE data block, and speakerInstruction no longer accepts
+// or emits them at all.
 {
     assert.strictEqual(speakerInstruction({}), SPEAKER_PROMPT, 'nothing to add → the prompt alone');
 
@@ -481,14 +485,12 @@ const emails = (...list) => ({
         meetingTitle: 'Status checks',
         participants: ['p.zorina@example.com'],
     });
-    assert.ok(full.startsWith(SPEAKER_PROMPT), 'the prompt leads');
-    assert.ok(full.includes('\n\nDomain terms:\n- PayCore\n\n'), 'terms keep their own heading');
-    assert.ok(full.endsWith('Meeting: Status checks\nParticipants: p.zorina@example.com'),
-        'the meeting\'s own facts come last, not a borrowed imperative');
+    assert.strictEqual(full, `${SPEAKER_PROMPT}\n\nDomain terms:\n- PayCore`,
+        'meetingTitle/participants are silently ignored — not read, not appended');
 
-    // An empty glossary must leave no blank block and no stray heading.
-    const noTerms = speakerInstruction({ terms: '', meetingTitle: 'Status checks' });
-    assert.strictEqual(noTerms, `${SPEAKER_PROMPT}\n\nMeeting: Status checks`);
+    // An empty terms block leaves no blank line or stray heading behind.
+    assert.strictEqual(speakerInstruction({ terms: '' }), SPEAKER_PROMPT);
+    assert.strictEqual(speakerInstruction(), SPEAKER_PROMPT, 'no args at all still works');
 }
 
 // ─── applying the map ───────────────────────────────────────────────────────

@@ -32,10 +32,20 @@ function parse(text) {
         const trimmed = line.trim();
         if (!trimmed || trimmed.startsWith('#')) continue;
         const [term, ...aliases] = line.split('\t');
-        if (!term || !term.trim()) continue;
+        if (!term) continue;
+        // A control character (a stray \r from a CRLF-pasted glossary, a \0)
+        // survives `.trim()` when it isn't at either end — turned into a space
+        // instead of silently riding along into a prompt.
+        const clean = (s) => s.replace(/[\x00-\x1f]/g, ' ').trim();
+        const cleanTerm = clean(term);
+        // Checked after cleaning, not before: a term made entirely of control
+        // characters (e.g. a stray `\0`) passes a raw `.trim()` check (it isn't
+        // whitespace) but collapses to '' once cleaned — without this it would
+        // still get pushed as a bogus empty-term entry.
+        if (!cleanTerm) continue;
         entries.push({
-            term: term.trim(),
-            aliases: aliases.map((a) => a.trim()).filter(Boolean),
+            term: cleanTerm,
+            aliases: aliases.map(clean).filter(Boolean),
         });
     }
     return entries;

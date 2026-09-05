@@ -3601,7 +3601,9 @@ function buildExportHtml(kind, text) {
   const bodyHtml = kind === "summary"
     ? `<div class="md">${renderMarkdown(parseFrontmatterFromMd(text).body)}</div>`
     : `<pre class="tr">${escapeHtml(text)}</pre>`;
-  return `<!doctype html><html><head><meta charset="utf-8"><style>
+  return `<!doctype html><html><head><meta charset="utf-8">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+    <style>
     * { box-sizing: border-box; }
     body { margin: 32px; color: #1a1a1a; background: #fff;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
