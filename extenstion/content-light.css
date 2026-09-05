@@ -9,7 +9,7 @@
        widget.dataset.theme = 'light';            // or 'dark' / remove for dark
    …or auto-follow the OS — see the @media block at the bottom.
    ---------------------------------------------------------------------------
-   UDS light foundations: white surface, brand-purple accent, dark text.
+   UDS light foundations: white surface, brand-navy accent, dark text.
    Recording state stays red. The collapsed pill inherits all of it.
    ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -19,24 +19,27 @@
     --u-surface:   #ffffff;
     --u-elevated:  #f1f0ea;
     --u-hover:     #e7e5dd;
-    --u-border:    rgba(28, 26, 22, 0.10);
-    --u-border-2:  rgba(28, 26, 22, 0.16);
+    --u-border:    #EEF0F3;
+    --u-border-2:  #DFE3E8;
 
     /* Text — warm near-black ramp */
-    --u-text:      #20201c;
-    --u-text-2:    #5a574f;
+    --u-text:      #0C0C0C;
+    --u-text-2:    #444444;
     --u-text-3:    #8a867c;
 
-    /* Accent → brand purple (lime is dark-only in UDS) */
-    --u-lime:      #6b45e8;
-    --u-lime-2:    #5733ce;
+    /* Accent → brand navy (lime is dark-only in UDS) */
+    --u-lime:      #416BD6;
+    --u-lime-2:    #3B5DB5;
     --u-lime-fg:   #ffffff;
-    --u-lime-glow: rgba(107, 69, 232, 0.30);
-    --u-lime-dim:  rgba(107, 69, 232, 0.12);
+    --u-lime-glow: rgba(65, 107, 214, 0.30);
+    --u-lime-dim:  #EFF3FD;
 
     /* Recording red — slightly deepened for light contrast */
     --u-rec:       #dc2626;
     --u-rec-dim:   rgba(220, 38, 38, 0.14);
+
+    /* Native controls (checkbox, select popup, input caret) paint light too */
+    color-scheme: light;
 
     /* Card elevation: light, layered shadow instead of the dark drop */
     box-shadow:
@@ -51,7 +54,7 @@
     background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238a867c' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>");
 }
 
-/* Record button keeps its white-ink highlight; on purple it stays crisp. */
+/* Record button keeps its white-ink highlight; on navy it stays crisp. */
 #gmt-transcriber-widget[data-theme="light"] #gmt-record-btn {
     box-shadow: 0 0 0 0 var(--u-lime-glow), 0 1px 0 rgba(255, 255, 255, 0.35) inset;
 }
@@ -64,18 +67,19 @@
         --u-surface:   #ffffff;
         --u-elevated:  #f1f0ea;
         --u-hover:     #e7e5dd;
-        --u-border:    rgba(28, 26, 22, 0.10);
-        --u-border-2:  rgba(28, 26, 22, 0.16);
-        --u-text:      #20201c;
-        --u-text-2:    #5a574f;
+        --u-border:    #EEF0F3;
+        --u-border-2:  #DFE3E8;
+        --u-text:      #0C0C0C;
+        --u-text-2:    #444444;
         --u-text-3:    #8a867c;
-        --u-lime:      #6b45e8;
-        --u-lime-2:    #5733ce;
+        --u-lime:      #416BD6;
+        --u-lime-2:    #3B5DB5;
         --u-lime-fg:   #ffffff;
-        --u-lime-glow: rgba(107, 69, 232, 0.30);
-        --u-lime-dim:  rgba(107, 69, 232, 0.12);
+        --u-lime-glow: rgba(65, 107, 214, 0.30);
+        --u-lime-dim:  #EFF3FD;
         --u-rec:       #dc2626;
         --u-rec-dim:   rgba(220, 38, 38, 0.14);
+        color-scheme: light;
         box-shadow:
             0 1px 0 rgba(255, 255, 255, 0.7) inset,
             0 12px 32px rgba(28, 26, 22, 0.16),

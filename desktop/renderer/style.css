@@ -19,19 +19,22 @@
 
 :root {
     /* Tightened dark scale used by the meeting redesign. */
-    --bg-base: #0a0a0d;
-    --bg-surface: #13131a;
-    --bg-elevated: #1c1c25;
+    --bg-base: #000000;
+    --bg-surface: #0C0C0C;
+    --bg-elevated: #171717;
     --bg-hover: #262633;
+    /* Solid neutral/900+800 (border/subtle, border/default) read as flat black
+       against bg-base/bg-surface — the ramp's darkest steps sit within 23/255
+       of each other. A translucent white line stays visible regardless. */
     --border: rgba(255, 255, 255, 0.08);
     --border-strong: rgba(255, 255, 255, 0.16);
-    --border-focus: rgba(198, 244, 50, 0.55);
+    --border-focus: #416BD6;
 
     /* Unlimit lime accent — primary across the whole app. */
-    --accent: #c6f432;
-    --accent-2: #a8d728;
-    --accent-fg: #0a0d04;
-    --accent-dim: rgba(198, 244, 50, 0.14);
+    --accent: #C5F23D;
+    --accent-2: #D3F168;
+    --accent-fg: #000000;
+    --accent-dim: rgba(197, 242, 61, 0.12);
     --accent-glow: rgba(198, 244, 50, 0.28);
 
     /* Legacy lime aliases kept so .rail-*, .meeting-card.active, .btn-rail-primary still work. */
@@ -44,14 +47,14 @@
     --obsidian: #7c3aed;
     --todoist: #e44332;
 
-    --text-primary: #ededf0;
-    --text-secondary: #8b8b9e;
-    --text-muted: #52525f;
+    --text-primary: #FFFFFF;
+    --text-secondary: #C7CDD6;
+    --text-muted: #838383;
 
-    --dirty: #f59e0b;
-    --saved: #34d399;
-    --danger: #f87171;
-    --info: #60a5fa;
+    --dirty: #FFB020;
+    --saved: #34C759;
+    --danger: #F04438;
+    --info: #3B82F6;
     --rec: #ef4444;
 
     --radius-sm: 6px;
@@ -62,7 +65,6 @@
     --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
 
     --toolbar-height: 52px;
-    --statusbar-height: 28px;
     --sidebar-width: 260px;
 }
 
@@ -188,7 +190,6 @@ body {
 body.mode-live #btn-summarize,
 body.mode-live #btn-ask-ai,
 body.mode-live #btn-library,
-body.mode-live #status-bar,
 body.mode-record #btn-ask-ai {
     display: none !important;
 }
@@ -314,7 +315,7 @@ body.mode-record #btn-ask-ai {
 #editor-container {
     position: fixed;
     top: var(--toolbar-height);
-    bottom: var(--statusbar-height);
+    bottom: 0;
     left: 0;
     right: 0;
     overflow: hidden;
@@ -381,7 +382,21 @@ body.mode-record #btn-ask-ai {
     padding: 40px;
 }
 
-#empty-icon {
+#audio-only-state {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    text-align: center;
+    padding: 40px;
+}
+#audio-only-state.hidden { display: none; }
+
+#empty-icon,
+#audio-only-icon {
     width: 100px;
     height: 100px;
     border-radius: 50%;
@@ -393,17 +408,20 @@ body.mode-record #btn-ask-ai {
     margin-bottom: 8px;
 }
 
-#empty-icon svg {
+#empty-icon svg,
+#audio-only-icon svg {
     color: var(--text-muted);
 }
 
-#empty-state h2 {
+#empty-state h2,
+#audio-only-state h2 {
     font-size: 22px;
     font-weight: 600;
     color: var(--text-primary);
 }
 
-#empty-state p {
+#empty-state p,
+#audio-only-state p {
     font-size: 14px;
     color: var(--text-secondary);
     margin-bottom: 8px;
@@ -460,42 +478,6 @@ body.mode-record #btn-ask-ai {
 
 #editor::-webkit-scrollbar-thumb:hover {
     background: var(--bg-hover);
-}
-
-/* ─── Status Bar ──────────────────────────────────────────────────────────────── */
-#status-bar {
-    position: fixed;
-    bottom: 0;
-    left: 0;
-    right: 0;
-    height: var(--statusbar-height);
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 0 16px;
-    background: var(--bg-surface);
-    border-top: 1px solid var(--border);
-    font-size: 11px;
-    color: var(--text-muted);
-    z-index: 100;
-}
-
-#status-right {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-}
-
-.status-divider {
-    color: var(--text-muted);
-    opacity: 0.4;
-}
-
-#status-path {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    max-width: 60%;
 }
 
 /* ─── Utility ─────────────────────────────────────────────────────────────────── */
@@ -654,19 +636,29 @@ body.mode-record #btn-ask-ai {
     background: var(--bg-base);
 }
 
-.library-search-kbd {
+.library-search-clear {
     position: absolute;
-    right: 8px;
+    right: 6px;
     top: 50%;
     transform: translateY(-50%);
-    font-family: var(--font-mono);
-    font-size: 10px;
+    width: 18px;
+    height: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 11px;
+    line-height: 1;
     color: var(--text-muted);
-    background: var(--bg-base);
-    border: 1px solid var(--border);
+    background: transparent;
+    border: none;
     border-radius: 4px;
-    padding: 1px 5px;
-    pointer-events: none;
+    cursor: pointer;
+    padding: 0;
+}
+
+.library-search-clear:hover {
+    color: var(--text-primary);
+    background: var(--bg-elevated);
 }
 
 /* Filter chips */
@@ -677,6 +669,87 @@ body.mode-record #btn-ask-ai {
     border-bottom: 1px solid var(--border);
     flex-wrap: wrap;
     flex-shrink: 0;
+}
+
+/* Batch selection over audio-only rows. Same weight as the chip row it sits
+   under, and gone entirely when nothing is selected. */
+.library-selection {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-base);
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-primary);
+    flex-shrink: 0;
+}
+.library-selection.hidden { display: none; }
+#library-selection-label { flex: 1; }
+.library-selection-link {
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    font-size: 10.5px;
+    cursor: pointer;
+    padding: 0;
+    font-family: inherit;
+}
+.library-selection-link:hover { color: var(--text-secondary); }
+/* The one constructive action in the row — Delete is destructive and Clear is a
+   way out, so only this one carries the accent. */
+.library-selection-link.primary { color: var(--accent); font-weight: 600; }
+.library-selection-link.primary:hover { color: var(--accent-2); }
+.library-selection-link.danger { color: var(--danger); }
+.library-selection-link.danger:hover { opacity: 0.8; }
+
+.meeting-pick {
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
+    margin-right: 2px;
+    position: relative;
+}
+/* Transparent and on top of the box, NOT display:none — that would take the
+   control out of the tab order and out of the accessibility tree, in a sidebar
+   where every other control carries a role and a name. */
+.meeting-pick input {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    opacity: 0;
+    cursor: pointer;
+}
+.meeting-pick input:focus-visible + .meeting-pick-box {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+}
+.meeting-pick-box {
+    width: 13px;
+    height: 13px;
+    border: 1px solid var(--border-strong);
+    border-radius: 3px;
+    display: inline-block;
+    position: relative;
+    cursor: pointer;
+}
+.meeting-pick input:checked + .meeting-pick-box {
+    background: var(--accent);
+    border-color: var(--accent);
+}
+.meeting-pick input:checked + .meeting-pick-box::after {
+    content: "✓";
+    color: var(--accent-fg);
+    font-size: 10px;
+    font-weight: 700;
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
 }
 
 .filter-chip {
@@ -828,7 +901,7 @@ body.mode-record #btn-ask-ai {
 }
 
 .meeting-more {
-    display: none;
+    display: inline-flex;
     background: transparent;
     border: none;
     color: var(--text-muted);
@@ -842,7 +915,38 @@ body.mode-record #btn-ask-ai {
     transition: background 0.15s, color 0.15s;
 }
 
-.meeting-card.active .meeting-more { display: inline-flex; }
+/* Sits against the title rather than at the row's far edge — `margin-right:
+   auto` keeps it there regardless of the ⋯ button beside it. Both are always
+   shown now, but ⋯ is also reachable by right-click anywhere on the card;
+   this is the only way to the info panel. */
+.meeting-info {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    margin-right: auto;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    color: var(--text-muted);
+    opacity: 0.55;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, opacity 0.15s;
+}
+.meeting-info:hover,
+.meeting-info[aria-expanded="true"] {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+    opacity: 1;
+}
+.meeting-info:focus-visible {
+    outline: 2px solid var(--accent-2);
+    outline-offset: 1px;
+    opacity: 1;
+}
 
 .meeting-more:hover { background: var(--bg-hover); color: var(--text-primary); }
 
@@ -923,6 +1027,10 @@ body.mode-record #btn-ask-ai {
     justify-content: space-between;
     gap: 8px;
     margin-top: 8px;
+    /* The model chip carries text, so this row can outgrow a 260px sidebar where
+       the icon-only chips never could. Wrapping only engages when it does. */
+    flex-wrap: wrap;
+    row-gap: 6px;
 }
 
 /* Status pill */
@@ -1038,6 +1146,52 @@ body.mode-record #btn-ask-ai {
     background: var(--accent-lime-soft);
     border-color: var(--accent-lime-border);
     color: var(--accent-lime);
+}
+
+.artifact-chip[data-kind="enhance"][data-present="true"] {
+    background: rgba(52, 211, 153, 0.13);
+    border-color: rgba(52, 211, 153, 0.27);
+    color: var(--saved);
+}
+
+/* One honest badge replacing all four artifact chips on a readFailed row —
+   text, not an icon-only square, since "which artifacts exist" cannot be
+   answered here at all. */
+.artifact-chip--error {
+    width: auto;
+    height: 18px;
+    padding: 0 6px;
+    gap: 4px;
+    opacity: 1;
+    font-size: 11px;
+    background: rgba(248, 113, 113, 0.14);
+    border-color: rgba(248, 113, 113, 0.3);
+    color: var(--danger);
+}
+
+/* Which model produced the transcript. Text, not a glyph — the whole point is
+   *which* one. Tiered by weight rather than hue: the row already spends its
+   colors on the artifact chips, and "accurate model vs fast model" reads fine as
+   plain emphasis. */
+.model-chip {
+    height: 18px;
+    padding: 0 6px;
+    border-radius: 5px;
+    border: 1px solid var(--border);
+    display: inline-flex;
+    align-items: center;
+    font-family: var(--font-mono);
+    font-size: 9px;
+    letter-spacing: 0.01em;
+    white-space: nowrap;
+    color: var(--text-muted);
+    background: transparent;
+}
+
+.model-chip[data-strong="true"] {
+    border-color: var(--border-strong);
+    color: var(--text-secondary);
+    font-weight: 600;
 }
 
 /* ─── Meeting context menu (right-click + ⋯ button) ─────────────────────────── */
@@ -1198,7 +1352,7 @@ body.mode-record #btn-ask-ai {
     display: flex;
     align-items: center;
     gap: 8px;
-    margin-bottom: 6px;
+    margin-bottom: 14px;   /* was 6px + .rail-path's own 14px below it */
 }
 
 .rail-header-title {
@@ -1229,17 +1383,16 @@ body.mode-record #btn-ask-ai {
     border-color: var(--border);
 }
 
-.rail-path {
-    font-family: var(--font-mono);
-    font-size: 10.5px;
+/* The file path lives in this icon's tooltip — too noisy to show inline */
+.rail-header-info {
+    display: inline-flex;
+    align-items: center;
     color: var(--text-muted);
-    margin-bottom: 14px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    direction: rtl;       /* keep the filename tail visible when truncating */
-    text-align: left;
+    cursor: help;
+    flex-shrink: 0;
 }
+
+.rail-header-info:hover { color: var(--text-secondary); }
 
 /* Banner when we render a freeform summary as plain markdown */
 .rail-banner {
@@ -1291,12 +1444,6 @@ body.mode-record #btn-ask-ai {
     letter-spacing: 0;
 }
 
-.rail-brief {
-    font-size: 12.5px;
-    line-height: 1.55;
-    color: var(--text-primary);
-}
-
 .rail-list { list-style: none; }
 
 .rail-list li {
@@ -1312,28 +1459,57 @@ body.mode-record #btn-ask-ai {
 
 .rail-list li:first-child { border-top: none; padding-top: 0; }
 
-.rail-decision-bullet {
+/* Section bullets: one glyph and one colour per tone, so a list of wins never
+   reads like a list of risks. Every colour is a token or a color-mix of one, so
+   theme-light.css needs no point-fix for any of them. */
+.rail-bullet {
+    /* Fixed box for every tone: the glyphs differ in size, the indent must not. */
     flex-shrink: 0;
     width: 16px;
-    height: 16px;
-    border-radius: 50%;
-    background: rgba(52, 211, 153, 0.16);
-    color: var(--saved);
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    margin-top: 1px;
-}
-
-.rail-risk-bullet {
-    flex-shrink: 0;
-    color: var(--danger);
     font-size: 11px;
+    line-height: 1;
     margin-top: 2px;
 }
 
-/* Action items */
-.rail-action {
+/* `good` is the tinted circle the Decisions list has always had. */
+.rail-bullet--good {
+    height: 16px;
+    border-radius: 50%;
+    background: color-mix(in srgb, var(--saved) 16%, transparent);
+    color: var(--saved);
+    margin-top: 1px;
+}
+
+.rail-bullet--bad { color: var(--danger); }
+.rail-bullet--warn { color: var(--dirty); font-size: 9px; }
+.rail-bullet--idea { color: var(--accent); font-weight: 700; font-size: 13px; }
+.rail-bullet--neutral { color: var(--text-muted); font-size: 14px; }
+
+/* A milestone's date sits at the far end of its row, not next to the text —
+   and in a 360px rail the long text has to wrap rather than squeeze the pill. */
+.rail-list .rail-due-pill { margin-left: auto; }
+.rail-li-text { min-width: 0; overflow-wrap: anywhere; }
+
+/* "Alpha → Anna (introduced at 00:02)" — a mapping, not a sentence, so the two
+   sides get their own weight and the evidence recedes. */
+.rail-map {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 6px;
+    min-width: 0;
+}
+.rail-map-from { color: var(--text-secondary); font-weight: 600; }
+.rail-map-arrow { color: var(--text-muted); }
+.rail-map-to { color: var(--text-primary); font-weight: 600; }
+.rail-map-note { color: var(--text-muted); font-size: 11.5px; }
+
+/* Action items, and the daily preset's per-person cards, share one box */
+.rail-action,
+.rail-person {
     border: 1px solid var(--border);
     border-radius: var(--radius-md);
     background: var(--bg-elevated);
@@ -1379,10 +1555,24 @@ body.mode-record #btn-ask-ai {
     color: var(--text-secondary);
 }
 
+.rail-person-name {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 6px;
+}
+
+/* The card supplies the bottom padding; the last block inside must not add more. */
+.rail-person-body > :last-child { margin-bottom: 0; }
+
 .rail-due-pill {
     display: inline-flex;
     align-items: center;
-    background: rgba(245, 158, 11, 0.14);
+    flex-shrink: 0;
+    background: color-mix(in srgb, var(--dirty) 14%, transparent);
     color: var(--dirty);
     border-radius: 999px;
     padding: 2px 8px;
@@ -1454,14 +1644,20 @@ body.mode-record #btn-ask-ai {
     letter-spacing: 0.04em;
 }
 
-/* Scorecard table (interview preset) */
-.rail-scorecard {
+/* Any pipe table in a summary; the sc-* tints are the interview scorecard's
+   Rating column. The rail is 360px wide, so the table scrolls in its own box. */
+.rail-table-wrap {
+    overflow-x: auto;
+    margin-bottom: 12px;
+}
+
+.rail-table {
     width: 100%;
     border-collapse: collapse;
     font-size: 12px;
     line-height: 1.45;
 }
-.rail-scorecard th {
+.rail-table th {
     text-align: left;
     font-size: 10px;
     font-weight: 700;
@@ -1471,14 +1667,14 @@ body.mode-record #btn-ask-ai {
     padding: 0 8px 8px 0;
     border-bottom: 1px solid var(--border);
 }
-.rail-scorecard td {
+.rail-table td {
     padding: 8px 8px 8px 0;
     border-bottom: 1px solid var(--border);
     color: var(--text-primary);
     vertical-align: top;
 }
-.rail-scorecard tr:last-child td { border-bottom: none; }
-.rail-scorecard .sc-rating {
+.rail-table tr:last-child td { border-bottom: none; }
+.rail-table .sc-rating {
     white-space: nowrap;
     font-weight: 600;
     font-size: 11px;
@@ -1497,11 +1693,16 @@ body.mode-record #btn-ask-ai {
     font-weight: 700;
     margin-bottom: 10px;
 }
-.verdict-hire-strong { background: rgba(52, 211, 153, 0.18); color: var(--saved); }
-.verdict-hire        { background: rgba(52, 211, 153, 0.10); color: var(--saved); }
-.verdict-lean-no     { background: rgba(245, 158, 11, 0.15); color: var(--dirty); }
-.verdict-no-hire     { background: rgba(248, 113, 113, 0.15); color: var(--danger); }
+.verdict-hire-strong { background: color-mix(in srgb, var(--saved) 18%, transparent); color: var(--saved); }
+.verdict-hire        { background: color-mix(in srgb, var(--saved) 10%, transparent); color: var(--saved); }
+.verdict-lean-no     { background: color-mix(in srgb, var(--dirty) 15%, transparent); color: var(--dirty); }
+.verdict-no-hire     { background: color-mix(in srgb, var(--danger) 15%, transparent); color: var(--danger); }
 .verdict-signal      { background: var(--bg-elevated); color: var(--text-muted); }
+
+/* Project status, same pill as the interview verdict */
+.status-on-track { background: color-mix(in srgb, var(--saved) 16%, transparent); color: var(--saved); }
+.status-at-risk  { background: color-mix(in srgb, var(--dirty) 16%, transparent); color: var(--dirty); }
+.status-blocked  { background: color-mix(in srgb, var(--danger) 16%, transparent); color: var(--danger); }
 
 /* No-summary hero */
 .rail-empty {
@@ -2071,102 +2272,12 @@ body.mode-record #btn-ask-ai {
     color: var(--text-muted);
     margin-top: 2px;
 }
-.smr-section {
-    margin-top: 16px;
+/* The rail's own .rail-section has no divider (it's a narrow sidebar list);
+   the modal is a wider dialog where the sections read better with one, same
+   as the deleted .smr-section used to draw. Scoped to the modal only. */
+#modal-result-body .rail-section {
     padding-bottom: 4px;
     border-bottom: 1px solid var(--border);
-}
-.smr-section-heading {
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--text-primary);
-    margin: 0 0 6px;
-}
-.smr-list {
-    margin: 0;
-    padding-left: 18px;
-    color: var(--text-secondary);
-    font-size: 13px;
-    line-height: 1.75;
-}
-.smr-list li {
-    margin-bottom: 4px;
-}
-.smr-action-checkbox {
-    color: var(--text-muted);
-    margin-right: 4px;
-}
-.smr-md {
-    color: var(--text-secondary);
-    font-size: 13px;
-    line-height: 1.7;
-}
-.smr-md p {
-    margin: 0 0 8px;
-}
-.smr-md p:last-child {
-    margin-bottom: 0;
-}
-.smr-md h1,
-.smr-md h2,
-.smr-md h3 {
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--text-primary);
-    margin: 10px 0 4px;
-}
-.smr-md ul,
-.smr-md ol {
-    margin: 0 0 8px;
-    padding-left: 18px;
-}
-.smr-md li {
-    margin-bottom: 4px;
-}
-.smr-md blockquote {
-    margin: 0 0 8px;
-    padding-left: 10px;
-    border-left: 2px solid var(--border-strong, var(--border));
-    color: var(--text-muted);
-}
-.smr-md strong {
-    color: var(--text-primary);
-    font-weight: 600;
-}
-.smr-md code {
-    font-family: var(--font-mono);
-    font-size: 12px;
-    background: var(--bg-base);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 0 4px;
-}
-.smr-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 12px;
-    margin-top: 2px;
-}
-.smr-table th,
-.smr-table td {
-    text-align: left;
-    padding: 5px 8px;
-    border-bottom: 1px solid var(--border);
-    vertical-align: top;
-    color: var(--text-secondary);
-}
-.smr-table th {
-    color: var(--text-primary);
-    font-weight: 600;
-}
-.smr-table tr:last-child td {
-    border-bottom: none;
-}
-.smr-tldr {
-    font-style: italic;
-    color: var(--text-secondary);
-    font-size: 13px;
-    margin-top: 14px;
 }
 .fm-table .fm-tag {
     color: var(--accent);
@@ -2348,115 +2459,119 @@ body.mode-record #btn-ask-ai {
     letter-spacing: 0.02em;
 }
 
-/* ─── Busy banner inside summarize modal ─────────────────────────────────────── */
-.modal-busy-banner {
-    font-size: 12px;
-    color: var(--dirty);
-    background: rgba(245, 158, 11, 0.08);
-    border: 1px solid rgba(245, 158, 11, 0.3);
-    border-radius: var(--radius-sm);
-    padding: 8px 12px;
-    margin: 8px 0 0;
+/* ─── Job queue: header indicator + popover job list ──────────────────────────
+   Built from the same primitives as the meeting-menu popover and the
+   library's status pills / progress bar, not a new visual language. */
+#queue-indicator-wrap {
+    position: relative;
 }
 
-/* ─── Background summarization toolbar (bottom-right) ────────────────────────── */
-.bg-summary-toolbar {
-    position: fixed;
-    right: 16px;
-    bottom: calc(var(--statusbar-height) + 12px);
-    z-index: 150;
+.queue-indicator-badge {
+    position: absolute;
+    top: -3px;
+    right: -3px;
+    min-width: 14px;
+    height: 14px;
+    padding: 0 3px;
+    border-radius: 999px;
+    background: var(--info);
+    color: var(--bg-base);
+    font-size: 9px;
+    font-weight: 700;
+    line-height: 14px;
+    text-align: center;
+}
+.queue-indicator-badge.hidden { display: none; }
+.queue-indicator-badge--danger { background: var(--danger); }
+
+.queue-panel {
+    position: absolute;
+    top: calc(100% + 8px);
+    right: 0;
+    z-index: 401;
+    width: 320px;
+    max-height: 360px;
     display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 10px 12px;
-    min-width: 260px;
-    max-width: 360px;
+    flex-direction: column;
     background: var(--bg-elevated);
-    border: 1px solid var(--border);
+    border: 1px solid var(--border-strong);
     border-radius: var(--radius-md);
-    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
-    animation: bgSummaryIn 0.18s ease;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
+    animation: fadeIn 0.1s ease;
 }
 
-@keyframes bgSummaryIn {
-    from { transform: translateY(8px); opacity: 0; }
-    to   { transform: translateY(0);   opacity: 1; }
-}
-
-.bg-summary-icon {
-    width: 24px;
-    height: 24px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
+.queue-panel-header {
+    padding: 10px 12px 8px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+    border-bottom: 1px solid var(--border);
     flex-shrink: 0;
 }
 
-.bg-summary-spinner {
-    width: 18px;
-    height: 18px;
-    border: 2px solid var(--bg-base);
-    border-top-color: var(--accent);
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
-    display: none;
+.queue-panel-list {
+    list-style: none;
+    margin: 0;
+    padding: 4px;
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
 }
 
-.bg-summary-check,
-.bg-summary-cross {
-    display: none;
-    font-size: 14px;
-    font-weight: 700;
-    width: 22px;
-    height: 22px;
-    line-height: 22px;
+.queue-panel-empty {
+    padding: 16px 12px;
     text-align: center;
-    border-radius: 50%;
+    font-size: 12px;
+    color: var(--text-muted);
 }
 
-.bg-summary-check {
-    color: var(--bg-base);
-    background: var(--saved);
+.queue-job {
+    padding: 8px 8px;
+    border-radius: var(--radius-sm);
+}
+.queue-job + .queue-job { margin-top: 2px; }
+.queue-job:hover { background: var(--bg-hover); }
+
+.queue-job-row1 {
+    display: flex;
+    align-items: center;
+    gap: 8px;
 }
 
-.bg-summary-cross {
-    color: var(--bg-base);
-    background: var(--danger);
-}
-
-.bg-summary-toolbar[data-state="running"] .bg-summary-spinner { display: block; }
-.bg-summary-toolbar[data-state="done"]    .bg-summary-check   { display: block; }
-.bg-summary-toolbar[data-state="error"]   .bg-summary-cross   { display: block; }
-
-.bg-summary-info {
+.queue-job-title {
     flex: 1;
     min-width: 0;
-}
-
-.bg-summary-title {
-    font-size: 13px;
-    font-weight: 600;
+    font-size: 12.5px;
+    font-weight: 500;
     color: var(--text-primary);
-    line-height: 1.3;
-}
-
-.bg-summary-subtitle {
-    font-size: 11px;
-    color: var(--text-secondary);
-    white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    margin-top: 2px;
+    white-space: nowrap;
 }
 
-.bg-summary-actions {
-    display: flex;
-    gap: 4px;
+.queue-job-cancel {
     flex-shrink: 0;
+    padding: 2px 7px;
+    font-size: 11px;
 }
 
-.bg-summary-close-btn {
-    padding: 4px 8px;
+.queue-job-meta {
+    margin-top: 3px;
+    font-size: 11px;
+    color: var(--text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.queue-job[data-status="failed"] .queue-job-meta,
+.queue-job[data-status="canceled"] .queue-job-meta {
+    color: var(--danger);
+}
+.queue-job[data-status="done"] .queue-job-meta {
+    color: var(--saved);
 }
 
 /* ─── Follow-Up Draft Modal ───────────────────────────────────────────────────── */
@@ -2708,11 +2823,81 @@ body.mode-record #btn-ask-ai {
 }
 #transcript-view.hidden { display: none; }
 
-.tv-header {
-    color: var(--text-muted);
-    font-size: 12px;
+/* What view mode still shows of the header: the interrupted-transcription
+   warning, plus — only for a file with no library card to carry them — the
+   rows themselves. Everything else lives on the card's info panel below. */
+.tv-meta {
+    width: max-content;
+    max-width: 100%;
     margin-bottom: 24px;
-    white-space: pre-wrap;
+}
+
+/* An interrupted transcription must never hide behind a click. Marked by an
+   icon as well as colour, so it does not depend on seeing the amber. */
+.tv-meta-warn {
+    display: block;
+    font-family: var(--font-ui);
+    font-size: 11.5px;
+    color: var(--dirty);
+}
+.tv-meta-warn::before {
+    content: "⚠ ";
+}
+
+/* Inline fallback: same rows as the card panel, no surface of their own. */
+.tv-meta-rows {
+    margin-top: 6px;
+    max-width: 520px;
+    font-family: var(--font-ui);
+    font-size: 11.5px;
+    line-height: 1.6;
+    color: var(--text-muted);
+}
+
+/* The transcript header, one click away on the meeting card. Fixed, not
+   absolute: #library-list scrolls, so a card-anchored panel would be clipped
+   at the sidebar edge. Surface borrows the rail tooltip's tokens
+   (--bg-elevated on --border-strong, --radius-sm) so it reads as native, and
+   sits above .meeting-menu-overlay's z-index 400 the way .meeting-menu does. */
+.meta-panel {
+    position: fixed;
+    z-index: 401;
+    min-width: 200px;
+    max-width: 320px;
+    padding: 8px 10px;
+    background: var(--bg-elevated);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
+    font-family: var(--font-ui);
+    font-size: 11.5px;
+    line-height: 1.6;
+    color: var(--text-primary);
+    /* A seven-row header on a short window still has to be readable. */
+    max-height: 40vh;
+    overflow-y: auto;
+}
+
+.meta-row {
+    display: flex;
+    gap: 10px;
+}
+.meta-key {
+    /* min-width, not a fixed basis: a key longer than the column keeps its own
+       width instead of spilling into the value. */
+    flex: 0 0 auto;
+    min-width: 86px;
+    color: var(--text-muted);
+}
+.meta-val {
+    flex: 1;
+    min-width: 0;
+    /* Source paths are long: wrap them instead of overflowing the panel. */
+    overflow-wrap: anywhere;
+}
+
+.meta-panel:focus-visible {
+    outline: none;
 }
 
 .tv-plain {

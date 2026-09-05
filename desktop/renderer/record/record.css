@@ -1,7 +1,11 @@
 /* ─── Record tab (isolated stylesheet) ──────────────────────────────────────
- * All selectors below are scoped to #record-container or .record-*. The Live
- * stylesheet handles all the shared .live-* classes (topbar, meters, segment
- * cards, level meters) which are reused here for visual consistency.
+ * Selectors below are scoped to #record-container or .record-*, plus
+ * #transcribe-flow and its .ts-* contents — the transcribe-settings /
+ * transcribing flow, which opens as its own top-level panel (shown over
+ * whichever tab launched it, usually Transcripts) rather than living inside
+ * the Record tab. The Live stylesheet handles all the shared .live-* classes
+ * (topbar, meters, segment cards, level meters) which are reused here for
+ * visual consistency.
  * ─────────────────────────────────────────────────────────────────────── */
 
 #record-container {
@@ -10,6 +14,27 @@
     left: 0;
     right: 0;
     bottom: 0;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-base);
+    overflow: hidden;
+}
+
+/* Transcribe-settings + transcribing progress: a top-level panel of its own
+   (same fixed box as #record-container), not nested under it — it now opens
+   on top of whichever tab launched it (almost always Transcripts), instead of
+   forcing a jump to the Record tab. */
+#transcribe-flow {
+    position: fixed;
+    top: var(--toolbar-height);
+    left: 0;
+    right: 0;
+    bottom: 0;
+    /* Explicit, not just "last in the DOM": it must stay above the three tab
+       panels regardless of markup order, but below menus/popovers/modals
+       (rename-popup 501, modal-overlay 300) that can still open on top of it —
+       e.g. this screen's own "Save as preset…" popover. */
+    z-index: 10;
     display: flex;
     flex-direction: column;
     background: var(--bg-base);
@@ -33,371 +58,27 @@
     flex-direction: column;
 }
 
-/* Sidebar hides while recording (Variant B is full-bleed). */
-body[data-record-phase="recording"] .record-sidebar { display: none; }
-
-/* ─── Sidebar (library + batch CTA) ────────────────────────────────────── */
-.record-sidebar {
-    width: 260px;
-    flex-shrink: 0;
-    display: flex;
-    flex-direction: column;
-    background: var(--bg-surface);
-    border-right: 1px solid var(--border);
-    min-height: 0;
-}
-.record-sb-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 14px 12px;
-    border-bottom: 1px solid var(--border);
-    text-transform: uppercase;
-    font-size: 10px;
-    font-weight: 600;
-    letter-spacing: 0.08em;
-    color: var(--text-muted);
-}
-.record-sb-count {
-    background: var(--bg-elevated);
-    border-radius: 8px;
-    padding: 1px 6px;
-    font-family: var(--font-mono);
-    font-size: 10px;
-    color: var(--text-secondary);
-    text-transform: none;
-    letter-spacing: 0;
-}
-.record-sb-selection {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 8px 12px;
-    border-bottom: 1px solid var(--border);
-    background: var(--bg-base);
-    font-size: 11px;
-    font-weight: 600;
-    color: var(--text-primary);
-}
-.record-sb-master input { display: none; }
-.record-sb-master-visual {
-    width: 14px;
-    height: 14px;
-    border: 1px solid var(--border-strong, rgba(255, 255, 255, 0.14));
-    border-radius: 3px;
-    background: transparent;
-    display: inline-block;
-    position: relative;
-    cursor: pointer;
-}
-.record-sb-master input:checked + .record-sb-master-visual {
-    background: var(--accent);
-    border-color: var(--accent);
-}
-.record-sb-master input:checked + .record-sb-master-visual::after {
-    content: "✓";
-    color: var(--accent-fg);
-    font-size: 11px;
-    position: absolute;
-    inset: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-weight: 700;
-}
-.record-sb-summary-label { flex: 1; }
-.record-sb-link {
-    background: transparent;
-    border: none;
-    color: var(--text-muted);
-    font-size: 10.5px;
-    cursor: pointer;
-    padding: 0;
-    font-family: inherit;
-}
-.record-sb-link:hover { color: var(--text-secondary); }
-.record-sb-link-danger { color: var(--danger); }
-.record-sb-link-danger:hover { color: var(--danger); opacity: 0.8; }
-.record-sb-list {
-    flex: 1;
-    overflow-y: auto;
-    min-height: 0;
-}
-.record-sb-empty {
-    padding: 14px 16px;
-    margin: 12px;
-    background: var(--bg-elevated);
-    border: 1px dashed var(--border);
-    border-radius: var(--radius-md);
-    font-size: 12px;
-    color: var(--text-muted);
-}
-.record-sb-group-header {
-    padding: 10px 12px 4px;
-    text-transform: uppercase;
-    font-size: 9px;
-    font-weight: 600;
-    letter-spacing: 0.08em;
-    color: var(--text-muted);
-}
-.record-sb-group + .record-sb-group .record-sb-group-header {
-    border-top: 1px solid var(--border);
-    padding-top: 12px;
-    margin-top: 4px;
-}
-.record-sb-card {
-    border-left: 2px solid transparent;
-    border-bottom: 1px solid var(--border);
-    padding: 8px 12px 8px 10px;
-    cursor: pointer;
-    transition: background 120ms linear;
-}
-.record-sb-card:hover { background: var(--bg-hover); }
-.record-sb-card.is-selected {
-    background: rgba(198, 244, 50, 0.06);
-    border-left-color: var(--accent);
-}
-.record-sb-card-title-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 12px;
-    color: var(--text-primary);
-}
-.record-sb-card-checkbox {
-    width: 14px;
-    height: 14px;
-    border: 1px solid var(--border-strong, rgba(255, 255, 255, 0.14));
-    border-radius: 3px;
-    flex-shrink: 0;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-}
-.record-sb-card.is-selected .record-sb-card-checkbox {
-    background: var(--accent);
-    border-color: var(--accent);
-}
-.record-sb-card.is-selected .record-sb-card-checkbox::after {
-    content: "✓";
-    color: var(--accent-fg);
-    font-size: 10px;
-    font-weight: 700;
-}
-.record-sb-card.is-transcribing {
-    opacity: 0.6;
-    cursor: progress;
-}
-.record-sb-card.is-transcribing .record-sb-card-checkbox {
-    background: transparent;
-    border-color: var(--border);
-}
-.record-sb-card.is-transcribing .record-sb-card-checkbox::after {
-    content: "⋯";
-    color: var(--accent);
-    font-size: 12px;
-    font-weight: 700;
-    line-height: 12px;
-}
-.record-sb-card-more {
-    flex-shrink: 0;
-    margin-left: auto;
-    background: transparent;
-    border: none;
-    color: var(--text-muted);
-    font-size: 14px;
-    line-height: 1;
-    padding: 0 4px;
-    cursor: pointer;
-    opacity: 0;
-    transition: opacity 120ms linear;
-    font-family: inherit;
-}
-.record-sb-card:hover .record-sb-card-more,
-.record-sb-card-more:focus {
-    opacity: 1;
-}
-.record-sb-card-more:hover {
-    color: var(--text-primary);
-}
-.record-sb-card-play {
-    flex-shrink: 0;
-    width: 18px;
-    height: 18px;
-    border-radius: 50%;
-    background: transparent;
-    border: 1px solid var(--border-strong, rgba(255, 255, 255, 0.14));
-    color: var(--text-secondary);
-    font-size: 9px;
-    line-height: 1;
-    padding: 0;
-    cursor: pointer;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    font-family: inherit;
-    transition: color 120ms linear, border-color 120ms linear, background 120ms linear;
-}
-.record-sb-card-play:hover {
-    color: var(--text-primary);
-    border-color: var(--text-muted);
-}
-.record-sb-card-play.is-playing {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: var(--accent-fg);
-}
-
-/* Inline sidebar player — sits between the list and the CTA. Children reuse
-   the shared .ap-* styles from style.css; we only scale the play button down
-   and add the container chrome. */
-.record-ap {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 8px 12px;
-    flex-shrink: 0;
-    border-top: 1px solid var(--border);
-    background: var(--bg-elevated);
-}
-.record-ap.hidden { display: none; }
-.record-ap .ap-play {
-    width: 30px;
-    height: 30px;
-}
-
-.record-sb-card-title {
-    flex: 1;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-.record-sb-badge-new {
-    background: var(--accent);
-    color: var(--accent-fg);
-    border-radius: 3px;
-    padding: 1px 4px;
-    font-size: 8.5px;
-    font-weight: 700;
-    letter-spacing: 0.06em;
-}
-.record-sb-card-meta {
-    font-family: var(--font-mono);
-    font-size: 10px;
-    color: var(--text-muted);
-    margin-top: 4px;
-    padding-left: 22px;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-}
-.record-sb-card-check-mark { color: var(--saved); font-size: 10px; font-weight: 700; }
-
-.record-sb-cta {
-    flex-shrink: 0;
-    border-top: 1px solid var(--border);
-    background: var(--bg-base);
-    padding: 10px;
-}
-.record-sb-cta-btn {
-    width: 100%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-    padding: 12px 14px;
-    background: var(--accent);
-    border: 1px solid var(--accent);
-    color: var(--accent-fg);
-    font-size: 14px;
-    font-weight: 700;
-    letter-spacing: -0.01em;
-    border-radius: 8px;
-    cursor: pointer;
-    box-shadow: 0 0 28px var(--accent-glow), 0 2px 0 rgba(0, 0, 0, 0.2);
-    font-family: inherit;
-    white-space: normal;
-    text-align: center;
-    line-height: 1.25;
-    transition: background 150ms linear;
-}
-.record-sb-cta-btn:hover { background: var(--accent-2); border-color: var(--accent-2); }
-.record-sb-cta-btn:disabled,
-.record-sb-cta-btn.is-disabled {
-    background: var(--bg-elevated);
-    border-color: var(--border);
-    color: var(--text-muted);
-    box-shadow: none;
-    cursor: not-allowed;
-}
-.record-sb-cta-btn.is-disabled .record-sb-cta-spark,
-.record-sb-cta-btn:disabled .record-sb-cta-spark { display: none; }
-.record-sb-cta-meta {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 8px 4px 0;
-    font-family: var(--font-mono);
-    font-size: 10px;
-    color: var(--text-muted);
-}
-
 /* Cross-fade between phase sections (200 ms hint). */
 #record-setup, #record-recording, #record-transcribe-settings, #record-transcribing {
     transition: opacity 200ms ease;
 }
 
-/* ─── Setup (scrollable column) ────────────────────────────────────────── */
+/* ─── Setup (idle) ─────────────────────────────────────────────────────────
+   Same geometry as `#live-setup` in live.css, on purpose: the markup inside is
+   Live's `.live-setup-inner` column, so the two tabs' start screens are one
+   design and not two that drifted. Everything the old bespoke setup form needed
+   (`.record-setup-scroll`, `.record-section*`, `.record-perm-strip`,
+   `.record-folder-*`, `.record-action-row`) went out with it. */
 #record-setup {
     flex: 1;
     display: flex;
+    padding: 40px 24px;
     overflow-y: auto;
-    padding: 0;
 }
+/* No `margin: auto` override here on purpose: it lives on `.live-setup-inner`
+   in live.css, where both tabs read it from. Two copies is how it drifted the
+   first time — Record got the scroll fix and Live kept the broken centering. */
 
-.record-setup-scroll {
-    width: 100%;
-    max-width: 620px;
-    margin: 0 auto;
-    padding: 32px 28px;
-    display: flex;
-    flex-direction: column;
-    gap: 22px;
-}
-
-/* Variant-A setup form */
-.record-setup-title {
-    font-size: 22px;
-    font-weight: 600;
-    letter-spacing: -0.01em;
-    margin: 0;
-    display: flex;
-    align-items: center;
-    gap: 12px;
-}
-.record-kbd {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    padding: 2px 6px;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    color: var(--text-muted);
-    background: var(--bg-elevated);
-}
-.record-setup-desc {
-    font-size: 13px;
-    color: var(--text-secondary);
-    max-width: 540px;
-    margin: 0;
-}
-.record-section { display: flex; flex-direction: column; gap: 8px; }
-.record-section-label {
-    text-transform: uppercase;
-    font-size: 10px;
-    font-weight: 600;
-    letter-spacing: 0.08em;
-    color: var(--text-muted);
-}
 .record-sources { display: flex; flex-direction: column; gap: 8px; }
 .record-source-card {
     display: grid;
@@ -449,101 +130,6 @@ body[data-record-phase="recording"] .record-sidebar { display: none; }
 .record-source-card:has(input:checked) .record-source-switch { background: var(--accent); }
 .record-source-card:has(input:checked) .record-source-switch::after { left: 16px; }
 
-.record-title-input { width: 100%; height: 34px; }
-
-.record-folder-row {
-    display: flex;
-    align-items: center;
-    height: 32px;
-    padding: 6px 10px;
-    background: var(--bg-base);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    gap: 8px;
-}
-.record-folder-path {
-    flex: 1;
-    font-family: var(--font-mono);
-    font-size: 11px;
-    color: var(--text-secondary);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-.record-folder-change {
-    padding: 4px 9px;
-    background: transparent;
-    border: 1px solid var(--border);
-    border-radius: 5px;
-    color: var(--text-secondary);
-    font-size: 11px;
-    font-weight: 500;
-    cursor: pointer;
-    font-family: inherit;
-}
-
-.record-perm-strip {
-    background: rgba(52, 211, 153, 0.05);
-    border: 1px solid rgba(52, 211, 153, 0.18);
-    border-radius: 8px;
-    padding: 12px 14px;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-}
-.record-perm-head {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 12px;
-    font-weight: 600;
-}
-.record-perm-dot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--saved);
-}
-.record-perm-body { font-size: 11.5px; color: var(--text-secondary); }
-.record-perm-link {
-    background: transparent;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 2px 6px;
-    margin-left: 4px;
-    cursor: pointer;
-    color: var(--text-secondary);
-    font-size: 11px;
-    font-family: inherit;
-}
-
-.record-action-row {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin-top: 8px;
-}
-.record-btn-start {
-    padding: 10px 18px;
-    background: var(--rec, #ef4444);
-    border: 1px solid var(--rec, #ef4444);
-    color: #fff;
-    font-size: 14px;
-    font-weight: 600;
-    border-radius: 8px;
-    box-shadow: 0 0 24px rgba(239, 68, 68, 0.25);
-    white-space: nowrap;
-    display: inline-flex;
-    align-items: center;
-    gap: 10px;
-}
-.record-btn-start-dot {
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    background: #fff;
-    box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.25);
-}
 .record-setup-error {
     color: var(--danger);
     font-size: 12px;
@@ -694,6 +280,28 @@ body[data-record-phase="recording"] .record-sidebar { display: none; }
     background: linear-gradient(to bottom, rgba(239, 68, 68, 0.3), var(--rec) 50%, rgba(239, 68, 68, 0.3));
     opacity: 0.85;
 }
+/* Language for the transcription that fires on Stop & save. The buttons
+   themselves are the shared `.ts-seg` pills, so only the row around them is
+   local. `flex-wrap` because seven pills do not fit a narrow window. */
+.record-rec-lang {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    justify-content: center;
+    max-width: 520px;
+}
+/* `.ts-seg-wrap` sets `align-self: flex-start` for the settings screen's
+   label-above-control rows; here label and pills sit side by side. */
+.record-rec-lang .ts-seg-wrap { align-self: center; }
+.record-rec-lang-label {
+    text-transform: uppercase;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    color: var(--text-muted);
+}
+
 .record-file-card {
     width: 520px;
     background: var(--bg-surface);
@@ -805,59 +413,6 @@ body[data-record-phase="recording"] .record-sidebar { display: none; }
     overflow: hidden;
 }
 
-.record-trans-queue {
-    padding: 10px 18px;
-    border-bottom: 1px solid var(--border);
-    background: var(--bg-base);
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-}
-.record-trans-now {
-    display: flex;
-    align-items: baseline;
-    gap: 10px;
-}
-.record-trans-now-label,
-.record-trans-pending-label {
-    text-transform: uppercase;
-    font-size: 9px;
-    font-weight: 700;
-    letter-spacing: 0.08em;
-    color: var(--text-muted);
-    flex-shrink: 0;
-    width: 40px;
-}
-.record-trans-now-file {
-    font-family: var(--font-mono);
-    font-size: 12px;
-    color: var(--accent);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    flex: 1;
-}
-.record-trans-pending {
-    display: flex;
-    align-items: baseline;
-    gap: 10px;
-}
-.record-trans-pending-list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    font-family: var(--font-mono);
-    font-size: 11px;
-    color: var(--text-muted);
-    flex: 1;
-    overflow: hidden;
-}
-.record-trans-pending-list li {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
 /* ─── Transcribe settings (Variant C) ───────────────────────────────────── */
 #record-transcribe-settings {
     flex: 1;
@@ -882,30 +437,7 @@ body[data-record-phase="recording"] .record-sidebar { display: none; }
     gap: 16px;
 }
 .ts-header-text { min-width: 0; }
-.ts-kbd { flex-shrink: 0; white-space: nowrap; }
-.ts-crumb {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-family: var(--font-mono);
-    font-size: 11px;
-    color: var(--text-muted);
-    letter-spacing: 0.02em;
-}
-.ts-crumb-sep { opacity: 0.5; }
-.ts-crumb-tail { color: var(--text-primary); }
-.ts-crumb-link {
-    background: none;
-    border: none;
-    padding: 0;
-    cursor: pointer;
-    font: inherit;
-    color: var(--text-muted);
-}
-.ts-crumb-link:hover {
-    color: var(--text-primary);
-    text-decoration: underline;
-}
+.ts-header-right { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
 .ts-title {
     font-size: 22px;
     font-weight: 600;
@@ -1088,10 +620,16 @@ body[data-record-phase="recording"] .record-sidebar { display: none; }
     max-width: 600px;
 }
 
-/* Model grid */
+/* Model grid.
+   `minmax(0, 1fr)` rather than `1fr`: a grid item's default `min-width: auto`
+   is its min-content width, so `1fr` tracks refuse to shrink below the widest
+   thing in the card — here `.ts-model-footer`'s "480 MB · 99 languages ↓
+   download 🗑" row. In Live's 520px start-screen column that overflowed the
+   form horizontally by 58px and hid the third card. Wider screens (the Record
+   tab's transcribe settings) never hit the floor, so this is inert there. */
 .ts-model-grid {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 8px;
 }
 .ts-model-card {
@@ -1115,6 +653,11 @@ body[data-record-phase="recording"] .record-sidebar { display: none; }
 }
 .ts-model-top {
     display: flex;
+    /* Same story as .ts-model-footer below: radio + name + a non-wrapping
+       "Recommended"/"Best quality" pill is 15px wider than a card in Live's
+       520px column, and the pill was landing on top of the next card. Wrapping
+       drops it to its own line, and only in the narrow layout. */
+    flex-wrap: wrap;
     align-items: center;
     gap: 8px;
 }
@@ -1195,6 +738,11 @@ body[data-record-phase="recording"] .record-sidebar { display: none; }
 }
 .ts-model-footer {
     display: flex;
+    /* The other half of the minmax(0, 1fr) fix above: with the track free to
+       shrink, this row is what still stuck out (7px in Live's column). Let it
+       wrap onto a second line instead — 34px tall becomes 40px, and only when
+       it has to. */
+    flex-wrap: wrap;
     align-items: center;
     gap: 5px;
     font-size: 10.5px;
@@ -1295,7 +843,6 @@ body[data-record-phase="recording"] .record-sidebar { display: none; }
     color: var(--accent-fg);
     font-weight: 600;
 }
-.ts-seg.is-dim { color: var(--text-muted); }
 
 /* Diarization */
 .ts-dia-card {
@@ -1651,13 +1198,16 @@ body[data-record-phase="recording"] .record-sidebar { display: none; }
 }
 
 /* Transcription-in-progress banner on the idle/setup screen */
+/* Sits inside the 520px setup column, not across the pane — so it is a boxed
+   row with its own border, not a full-width strip with a bottom rule. */
 .record-trans-active-banner {
     display: flex;
     align-items: center;
     gap: 8px;
-    padding: 8px 20px;
+    padding: 8px 12px;
     background: var(--surface-2, rgba(255,255,255,0.04));
-    border-bottom: 1px solid var(--border, rgba(255,255,255,0.08));
+    border: 1px solid var(--border, rgba(255,255,255,0.08));
+    border-radius: 8px;
     font-size: 13px;
     color: var(--text-secondary, #aaa);
 }

@@ -23,6 +23,17 @@
 
     // ─── DOM refs ────────────────────────────────────────────────────────
     const $ = (id) => document.getElementById(id);
+
+    // Last-used transcription language, remembered across sessions the same
+    // way the Record tab remembers its own picker. No last-used value (first
+    // run) falls back to auto-detect rather than guessing a language.
+    const LS_LANGUAGE = 'live.language';
+    function loadLastLanguage() {
+        try { return localStorage.getItem(LS_LANGUAGE) || 'auto'; } catch (_) { return 'auto'; }
+    }
+    function saveLastLanguage(lang) {
+        try { localStorage.setItem(LS_LANGUAGE, lang); } catch (_) {}
+    }
     const tabButtons = Array.from(document.querySelectorAll('#tab-switch .tab-btn'));
     const editorPanel = $('editor-container');
     const livePanel   = $('live-container');
@@ -41,6 +52,7 @@
     const setupError     = $('live-setup-error');
     const startBtn       = $('live-btn-start');
     const openScreenSettingsBtn = $('live-open-screen-settings');
+    const micStatusEl    = $('live-mic-status');
 
     const statusDot   = $('live-status-dot');
     const statusText  = $('live-status-text');
@@ -74,11 +86,21 @@
         // true after a successful save — the next click on the Live tab resets
         // back to the setup screen instead of showing the finished transcript.
         finished: false,
+        // true while stopAndSave is in flight. The helper's own `exited` event
+        // arrives mid-stop (main forwards it before live:stop's promise
+        // resolves), and without this flag the crash path below would fire a
+        // second, concurrent save on every normal stop.
+        stopping: false,
+        // null normally; set to a short description of how the helper died
+        // ("signal SIGTRAP", "code 1") when it exits on its own. Truthy is what
+        // lets stopAndSave run past its `running` guard, so a crash doesn't
+        // take the transcript with it.
+        crashed: null,
         startedAt: 0,
         timerInterval: null,
         finalizedSegments: [],       // final segments collected in order
         activePartials: new Map(),   // key source → { node, seg } for the rolling partial
-        currentLanguage: languageSelect?.querySelector('.ts-seg.is-active')?.dataset.lang || 'ru',
+        currentLanguage: loadLastLanguage(),
         sources: ['mic', 'system'], // currently active sources
         meterPulse: null,            // setInterval handle for the fake activity meter
         lastSeenAt: { mic: 0, system: 0 }, // timestamps of last segment per source
@@ -97,14 +119,39 @@
         speakerNames: {},
     };
 
+    // Markup always ships with Russian marked active; repaint from the
+    // restored value so a returning user (or a fresh install's auto-detect
+    // default) doesn't see the wrong pill lit.
+    for (const s of languageSelect?.querySelectorAll('.ts-seg') || []) {
+        const on = s.dataset.lang === state.currentLanguage;
+        s.classList.toggle('is-active', on);
+        s.setAttribute('aria-checked', on ? 'true' : 'false');
+    }
+
     // ─── Calendar pre-fill ───────────────────────────────────────────────
     // Shared by the picker (this tab's 📅 button) and the smart router
     // (calendar-smart.js), which routes here and pre-fills after switching tab.
-    function applyCalendarPick({ title, participants }) {
-        if (title) titleInput.value = title;
-        state.calendarParticipants = Array.isArray(participants) ? participants : [];
+    // An absent `title` / `participants` leaves that half alone: the auto-record
+    // prompt hands over a title only, and must not wipe attendees the calendar
+    // refresh just filled in. Only an explicit `clear` empties the field — a
+    // nameless calendar event reaches the smart router as `title: ''`
+    // (calendar-smart.js passes it raw), and that must never wipe a typed title.
+    function applyCalendarPick({ title, participants, clear }) {
+        if (clear) titleInput.value = '';
+        else if (title) titleInput.value = title;
+        if (Array.isArray(participants)) state.calendarParticipants = participants;
     }
     window.calendarPicker?.attach({ button: $('live-cal-btn'), onPick: applyCalendarPick });
+    // Re-read on every visit to this tab: the field used to keep whatever the
+    // calendar said the first time it was filled, so a meeting that ended hours
+    // ago was still pre-selected.
+    const calPrefill = window.calendarPicker?.autoPrefill({
+        input: titleInput,
+        onPick: applyCalendarPick,
+        // Re-checked after the calendar read too: Start may have been pressed
+        // while it was in flight, and stopAndSave still has to read this title.
+        active: () => !setupSection.classList.contains('hidden'),
+    });
     window.liveTab = { applyCalendarPick };
 
     // ─── Model picker ────────────────────────────────────────────────────
@@ -214,6 +261,7 @@
             s.classList.toggle('is-active', s === seg);
         }
         state.currentLanguage = lang;
+        saveLastLanguage(lang);
     });
 
     // ─── Tab switching ───────────────────────────────────────────────────
@@ -221,6 +269,11 @@
     // Both live.js and record.js bind click handlers on the same buttons but
     // only this function ever toggles panel visibility, so there's no race.
     function switchTab(name) {
+        // #transcribe-flow (record.js) is a top-level overlay independent of
+        // which tab panel is showing — close it first so a tab switch (toolbar
+        // click, ⌘R, a recording-indicator pill) can never leave it pinned on
+        // top of the tab the user just switched to.
+        window.recordTab?.closeTranscribeFlow?.();
         tabButtons.forEach(b => b.classList.toggle('tab-active', b.dataset.tab === name));
         editorPanel.classList.toggle('hidden', name !== 'editor');
         livePanel.classList.toggle('hidden',   name !== 'live');
@@ -228,12 +281,6 @@
         if (recordPanel) recordPanel.classList.toggle('hidden', name !== 'record');
         document.body.classList.toggle('mode-live',   name === 'live');
         document.body.classList.toggle('mode-record', name === 'record');
-        // Clear the record-phase marker when leaving the Record tab so any
-        // record-phase-specific CSS (e.g. hidden sidebars) does not leak into
-        // other tabs.
-        if (name !== 'record') {
-            delete document.body.dataset.recordPhase;
-        }
     }
 
     openScreenSettingsBtn?.addEventListener('click', () => {
@@ -269,7 +316,7 @@
     // Rolling window of the last ~80 helper-stderr lines.
     const diagBuffer = [];
     function pushDiag(line) {
-        const stamp = new Date().toLocaleTimeString();
+        const stamp = formatClockTime(new Date());
         diagBuffer.push(`${stamp}  ${line}`);
         if (diagBuffer.length > 80) diagBuffer.shift();
         if (!diagPanel) return;
@@ -287,8 +334,17 @@
         // fresh "new recording" setup screen, not the last transcript. The
         // `finished` flag is only set after a successful save (never during
         // startup), so a session that's still loading is never wiped.
-        if (btn.dataset.tab === 'live' && state.finished && !state.running) {
-            returnToSetup();
+        if (btn.dataset.tab === 'live' && !state.running) {
+            // returnToSetup() re-reads the calendar itself, so only the
+            // still-on-setup case needs its own refresh here — and only when
+            // setup is what's actually on screen. `!state.running` is also true
+            // while live.start() loads the model, after a failed save and after
+            // a helper crash, and in all three the recording screen is up with
+            // a title that stopAndSave() still has to read: clearing it there
+            // would save the session under defaultTitle(). Mirrors record.js's
+            // `state.phase === 'idle'` gate.
+            if (state.finished) returnToSetup();
+            else if (!setupSection.classList.contains('hidden')) calPrefill?.refresh();
         }
         switchTab(btn.dataset.tab);
     }));
@@ -317,6 +373,31 @@
             mainArea.classList.add('hidden');
         }
     })();
+
+    // The hint below this used to always say "First launch: macOS will ask…"
+    // regardless of whether that had already happened. Real Microphone status
+    // replaces the guesswork for the two states worth reporting; Screen
+    // Recording is left as-is (see live.css) — that OS API is known to cache
+    // and lie right after a fresh grant, unlike this one. 'not-determined' —
+    // macOS hasn't even asked yet — is left blank rather than shown as denied;
+    // the static copy below already covers that case. Re-run on return to
+    // setup too: the very first Start click is what triggers the real prompt,
+    // so the answer is only known *after* it, not at module load.
+    async function refreshMicStatus() {
+        const status = await live?.micStatus?.();
+        if (!micStatusEl || !status) return;
+        if (status === 'granted') {
+            micStatusEl.textContent = 'Microphone: granted. ';
+            micStatusEl.classList.remove('is-denied');
+        } else if (status === 'denied' || status === 'restricted') {
+            micStatusEl.textContent = 'Microphone: not granted. ';
+            micStatusEl.classList.add('is-denied');
+        } else {
+            micStatusEl.textContent = '';
+            micStatusEl.classList.remove('is-denied');
+        }
+    }
+    refreshMicStatus();
 
     // ─── Setup → start ───────────────────────────────────────────────────
     startBtn.addEventListener('click', async () => {
@@ -357,6 +438,11 @@
             setupSection.classList.remove('hidden');
             recordingSection.classList.add('hidden');
             showSetupError(res?.error || 'Failed to start');
+            // Back on setup after main's own mic-permission gate ran (and,
+            // most likely, just triggered the real OS prompt for the first
+            // time) — re-read the answer instead of showing what was true
+            // before the click.
+            refreshMicStatus();
             return;
         }
 
@@ -374,18 +460,31 @@
     // presses Start manually.
     live.onAutoStart?.(({ title } = {}) => {
         document.querySelector('.tab-btn[data-tab="live"]')?.click();
-        if (title && !titleInput.value.trim()) titleInput.value = title;
+        // Through the prefill, not straight into the field: main's title has to
+        // win over a stale auto-filled one (the old `!titleInput.value.trim()`
+        // guard is exactly why the prompt kept landing on the previous
+        // meeting), while a title typed by hand still survives.
+        if (title) calPrefill?.put({ title });
     });
 
     // ─── Stop → save ─────────────────────────────────────────────────────
     // Shared by the Stop button and the auto-stop trigger (main fires a
     // `autoStop` event when the meeting ended and the countdown elapsed).
+    // Also driven by the `exited` handler when the helper dies on its own —
+    // `state.crashed` is what lets it through the guard, since the crash path
+    // has no live helper left to stop but still holds a full transcript.
     async function stopAndSave() {
-        if (!state.running) return;
+        if (!state.running && !state.crashed) return;
+        if (state.stopping) return;
+        state.stopping = true;
         stopBtn.disabled = true;
         stopBtn.querySelector('span:last-child').textContent = 'Saving…';
-        setStatus('loading', 'Finalizing…');
+        setStatus('loading', state.crashed
+            ? `Helper crashed (${state.crashed}) — saving transcript…`
+            : 'Finalizing…');
 
+        // Returns { ok: false } when the helper is already gone; the save below
+        // doesn't need it alive, so the result is deliberately ignored.
         await live.stop();
         stopTimer();
         stopMeterPulse();
@@ -412,8 +511,13 @@
             speakerNames: state.speakerNames,
         });
 
+        state.stopping = false;
+
         if (result?.ok) {
-            setStatus('idle', `Saved to ${result.filePath}`);
+            const prefix = state.crashed
+                ? `Recording interrupted (${state.crashed}) — saved to`
+                : 'Saved to';
+            setStatus('idle', `${prefix} ${result.filePath}`);
             stopBtn.classList.add('hidden');
             discardBtn.classList.remove('hidden');
             discardBtn.textContent = 'New recording';
@@ -426,7 +530,10 @@
         } else {
             setStatus('idle', `Save failed: ${result?.error || 'unknown'}`);
             stopBtn.disabled = false;
-            stopBtn.querySelector('span:last-child').textContent = 'Stop & save';
+            // After a crash there is nothing left to stop, so the button is a
+            // plain retry for the save that just failed.
+            stopBtn.querySelector('span:last-child').textContent =
+                state.crashed ? 'Save transcript' : 'Stop & save';
         }
     }
 
@@ -567,14 +674,21 @@
                 // the stop-button handler already drove the save flow.
                 break;
 
-            case 'exited':
-                if (state.running) {
-                    state.running = false;
-                    stopTimer();
-                    setStatus('idle', `Helper exited (code ${event.code})`);
-                    updateLiveRecordingIndicator();
-                }
+            case 'exited': {
+                // A normal Stop also lands here — main forwards the helper's
+                // exit before live:stop's promise resolves, so stopAndSave is
+                // still mid-flight with `running` set. That one is not a crash.
+                if (!state.running || state.stopping) break;
+
+                // The helper died on its own. The transcript is still entirely
+                // in `state.finalizedSegments` and live:saveTranscript doesn't
+                // need a live helper, so save it rather than stranding the user
+                // on a recording screen whose only button no longer does
+                // anything.
+                state.crashed = event.signal ? `signal ${event.signal}` : `code ${event.code}`;
+                stopAndSave();   // clears the timer, meter and running flag; sets the status
                 break;
+            }
         }
     });
 
@@ -799,10 +913,21 @@
         setupSection.classList.remove('hidden');
         recordingSection.classList.add('hidden');
         resetRecordingUI();
+        refreshMicStatus();
+        // The finished session's meeting data must not seed the next one:
+        // attendees fed its "Participants:" header line and the renames its
+        // speaker labels. Cleared here rather than in resetRecordingUI(), which
+        // also runs on Start — there it would wipe the pick for the session
+        // about to begin. The title is the refresh's business.
+        state.calendarParticipants = [];
+        state.speakerNames = {};
+        calPrefill?.refresh();
     }
 
     function resetRecordingUI() {
         state.finished = false;
+        state.crashed = null;
+        state.stopping = false;
         state.finalizedSegments = [];
         state.activePartials.clear();
         diarizationWarningShown = false;
