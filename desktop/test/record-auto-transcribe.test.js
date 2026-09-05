@@ -294,16 +294,23 @@ function sliceMainFunction(name) {
     throw new Error(`unbalanced braces while slicing ${name}()`);
 }
 
+// A real (long-enough) recording, as far as queueAutoTranscribe's own
+// fs.statSync size floor is concerned — these tests are about what reaches
+// `extra`, not the size gate itself (see test/record-auto-transcribe's
+// sibling assertions below for that).
+const fakeFsLongEnough = { statSync: () => ({ size: 1000 }) };
+
 test('queueAutoTranscribe submits a fixed large-v3 diarized job with participants', () => {
     // The renderer tests stop at the IPC boundary. This is the other end: the
     // only reason the participants parameter exists is that it reaches `extra`,
     // where runRecordTranscribeJob reads it for the "Participants:" header.
     const text = sliceMainFunction('queueAutoTranscribe');
     const submitted = [];
-    const make = new Function('queue', 'path', `${text}\nreturn queueAutoTranscribe;`);
+    const make = new Function('queue', 'path', 'fs', `${text}\nreturn queueAutoTranscribe;`);
     const fn = make(
         { submit: (type, key, opts) => { submitted.push({ type, key, opts }); return { id: 'j1' }; } },
         { basename: (p) => p.split('/').pop() },
+        fakeFsLongEnough,
     );
 
     fn('/rec/a.wav', 'sr', ['Ada', 'Grace']);
@@ -321,9 +328,10 @@ test('queueAutoTranscribe submits a fixed large-v3 diarized job with participant
 test('queueAutoTranscribe keeps live:saveTranscript\'s two-argument call working', () => {
     const text = sliceMainFunction('queueAutoTranscribe');
     const submitted = [];
-    const fn = new Function('queue', 'path', `${text}\nreturn queueAutoTranscribe;`)(
+    const fn = new Function('queue', 'path', 'fs', `${text}\nreturn queueAutoTranscribe;`)(
         { submit: (type, key, opts) => { submitted.push(opts); return { id: 'j1' }; } },
         { basename: (p) => p.split('/').pop() },
+        fakeFsLongEnough,
     );
     fn('/rec/live.wav', 'en');
     assert.deepStrictEqual(submitted[0].extra.participants, []);
@@ -331,14 +339,31 @@ test('queueAutoTranscribe keeps live:saveTranscript\'s two-argument call working
 
 test('queueAutoTranscribe defaults an absent language to detection, not Russian', () => {
     const submitted = [];
-    const fn = new Function('queue', 'path', `${sliceMainFunction('queueAutoTranscribe')}\nreturn queueAutoTranscribe;`)(
+    const fn = new Function('queue', 'path', 'fs', `${sliceMainFunction('queueAutoTranscribe')}\nreturn queueAutoTranscribe;`)(
         { submit: (type, key, opts) => { submitted.push(opts); return { id: 'j1' }; } },
         { basename: (p) => p.split('/').pop() },
+        fakeFsLongEnough,
     );
     // runRecordTranscribeJob's own fallback is 'ru'. Reaching it would transcribe
     // an unattended recording as Russian on the strength of a missing field.
     fn('/rec/a.wav', '');
     assert.strictEqual(submitted[0].extra.language, 'auto');
+});
+
+test('queueAutoTranscribe returns null (and never submits) for a 0-byte or too-short wav', () => {
+    const submitted = [];
+    const make = (statSync) => new Function('queue', 'path', 'fs', `${sliceMainFunction('queueAutoTranscribe')}\nreturn queueAutoTranscribe;`)(
+        { submit: (type, key, opts) => { submitted.push(opts); return { id: 'j1' }; } },
+        { basename: (p) => p.split('/').pop() },
+        { statSync },
+    );
+
+    assert.strictEqual(make(() => ({ size: 0 }))('/rec/empty.wav', 'en'), null);
+    assert.strictEqual(make(() => ({ size: 44 }))('/rec/header-only.wav', 'en'), null,
+        'exactly a WAV header, no audio, must not queue either');
+    assert.strictEqual(make(() => { throw new Error('ENOENT'); })('/rec/gone.wav', 'en'), null,
+        'a vanished file must not throw — just nothing to queue');
+    assert.strictEqual(submitted.length, 0, 'none of the above may reach queue.submit');
 });
 
 test('the IPC handler coerces a hostile participants value instead of forwarding it', () => {
@@ -347,6 +372,29 @@ test('the IPC handler coerces a hostile participants value instead of forwarding
     assert.ok(/Array\.isArray\(participants\)/.test(text), 'participants reaches the queue unchecked');
     assert.ok(/canReadPath\(filePath\)/.test(text), 'the path confinement check is gone');
     assert.ok(/process\.platform !== 'darwin'/.test(text), 'the platform gate is gone');
+});
+
+test('record:autoQueueTranscribe surfaces an error instead of throwing when queueAutoTranscribe returns null', () => {
+    // spec-robustness-config-writes.md: queueAutoTranscribe gained a size floor
+    // (returns null for a 0-byte/too-short wav) — this is the IPC handler on
+    // the other end of that, executed for real rather than just regex-checked,
+    // since a dropped `if (!job)` guard would otherwise throw on `job.id`
+    // (job undefined) and no test would catch it.
+    const marker = "ipcMain.handle('record:autoQueueTranscribe', ";
+    const at = MAIN.indexOf(marker);
+    assert.notStrictEqual(at, -1, 'record:autoQueueTranscribe handler not found in main.js');
+    const fnSrc = sliceBracesForTest(MAIN, at + marker.length);
+    const factory = new Function('process', 'canReadPath', 'queueAutoTranscribe', `return ${fnSrc};`);
+
+    const darwin = { platform: 'darwin' };
+    const handlerReturningNull = factory(darwin, () => true, () => null);
+    assert.deepStrictEqual(
+        handlerReturningNull(null, '/rec/empty.wav', 'en', []),
+        { ok: false, error: 'Recording is empty or too short to transcribe.' },
+    );
+
+    const handlerReturningJob = factory(darwin, () => true, () => ({ id: 'job1' }));
+    assert.deepStrictEqual(handlerReturningJob(null, '/rec/real.wav', 'en', []), { ok: true, jobId: 'job1' });
 });
 
 test("live:saveTranscript threads calendarParticipants into its own auto-queued re-transcription", () => {

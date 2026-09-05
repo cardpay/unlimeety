@@ -92,11 +92,12 @@ function makeSandbox(transcriptsFolder, recordingsFolder) {
         sliceFunction('sanitizeRecordingName'),
         sliceFunction('findRelatedAudioPaths'),
         sliceFunction('writeFileAtomic'),
+        sliceFunction('uniqueFilePath'),
     ].join('\n');
     const factory = new Function(
         'fs', 'path', 'process', 'console',
         'TRANSCRIPTS_FOLDER', 'RECORDINGS_FOLDER', 'allowedReadPaths', 'lastSelfWrite', 'spokenTurnsIndex',
-        `${src}\nreturn { isPathInside, canReadPath, canWritePath, findRelatedAudioPaths, writeFileAtomic, WHISPER_MODEL_RE };`,
+        `${src}\nreturn { isPathInside, canReadPath, canWritePath, findRelatedAudioPaths, writeFileAtomic, uniqueFilePath, WHISPER_MODEL_RE };`,
     );
     const allowedReadPaths = new Set();
     const box = factory(
@@ -212,6 +213,29 @@ test('canWritePath allows a new (not-yet-existing) file inside a managed folder'
     const target = path.join(TRANSCRIPTS, 'brand-new-file.txt');
     assert.strictEqual(fs.existsSync(target), false);
     assert.strictEqual(box.canWritePath(target), true);
+});
+
+test('canWritePath rejects a dangling symlink at a uniqueFilePath-picked path', () => {
+    // uniqueFilePath only ever calls fs.existsSync, which follows a symlink to
+    // its target — a dangling one (target since deleted) reports false, so
+    // uniqueFilePath hands back the same colliding name as "free". canWritePath
+    // must independently refuse it via lstatSync, which sees the symlink node
+    // itself whether or not its target still exists.
+    const target = path.join(TRANSCRIPTS, 'dangling-target.txt');
+    fs.writeFileSync(target, 'x');
+    const link = path.join(TRANSCRIPTS, 'dangling-link.txt');
+    fs.symlinkSync(target, link);
+    fs.unlinkSync(target); // now dangling
+    try {
+        assert.strictEqual(fs.existsSync(link), false,
+            'existsSync follows the symlink and reports false for a dangling link — this is the trap');
+        const picked = box.uniqueFilePath(TRANSCRIPTS, 'dangling-link', '.txt');
+        assert.strictEqual(picked, link, 'uniqueFilePath, keyed only on existsSync, treats the dangling link as free');
+        assert.strictEqual(box.canWritePath(picked), false,
+            'a dangling symlink must still be refused as a write target');
+    } finally {
+        fs.unlinkSync(link);
+    }
 });
 
 // ─── writeFileAtomic ─────────────────────────────────────────────────────────

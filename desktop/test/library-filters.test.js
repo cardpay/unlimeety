@@ -762,8 +762,14 @@ assert.ok(catchBranch, 'the per-file row builder has no catch branch any more');
 // The returned object literal, not the branch text: computing the flag into a
 // local and then forgetting to return it is exactly the mutation that left the
 // To enhance chip dead with the suite green.
-const returned = (branch, what) => sliceBraces(branch, branch.indexOf('return {'), `${what} return`);
-const successReturn = returned(successBranch, 'success');
+//
+// The success branch now has TWO `return {` sites — spec-robustness-
+// config-writes.md's size-cap early return (skips the body read for a huge
+// transcript) fires before the real row-builder further down — so this must
+// take the LAST one, not the first, to land on the real success return.
+const returned = (branch, what, occurrence = 'first') =>
+    sliceBraces(branch, occurrence === 'last' ? branch.lastIndexOf('return {') : branch.indexOf('return {'), `${what} return`);
+const successReturn = returned(successBranch, 'success', 'last');
 const catchReturn = returned(catchBranch, 'catch');
 
 for (const field of ['hasSpokenTurns,', 'readFailed: false']) {

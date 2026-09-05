@@ -299,6 +299,70 @@ async function main() {
         assert.strictEqual(statusOf(queue, lastId), 'done', 'the most recently settled job must survive');
     }
 
+    // ─── result.content survives the terminal broadcast, then is stripped ────
+    {
+        const queue = createJobQueue();
+        const pending = new Map();
+        queue.registerLane('enhance', {
+            run: (job) => {
+                const d = deferred();
+                pending.set(job.id, d);
+                return d.promise;
+            },
+        });
+        let progressUpdate;
+        queue.registerLane('transcribe', {
+            run: (job, update) => {
+                progressUpdate = update;
+                return new Promise(() => {}); // never settles in this test
+            },
+        });
+
+        const broadcasts = [];
+        queue.onChange((jobs) => broadcasts.push(jobs));
+
+        const e1 = queue.submit('enhance', '/1.txt');
+        pending.get(e1.id).resolve({ ok: true, content: 'full transcript text' });
+        await flush();
+
+        const terminalRow = broadcasts[broadcasts.length - 1].find((j) => j.id === e1.id);
+        assert.strictEqual(terminalRow.result.content, 'full transcript text',
+            'the broadcast at the transition to terminal must still carry content');
+
+        // An unrelated job's progress tick re-broadcasts every job, e1 included —
+        // its content must be gone by then.
+        queue.submit('transcribe', '/2.wav');
+        progressUpdate({ done: 1, total: 4 });
+        const laterRow = broadcasts[broadcasts.length - 1].find((j) => j.id === e1.id);
+        assert.strictEqual(laterRow.result.content, undefined,
+            'a later, unrelated broadcast must not keep re-serializing the full content');
+        assert.strictEqual(laterRow.result.ok, true, 'stripping content must not drop the rest of the result');
+    }
+
+    // ─── cancel() on a lane whose registered cancel throws does not throw itself ─
+    {
+        const queue = createJobQueue();
+        const pending = new Map();
+        queue.registerLane('enhance', {
+            run: (job) => {
+                const d = deferred();
+                pending.set(job.id, d);
+                return d.promise;
+            },
+            cancel: () => { throw new Error('boom'); },
+        });
+        const j1 = queue.submit('enhance', '/1.txt');
+        assert.doesNotThrow(() => queue.cancel(j1.id));
+        const job1 = queue.list().find((j) => j.id === j1.id);
+        assert.strictEqual(job1.canceling, true,
+            "the job must still be marked canceling even though the lane's cancel() threw");
+        assert.strictEqual(job1.status, 'running');
+
+        pending.get(j1.id).resolve({ ok: false, canceled: true });
+        await flush();
+        assert.strictEqual(statusOf(queue, j1.id), 'canceled');
+    }
+
     console.log('job-queue: all checks passed');
 }
 

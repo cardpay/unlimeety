@@ -32,6 +32,12 @@ queue.onChange((jobs) => {
 // working; runRecordTranscribeJob is what sanitises and merges it into the
 // transcript's "Participants:" line.
 function queueAutoTranscribe(filePath, language, participants = []) {
+    let stat;
+    try { stat = fs.statSync(filePath); } catch { return null; } // vanished — nothing to queue
+    // stat.isFile may be absent from a test double — only ever enforced when
+    // a real fs.Stats (always has it) is what got returned.
+    if (stat.isFile && !stat.isFile()) return null; // e.g. a directory — nothing to transcribe
+    if (stat.size <= 44) return null; // 0 bytes, or shorter than a WAV header
     return queue.submit('transcribe', filePath, {
         title: path.basename(filePath),
         extra: {
@@ -65,15 +71,71 @@ function configPath() {
 }
 
 function readConfig() {
+    const target = configPath();
+    let raw;
     try {
-        return JSON.parse(fs.readFileSync(configPath(), 'utf-8'));
+        raw = fs.readFileSync(target, 'utf-8');
     } catch {
+        return {}; // first run, or otherwise unreadable — nothing to recover
+    }
+    try {
+        return JSON.parse(raw);
+    } catch {
+        // Corrupt — most likely a crash mid-write from before writeConfig moved
+        // onto writeFileAtomic. Preserved, not deleted: renamed to a fixed name
+        // so a second corruption overwrites the first rather than piling up,
+        // and so the very next readConfig() call sees a clean ENOENT instead of
+        // re-parsing the same bad bytes. Never written back to `target` itself —
+        // the caller gets an in-memory {} only.
+        //
+        // The old .corrupt (if any) is unlinked first: fs.renameSync silently
+        // replaces an existing destination on POSIX, but throws EEXIST/EPERM on
+        // Windows instead — without this, a second corruption on Windows would
+        // leave `target` unmoved and re-trigger this same branch (dialog
+        // included) on every future readConfig() call, forever.
+        try {
+            fs.unlinkSync(`${target}.corrupt`);
+        } catch { /* no earlier corrupt snapshot */ }
+        try {
+            fs.renameSync(target, `${target}.corrupt`);
+        } catch {
+            // Renamed failed for some OTHER reason (locked file, permissions) —
+            // as a last resort just clear `target` itself, even without a
+            // recovery copy: leaving it in place is worse, since every future
+            // readConfig() would re-parse the same bad bytes and re-show this
+            // same dialog forever.
+            try { fs.unlinkSync(target); } catch { /* nothing more to try */ }
+        }
+        dialog.showErrorBox(
+            'Settings file was corrupted',
+            'Your settings could not be read and were reset to defaults. The original file was saved as config.json.corrupt.',
+        );
         return {};
     }
 }
 
 function writeConfig(data) {
-    fs.writeFileSync(configPath(), JSON.stringify(data, null, 2), 'utf-8');
+    writeFileAtomic(configPath(), JSON.stringify(data, null, 2));
+}
+
+// Node's fs/spawn error messages carry the absolute path verbatim
+// (`ENOENT: no such file or directory, open '/Users/name/Downloads/…'`) —
+// fine in a terminal, not fine surfaced verbatim in a renderer-facing error
+// string. Strips the quoted path and the syscall name left dangling right
+// before it; a message with no such quote (a provider error, a plain thrown
+// string) is returned untouched.
+// Only Node's own errno-shaped messages ("ENOENT: no such file or directory,
+// open '/Users/…'") get their path stripped — gated on that exact shape
+// (CODE: reason, syscall '…) rather than "any message with a quote in it", so
+// an unrelated thrown error (e.g. a TypeError whose message happens to read
+// "reading 'foo'") is returned untouched instead of truncated mid-sentence.
+const NODE_ERRNO_MESSAGE_RE = /^[A-Z][A-Z0-9]+:.+,\s+\w+\s+'/;
+function describeFsError(err) {
+    const msg = String(err?.message ?? err);
+    if (!NODE_ERRNO_MESSAGE_RE.test(msg)) return msg;
+    const quoteAt = msg.indexOf(" '");
+    if (quoteAt === -1) return msg;
+    return msg.slice(0, quoteAt).replace(/,\s*\w+$/, '');
 }
 
 let mainWindow = null;
@@ -316,6 +378,30 @@ app.on('before-quit', (e) => {
     });
 });
 
+// A synchronous throw or a rejected promise that nobody awaited would
+// otherwise crash the process outright — losing a mid-recording Live/Record
+// session exactly like the crash the flush above exists to survive. (Modern
+// Node's own default for an unhandled rejection is already to crash exactly
+// like an uncaught exception — this does not newly expose an app that used to
+// just log a warning and carry on; it gives that same crash a chance to flush
+// first.) Routed through app.quit() so it re-enters that same before-quit
+// handler instead of adding a second, parallel shutdown path.
+let fatalErrorHandled = false;
+function handleFatalError(err) {
+    console.error('Fatal error:', err);
+    if (fatalErrorHandled) return; // already quitting — a second one is a no-op
+    fatalErrorHandled = true;
+    app.quit();
+    // Backstop: if this app.quit() doesn't lead anywhere (the flush hangs
+    // past its own QUIT_FLUSH_TIMEOUT_MS for some reason that timeout itself
+    // doesn't catch, or something later vetoes the quit outright), a process
+    // that just proved it can throw arbitrarily should not be left running
+    // indefinitely on the strength of one unconfirmed app.quit() call.
+    setTimeout(() => { process.exit(1); }, QUIT_FLUSH_TIMEOUT_MS + 5000).unref();
+}
+process.on('uncaughtException', handleFatalError);
+process.on('unhandledRejection', handleFatalError);
+
 function createWindow() {
     mainWindow = new BrowserWindow({
         width: 1200,
@@ -553,10 +639,10 @@ function writeTranscriptFile(filePath, content) {
         return { ok: false, error: 'Refusing to write to a path outside the managed folders.' };
     }
     try {
-        fs.writeFileSync(target, content, 'utf-8');
-        // Stamped after the write, not before: writeFileSync blocks until the
-        // data is out, and the watcher event can only arrive afterwards. Timing
-        // it from before would spend the suppression window on the write itself
+        writeFileAtomic(target, content);
+        // Stamped after the write, not before: the write blocks until the data
+        // is out, and the watcher event can only arrive afterwards. Timing it
+        // from before would spend the suppression window on the write itself
         // — worst on exactly the large notes where the re-read hurts most.
         stampSelfWrite(target);
         currentFilePath = target;
@@ -565,7 +651,7 @@ function writeTranscriptFile(filePath, content) {
         app.addRecentDocument(target);
         return { ok: true, filePath: target };
     } catch (err) {
-        return { ok: false, error: err.message };
+        return { ok: false, error: describeFsError(err) };
     }
 }
 
@@ -581,7 +667,7 @@ ipcMain.on('file:saveSync', (e, filePath, content) => {
     try {
         e.returnValue = writeTranscriptFile(filePath, content);
     } catch (err) {
-        e.returnValue = { ok: false, error: err.message };
+        e.returnValue = { ok: false, error: describeFsError(err) };
     }
 });
 
@@ -602,7 +688,7 @@ ipcMain.handle('file:saveAs', async (_e, content) => {
     const filePath = await handleSaveAs(content);
     if (!filePath) return { ok: false, canceled: true };
     try {
-        fs.writeFileSync(filePath, content, 'utf-8');
+        writeFileAtomic(filePath, content);
         registerReadablePath(filePath); // user-picked target: allow follow-up saves
         currentFilePath = filePath;
         isDirty = false;
@@ -610,7 +696,7 @@ ipcMain.handle('file:saveAs', async (_e, content) => {
         app.addRecentDocument(filePath);
         return { ok: true, filePath };
     } catch (err) {
-        return { ok: false, error: err.message };
+        return { ok: false, error: describeFsError(err) };
     }
 });
 
@@ -655,7 +741,7 @@ ipcMain.handle('export:pdf', async (_e, html, defaultName) => {
         registerReadablePath(result.filePath); // user-picked target: allow showInFinder
         return { ok: true, filePath: result.filePath };
     } catch (err) {
-        return { ok: false, error: err.message };
+        return { ok: false, error: describeFsError(err) };
     }
 });
 
@@ -741,7 +827,7 @@ ipcMain.handle('export:docx', async (_e, payload) => {
         registerReadablePath(result.filePath); // user-picked target: allow showInFinder
         return { ok: true, filePath: result.filePath };
     } catch (err) {
-        return { ok: false, error: err.message };
+        return { ok: false, error: describeFsError(err) };
     }
 });
 
@@ -837,25 +923,29 @@ function dateFirstSummaryBase(transcriptPath, info, mtimeMs) {
     return `${formatDateDdMmYy(transcriptPath, mtimeMs)} ${shortName}`;
 }
 
-function readTranscriptInfoSync(transcriptPath) {
+// `preReadHead` lets a caller that already has the first ~512 bytes on hand
+// (transcripts:list, reading every file in the folder once already) skip a
+// second fs.readFileSync of the same file — every other call site passes only
+// `transcriptPath` and reads from disk exactly as before.
+function readTranscriptInfoSync(transcriptPath, preReadHead) {
     let info = { title: null, generated: null, language: null, participants: [] };
     let mtimeMs = Date.now();
     try {
         const stat = fs.statSync(transcriptPath);
         mtimeMs = stat.mtime.getTime();
-        const head = fs.readFileSync(transcriptPath, 'utf-8').slice(0, 512);
+        const head = preReadHead != null ? preReadHead : fs.readFileSync(transcriptPath, 'utf-8').slice(0, 512);
         info = parseTranscriptHeaderMain(head);
     } catch { /* fall back to defaults */ }
     return { info, mtimeMs };
 }
 
-function summaryFilePath(transcriptPath, folderOverride) {
+function summaryFilePath(transcriptPath, folderOverride, preReadHead) {
     const cfg = readConfig();
     const dir = folderOverride ?? cfg.summaryFolder ?? path.dirname(transcriptPath);
     const rawOverride = cfg.summaryNames?.[transcriptPath];
     const safeOverride = rawOverride ? sanitizeSummaryBase(rawOverride) : null;
     if (safeOverride) return path.join(dir, safeOverride + '.summary.md');
-    const { info, mtimeMs } = readTranscriptInfoSync(transcriptPath);
+    const { info, mtimeMs } = readTranscriptInfoSync(transcriptPath, preReadHead);
     return path.join(dir, defaultSummaryBase(transcriptPath, info, mtimeMs) + '.summary.md');
 }
 
@@ -888,14 +978,14 @@ function isSummaryOutdated(summaryPath, transcriptMtimeMs) {
     catch { return false; }
 }
 
-function findExistingSummaryPath(transcriptPath, folderOverride) {
+function findExistingSummaryPath(transcriptPath, folderOverride, preReadHead) {
     const cfg = readConfig();
     const dir = folderOverride ?? cfg.summaryFolder ?? path.dirname(transcriptPath);
     const candidates = [];
     const rawOverride = cfg.summaryNames?.[transcriptPath];
     const safeOverride = rawOverride ? sanitizeSummaryBase(rawOverride) : null;
     if (safeOverride) candidates.push(path.join(dir, safeOverride + '.summary.md'));
-    const { info, mtimeMs } = readTranscriptInfoSync(transcriptPath);
+    const { info, mtimeMs } = readTranscriptInfoSync(transcriptPath, preReadHead);
     candidates.push(path.join(dir, defaultSummaryBase(transcriptPath, info, mtimeMs) + '.summary.md'));
     candidates.push(path.join(dir, titleFirstDottedSummaryBase(transcriptPath, info, mtimeMs) + '.summary.md'));
     candidates.push(path.join(dir, dateFirstSummaryBase(transcriptPath, info, mtimeMs) + '.summary.md'));
@@ -1007,7 +1097,7 @@ ipcMain.handle('summary:save', (_e, transcriptPath, text, folder) => {
         registerReadablePath(filePath); // summary may live outside managed folders
         return { ok: true, filePath, warning: frontmatterWarning(text) };
     } catch (err) {
-        return { ok: false, error: err.message };
+        return { ok: false, error: describeFsError(err) };
     }
 });
 
@@ -1025,7 +1115,7 @@ ipcMain.handle('summary:overwrite', (_e, transcriptPath, text, folder) => {
         registerReadablePath(filePath); // summary may live outside managed folders
         return { ok: true, filePath, warning: frontmatterWarning(text) };
     } catch (err) {
-        return { ok: false, error: err.message };
+        return { ok: false, error: describeFsError(err) };
     }
 });
 
@@ -1051,7 +1141,7 @@ ipcMain.handle('summary:load', (_e, transcriptPath, folder) => {
         if (!p) return { ok: false };
         return { ok: true, text: fs.readFileSync(p, 'utf-8') };
     } catch (err) {
-        return { ok: false, error: err.message };
+        return { ok: false, error: describeFsError(err) };
     }
 });
 
@@ -1348,15 +1438,23 @@ function spawnClaude(claudePath, args, content, promptInstruction, extendedPath,
         // untrusted string passed as an argument would be an argument/command-
         // injection vector. With only constant flags in argv there's nothing for
         // the shell to abuse.
-        const proc = spawn(claudePath, args, {
-            env: { ...process.env, PATH: extendedPath, HOME: os.homedir() },
-            // A folder with no CLAUDE.md/.claude/.mcp.json of its own — the child
-            // still inherits HOME (for auth), but nothing walks up from `cwd`
-            // looking for project-level config to auto-load.
-            cwd: app.getPath('userData'),
-            stdio: ['pipe', 'pipe', 'pipe'],
-            shell: process.platform === 'win32',
-        });
+        const proc = spawn(
+            // Quoted only on Windows, where shell:true below means this string
+            // is parsed by cmd.exe — unquoted, a claude.cmd path containing a
+            // space (e.g. under "Program Files") mis-parses as two arguments.
+            // args stay bare: they are constant flags, never attacker-controlled.
+            process.platform === 'win32' ? `"${claudePath}"` : claudePath,
+            args,
+            {
+                env: { ...process.env, PATH: extendedPath, HOME: os.homedir() },
+                // A folder with no CLAUDE.md/.claude/.mcp.json of its own — the child
+                // still inherits HOME (for auth), but nothing walks up from `cwd`
+                // looking for project-level config to auto-load.
+                cwd: app.getPath('userData'),
+                stdio: ['pipe', 'pipe', 'pipe'],
+                shell: process.platform === 'win32',
+            },
+        );
 
         // The abort handle exists the instant the child does. If the caller asked
         // to cancel before this point (e.g. while findClaude() above was still
@@ -1393,7 +1491,7 @@ function spawnClaude(claudePath, args, content, promptInstruction, extendedPath,
         proc.on('error', (err) => {
             clearTimeout(timer);
             if (canceled) { resolve({ ok: false, canceled: true }); return; }
-            resolve({ ok: false, error: err.message });
+            resolve({ ok: false, error: describeFsError(err) });
         });
     });
 }
@@ -2078,10 +2176,20 @@ function cachedHasSpokenTurns(filePath, mtime, raw) {
     }
 }
 
+// Above this, a full read (plus decoding/parsing it) risks the same OOM the
+// waveform decoder guards against, just to describe one library row — the
+// row can still carry real hasAudio/audioPaths (mergeMeetings' de-dup depends
+// on them), which need only the filename, not the body.
+const TRANSCRIPT_LIST_MAX_READ_BYTES = 20 * 1024 * 1024;
+
 ipcMain.handle('transcripts:list', () => {
     try {
         if (!fs.existsSync(TRANSCRIPTS_FOLDER)) return [];
         const listed = new Set();
+        // Read once for the whole call rather than once per file — every
+        // findRelatedAudioPaths call below reuses this same listing.
+        let recordingFiles;
+        try { recordingFiles = fs.readdirSync(RECORDINGS_FOLDER); } catch { recordingFiles = []; }
         const items = fs.readdirSync(TRANSCRIPTS_FOLDER)
             .filter(f => {
                 if (!f.endsWith('.txt')) return false;
@@ -2095,18 +2203,46 @@ ipcMain.handle('transcripts:list', () => {
                 const stat = fs.statSync(filePath);
                 listed.add(filePath);
                 try {
+                    if (stat.size > TRANSCRIPT_LIST_MAX_READ_BYTES) {
+                        // '' , not null: null fails findRelatedAudioPaths' own
+                        // `preReadHead != null` check and sends it straight
+                        // into fs.readFileSync(transcriptPath) — reading the
+                        // whole oversized file right back in, defeating this
+                        // branch's entire reason to exist. An empty head just
+                        // means "no Source: header seen", which is the honest
+                        // answer for a file this branch deliberately never reads.
+                        const audioPaths = findRelatedAudioPaths(filePath, '', recordingFiles);
+                        return {
+                            filename: f, filePath,
+                            createdAt: stat.birthtimeMs || stat.mtimeMs,
+                            mtime: stat.mtimeMs,
+                            hasSummary: false, hasAudio: audioPaths.length > 0, hasSpokenTurns: false, readFailed: true,
+                            title: f, generated: null, participants: [],
+                            audioPath: audioPaths[0] || null, audioPaths,
+                        };
+                    }
                     const raw = fs.readFileSync(filePath, 'utf-8');
-                    const blankIdx = raw.indexOf('\n\n');
-                    const head = blankIdx >= 0 ? raw.slice(0, blankIdx) : raw;
+                    // \r\n-terminated transcripts (Windows-authored, or pasted from
+                    // one) never contain a bare '\n\n' — indexOf('\n\n') then never
+                    // matches and the whole file becomes "the header".
+                    const blankMatch = raw.match(/\r?\n\r?\n/);
+                    // A file under the size cap but with no blank line ANYWHERE
+                    // (malformed/pasted-without-a-header) used to make `head`
+                    // the entire body — parsed as "the header" and, worse, sent
+                    // to the renderer verbatim as `header:` on every list call.
+                    // Bounded here; the blankMatch-found case is left as-is (a
+                    // legitimately long header/participant list must not be
+                    // truncated).
+                    const head = blankMatch ? raw.slice(0, blankMatch.index) : raw.slice(0, 8192);
                     const info = parseTranscriptHeaderMain(head);
                     const recordedAtMs = info.recordedAt ? Date.parse(info.recordedAt) : NaN;
                     const createdAt = Number.isFinite(recordedAtMs)
                         ? recordedAtMs
                         : (stat.birthtimeMs || stat.mtimeMs);
-                    const summaryPath = findExistingSummaryPath(filePath);
+                    const summaryPath = findExistingSummaryPath(filePath, null, head);
                     const hasSummary = summaryPath !== null;
                     const summaryOutdated = hasSummary && isSummaryOutdated(summaryPath, stat.mtimeMs);
-                    const audioPaths = findRelatedAudioPaths(filePath);
+                    const audioPaths = findRelatedAudioPaths(filePath, head, recordingFiles);
                     const hasAudio = audioPaths.length > 0;
                     // Computed here because the renderer never holds the body of
                     // a meeting it has not opened. Cached, own try.
@@ -2141,11 +2277,14 @@ ipcMain.handle('transcripts:list', () => {
                 }
             })
             .sort((a, b) => b.createdAt - a.createdAt);
-        // Deleted, renamed and moved-away files leave the index otherwise: a long
-        // session would grow it forever, and a path that comes back reused could
-        // be served the previous file's flag.
+        // Deleted, renamed and moved-away files leave both indices otherwise: a
+        // long session would grow them forever, and a path that comes back
+        // reused could be served the previous file's flag/content.
         for (const key of spokenTurnsIndex.keys()) {
             if (!listed.has(key)) spokenTurnsIndex.delete(key);
+        }
+        for (const key of contentIndex.keys()) {
+            if (!listed.has(key)) contentIndex.delete(key);
         }
         return items;
     } catch {
@@ -2245,12 +2384,17 @@ ipcMain.handle('transcripts:watch', () => {
 // for collisions); transcripts derive their base from the same sanitized
 // title. We match defensively — exact base, or base followed by " (n)", then
 // a "-" before the timestamp.
-function findRelatedAudioPaths(transcriptPath) {
+// `preReadHead`/`preReadRecordingFiles` let a caller that already has the
+// transcript's head and/or RECORDINGS_FOLDER's directory listing on hand
+// (transcripts:list, once per call) skip a second read of either — every
+// other call site passes only `transcriptPath` and reads both from disk
+// exactly as before.
+function findRelatedAudioPaths(transcriptPath, preReadHead, preReadRecordingFiles) {
     try {
         const paths = [];
         // Source: field in transcript header — most reliable, use first
         try {
-            const head = fs.readFileSync(transcriptPath, 'utf-8').slice(0, 512);
+            const head = preReadHead != null ? preReadHead : fs.readFileSync(transcriptPath, 'utf-8').slice(0, 512);
             const info = parseTranscriptHeaderMain(head);
             // A transcript's Source: line is attacker-controlled content (the
             // file can be pasted, planted by the extension, or hand-edited) —
@@ -2265,16 +2409,25 @@ function findRelatedAudioPaths(transcriptPath) {
             ) paths.push(info.source);
         } catch { /* ignore */ }
 
-        if (!fs.existsSync(RECORDINGS_FOLDER)) return paths;
+        let recordingFiles = preReadRecordingFiles;
+        if (recordingFiles == null) {
+            if (!fs.existsSync(RECORDINGS_FOLDER)) return paths;
+            recordingFiles = fs.readdirSync(RECORDINGS_FOLDER);
+        }
         const stem = path.basename(transcriptPath, path.extname(transcriptPath));
-        // New format: transcript stem matches the WAV stem exactly
+        // New format: transcript stem matches the WAV stem exactly. A real
+        // existsSync, not recordingFiles.includes(): the directory listing
+        // carries a dangling symlink's name too, and existsSync (which
+        // resolves it) is what keeps a broken link from being reported as a
+        // playable recording — the one check here that isn't about avoiding a
+        // second readdirSync in the first place.
         const direct = path.join(RECORDINGS_FOLDER, `${stem}.wav`);
         if (fs.existsSync(direct) && !paths.includes(direct)) paths.push(direct);
         // Legacy format: "<stem>-YYYYMMDD-HHMMSS.wav" with optional " (N)"
         const sanitized = sanitizeRecordingName(stem);
         const esc = sanitized.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const re = new RegExp(`^${esc}(?:\\s+\\(\\d+\\))?-\\d{8}-\\d{6}(?:-\\d+)?\\.wav$`, 'i');
-        for (const f of fs.readdirSync(RECORDINGS_FOLDER)) {
+        for (const f of recordingFiles) {
             if (!re.test(f)) continue;
             const p = path.join(RECORDINGS_FOLDER, f);
             if (!paths.includes(p)) paths.push(p);
@@ -2332,7 +2485,18 @@ ipcMain.handle('transcripts:delete', async (_e, filePath) => {
         // a successful delete does have to take it.
         if (tryUnlink(a)) removeNotesSidecar(a);
     }
-    tryUnlink(filePath);
+    const deleted = tryUnlink(filePath);
+    // Only once the transcript is actually gone: a custom summary name is
+    // keyed on this exact path, and dropping it on a failed delete would hand
+    // a future transcript that happens to land on the identical path someone
+    // else's inherited custom name.
+    if (deleted) {
+        const cfg = readConfig();
+        if (cfg.summaryNames && Object.prototype.hasOwnProperty.call(cfg.summaryNames, filePath)) {
+            delete cfg.summaryNames[filePath];
+            writeConfig(cfg);
+        }
+    }
 
     if (errors.length) return { ok: false, error: errors.join('; ') };
     return { ok: true };
@@ -2371,7 +2535,7 @@ ipcMain.handle('transcripts:deleteTranscriptOnly', async (_e, filePath) => {
         fs.unlinkSync(filePath);
         return { ok: true };
     } catch (err) {
-        return { ok: false, error: err.message };
+        return { ok: false, error: describeFsError(err) };
     }
 });
 
@@ -2397,7 +2561,7 @@ ipcMain.handle('transcripts:deleteSummaryOnly', async (_e, filePath) => {
         fs.unlinkSync(summaryPath);
         return { ok: true };
     } catch (err) {
-        return { ok: false, error: err.message };
+        return { ok: false, error: describeFsError(err) };
     }
 });
 
@@ -2472,11 +2636,14 @@ ipcMain.handle('transcripts:create', async (_e, payload) => {
             fs.mkdirSync(TRANSCRIPTS_FOLDER, { recursive: true });
         }
         const filePath = uniqueFilePath(TRANSCRIPTS_FOLDER, sanitizeFilenameBase(title), '.txt');
-        fs.writeFileSync(filePath, content, 'utf-8');
+        if (!canWritePath(filePath)) {
+            return { ok: false, error: 'Refusing to write to a path outside the managed folders.' };
+        }
+        writeFileAtomic(filePath, content);
         app.addRecentDocument(filePath);
         return { ok: true, filePath };
     } catch (err) {
-        return { ok: false, error: err.message };
+        return { ok: false, error: describeFsError(err) };
     }
 });
 
@@ -2502,7 +2669,27 @@ const GLOSSARY_SCAN_CHARS = 40000;
 // Enhance is deliberately not a quit-flush slot (see before-quit): it holds
 // nothing that must be saved — the file is written only at the end — so quitting
 // mid-run costs model time, not data. Cancelling just stops the next call.
-app.on('before-quit', () => { enhanceCancelled = true; });
+//
+// True only once 'will-quit' actually fires — mirrors mainWindow's own close
+// guard, which gates its own prevention on the same real-quit signal.
+let quitReallyHappening = false;
+let enhanceCancelledResetTimer = null;
+app.on('will-quit', () => { quitReallyHappening = true; });
+app.on('before-quit', () => {
+    enhanceCancelled = true;
+    // A before-quit that never reaches will-quit (this same flush's own
+    // QUIT_FLUSH_TIMEOUT_MS race resolves without a real quit, or a later
+    // before-quit handler vetoes it outright) must not leave Enhance
+    // permanently disabled for the rest of the process's life. The previous
+    // timer is cleared first: a second before-quit (the user mashing Cmd+Q
+    // again while the first attempt is still flushing) must not let an OLDER,
+    // shorter-lived timer reset the flag out from under a still-in-progress
+    // later attempt.
+    clearTimeout(enhanceCancelledResetTimer);
+    enhanceCancelledResetTimer = setTimeout(() => {
+        if (!quitReallyHappening) enhanceCancelled = false;
+    }, QUIT_FLUSH_TIMEOUT_MS + 2000);
+});
 
 // Every enhance job — user-clicked or auto-chained after a transcribe (see
 // runRecordTranscribeJob's return) — runs through the queue, so it always has
@@ -2768,7 +2955,7 @@ async function runEnhanceJob(filePath, sender) {
             namedSpeakers, speakerNamingFailed, changed: proofread !== original, content: updated,
         };
     } catch (err) {
-        return { ok: false, error: err.message };
+        return { ok: false, error: describeFsError(err) };
     } finally {
         enhanceCancelled = false;
         if (!sender.isDestroyed()) sender.off('did-start-navigation', stopOnGone);
@@ -2780,9 +2967,45 @@ queue.registerLane('enhance', {
     cancel: () => { enhanceCancelled = true; },
 });
 
+// A confirmation-worthy transcript rarely needs re-checking every submit —
+// this is a fixed threshold, not a setting, chosen once, here.
+const ENHANCE_CONFIRM_CHUNKS = 200;
+
+// ~3000 chars/chunk (transcript-enhance.js's DEFAULT_CHUNK_CHARS) puts the
+// 200-chunk confirm line around 600 KB; comfortably above that, a file is
+// going to ask for confirmation no matter how its actual turns are chunked,
+// so the precheck below estimates from size instead of parsing it — this
+// precheck must never itself be the thing that freezes the UI on a huge file.
+const ENHANCE_PRECHECK_PARSE_CAP = 2 * 1024 * 1024;
+
 // Submits and returns immediately — the result (including the updated
-// content, for the in-editor reload) arrives via `queue:changed`.
-ipcMain.handle('transcripts:enhance', (_e, filePath) => {
+// content, for the in-editor reload) arrives via `queue:changed`. `confirmed`
+// lets the renderer skip the chunk-count check once the user has already
+// seen and accepted it.
+ipcMain.handle('transcripts:enhance', (_e, filePath, confirmed) => {
+    // Same gate runEnhanceJob itself applies before ever reading the file —
+    // this precheck reads too, so it needs the identical guard, not just the
+    // real run. Any path that fails it just skips straight to submit, where
+    // runEnhanceJob rejects it exactly as it already does today.
+    if (
+        !confirmed && typeof filePath === 'string' && isPathInside(filePath, TRANSCRIPTS_FOLDER)
+        && path.extname(filePath).toLowerCase() === '.txt' && canReadPath(filePath)
+    ) {
+        try {
+            const stat = fs.statSync(filePath);
+            const chunks = stat.size > ENHANCE_PRECHECK_PARSE_CAP
+                ? Math.ceil(stat.size / 3000)
+                : enhance.chunkBlocks(
+                    enhance.spokenTargets(
+                        enhance.parseBlocks(enhance.splitTranscript(fs.readFileSync(filePath, 'utf-8')).body),
+                        NOTE_LABEL,
+                    ),
+                ).length;
+            if (chunks > ENHANCE_CONFIRM_CHUNKS) {
+                return { ok: false, needsConfirmation: true, chunks };
+            }
+        } catch { /* fall through to the normal submit — the real run surfaces this the same way */ }
+    }
     const job = queue.submit('enhance', filePath, { title: path.basename(filePath) });
     return { ok: true, jobId: job.id };
 });
@@ -2820,8 +3043,14 @@ ipcMain.handle('transcripts:rename', async (_e, filePath, newTitle) => {
         const newStem = path.basename(newPath, '.txt');
         const directAudio = path.join(RECORDINGS_FOLDER, `${oldStem}.wav`);
         if (fs.existsSync(directAudio)) {
-            const newAudioPath = path.join(RECORDINGS_FOLDER, `${newStem}.wav`);
-            if (!fs.existsSync(newAudioPath)) {
+            // A plain "already taken → skip" left the wav under its old name,
+            // silently desyncing it from the transcript it belongs to — bump to
+            // a unique name instead, so the rename always actually happens.
+            let newAudioPath = path.join(RECORDINGS_FOLDER, `${newStem}.wav`);
+            if (newAudioPath !== directAudio && fs.existsSync(newAudioPath)) {
+                newAudioPath = uniqueFilePath(RECORDINGS_FOLDER, newStem, '.wav');
+            }
+            if (newAudioPath !== directAudio) {
                 fs.renameSync(directAudio, newAudioPath);
                 // Same reason as record:rename — the sidecar is keyed on the
                 // wav stem, so renaming the meeting here would otherwise strand
@@ -2834,15 +3063,18 @@ ipcMain.handle('transcripts:rename', async (_e, filePath, newTitle) => {
             const { mtimeMs } = readTranscriptInfoSync(newPath);
             const newSummaryBase = defaultSummaryBase(newPath, { title: trimmed }, mtimeMs);
             const summaryDir = path.dirname(oldSummaryPath);
-            const newSummaryPath = path.join(summaryDir, newSummaryBase + '.summary.md');
-            if (newSummaryPath !== oldSummaryPath && !fs.existsSync(newSummaryPath)) {
+            let newSummaryPath = path.join(summaryDir, newSummaryBase + '.summary.md');
+            if (newSummaryPath !== oldSummaryPath && fs.existsSync(newSummaryPath)) {
+                newSummaryPath = uniqueFilePath(summaryDir, newSummaryBase, '.summary.md');
+            }
+            if (newSummaryPath !== oldSummaryPath) {
                 fs.renameSync(oldSummaryPath, newSummaryPath);
             }
         }
 
         return { ok: true, newFilePath: newPath };
     } catch (err) {
-        return { ok: false, error: err.message };
+        return { ok: false, error: describeFsError(err) };
     }
 });
 
@@ -2854,7 +3086,6 @@ const live = {
     proc: null,
     segments: [],   // finalized segments, collected during a session
     stdoutBuf: '',
-    stderrBuf: '',
     // When the renderer kicks off a Live session, we compute a WAV path under
     // RECORDINGS_FOLDER (same naming convention as the Record tab) and tell
     // the Swift helper to tee audio there in addition to live transcription.
@@ -3042,13 +3273,13 @@ function runCalendarQuery(payload, onLine) {
                 // otherwise ignore (e.g. the initial {"type":"ready"})
             }
         });
-        proc.on('error', (err) => finish({ ok: false, error: err.message }));
+        proc.on('error', (err) => finish({ ok: false, error: describeFsError(err) }));
         proc.on('close', () => finish({ ok: false, error: 'Calendar helper exited without a response.' }));
 
         try {
             proc.stdin.write(JSON.stringify(payload) + '\n');
         } catch (err) {
-            finish({ ok: false, error: err.message });
+            finish({ ok: false, error: describeFsError(err) });
         }
     });
 }
@@ -3110,7 +3341,7 @@ ipcMain.handle('live:start', async (_e, opts) => {
 
     const helper = liveHelperPath();
     if (!fs.existsSync(helper)) {
-        return { ok: false, error: `Live helper binary not found at ${helper}. Run 'npm run build:helper' first.` };
+        return { ok: false, error: `Live helper binary not found. Run 'npm run build:helper' first.` };
     }
 
     const perm = await ensureMacPermissions();
@@ -3120,7 +3351,8 @@ ipcMain.handle('live:start', async (_e, opts) => {
     // naming convention. The stem becomes "HH-mm DD-MM-YY" (no user title)
     // or "<title> HH-mm DD-MM-YY" when the user typed one. Collision suffix
     // " (N)" mirrors record:start so concurrent or rapid sessions don't
-    // clobber each other.
+    // clobber each other — isRecordingPathTaken also catches the OTHER tab's
+    // in-flight session, which fs.existsSync alone cannot see yet.
     if (!fs.existsSync(RECORDINGS_FOLDER)) {
         fs.mkdirSync(RECORDINGS_FOLDER, { recursive: true });
     }
@@ -3128,7 +3360,7 @@ ipcMain.handle('live:start', async (_e, opts) => {
     const stem = defaultRecordingStem(rawTitle);
     let outputPath = path.join(RECORDINGS_FOLDER, `${stem}.wav`);
     let n = 2;
-    while (fs.existsSync(outputPath)) {
+    while (isRecordingPathTaken(outputPath)) {
         outputPath = path.join(RECORDINGS_FOLDER, `${stem} (${n}).wav`);
         n++;
     }
@@ -3151,7 +3383,6 @@ ipcMain.handle('live:start', async (_e, opts) => {
     try {
         live.segments = [];
         live.stdoutBuf = '';
-        live.stderrBuf = '';
         live.outputPath = outputPath;
         live.model = payload.model;
         live.notes = [];
@@ -3173,11 +3404,9 @@ ipcMain.handle('live:start', async (_e, opts) => {
 
         proc.stdout.on('data', (d) => liveConsumeStdout(d));
         proc.stderr.on('data', (d) => {
-            // Always mirror helper stderr to the parent terminal so anyone
-            // running `npm start` can see exactly what the swift side is
-            // doing without needing the TRANSCRIBER_LIVE_DEBUG env flag.
-            process.stderr.write(d);
-            live.stderrBuf += d;
+            // Gated: useful for local debugging, not something a normal run
+            // needs to spam the terminal with.
+            if (process.env.TRANSCRIBER_LIVE_DEBUG) process.stderr.write(d);
             // Forward each complete line as a `helperLog` event so the
             // renderer's Diagnostics panel can show recent activity.
             const lines = String(d).split(/\r?\n/);
@@ -3218,7 +3447,7 @@ ipcMain.handle('live:start', async (_e, opts) => {
         live.proc = null;
         live.outputPath = null;
         live.model = null;
-        return { ok: false, error: err.message };
+        return { ok: false, error: describeFsError(err) };
     }
 });
 
@@ -3254,7 +3483,7 @@ ipcMain.handle('live:downloadModel', async (_e, modelName) => {
 
     const helper = liveHelperPath();
     if (!fs.existsSync(helper)) {
-        return { ok: false, error: `Live helper binary not found at ${helper}.` };
+        return { ok: false, error: 'Live helper binary not found.' };
     }
 
     return new Promise((resolve) => {
@@ -3293,10 +3522,10 @@ ipcMain.handle('live:downloadModel', async (_e, modelName) => {
             }
         });
 
-        proc.stderr.on('data', (d) => { process.stderr.write(d); });
+        proc.stderr.on('data', (d) => { if (process.env.TRANSCRIBER_LIVE_DEBUG) process.stderr.write(d); });
 
         proc.on('exit', () => finish({ ok: false, error: 'helper exited before completing download' }));
-        proc.on('error', (err) => finish({ ok: false, error: err.message }));
+        proc.on('error', (err) => finish({ ok: false, error: describeFsError(err) }));
 
         try {
             proc.stdin.write(JSON.stringify({
@@ -3305,7 +3534,7 @@ ipcMain.handle('live:downloadModel', async (_e, modelName) => {
                 modelDir: liveModelDir(),
             }) + '\n');
         } catch (err) {
-            finish({ ok: false, error: err.message });
+            finish({ ok: false, error: describeFsError(err) });
         }
     });
 });
@@ -3400,7 +3629,15 @@ ipcMain.handle('live:saveTranscript', async (_e, payload) => {
         const filePath = wavPath
             ? path.join(TRANSCRIPTS_FOLDER, `${path.basename(wavPath, '.wav')}.txt`)
             : uniqueFilePath(TRANSCRIPTS_FOLDER, sanitizeFilenameBase(title), '.txt');
-        fs.writeFileSync(filePath, content, 'utf-8');
+        if (!canWritePath(filePath)) {
+            // Mirrors the catch block below: a save that never happens is still
+            // the end of the session for quit-flush/record:list purposes.
+            noteSessionFlushed('live');
+            live.outputPath = null;
+            mainWindow?.webContents.send('record:listChanged');
+            return { ok: false, error: 'Refusing to write to a path outside the managed folders.' };
+        }
+        writeFileAtomic(filePath, content);
         app.addRecentDocument(filePath);
         // Kept (not deleted) after a successful save: re-transcribing this same
         // wav from the Record tab rewrites the .txt from scratch, and the notes
@@ -3427,7 +3664,7 @@ ipcMain.handle('live:saveTranscript', async (_e, payload) => {
         // library for the rest of the process's life.
         live.outputPath = null;
         mainWindow?.webContents.send('record:listChanged');
-        return { ok: false, error: err.message };
+        return { ok: false, error: describeFsError(err) };
     }
 });
 
@@ -3611,10 +3848,20 @@ function defaultRecordingPath(title) {
     return path.join(RECORDINGS_FOLDER, `${defaultRecordingStem(title)}.wav`);
 }
 
+// Live and Record each pick their own default wav path independently, via a
+// bare fs.existsSync loop that never sees the OTHER tab's in-flight session —
+// its file doesn't exist on disk until the helper actually writes to it, so
+// starting both untitled inside the same clock minute used to have the
+// second one silently reuse (and eventually clobber) the first's path. Their
+// two `outputPath` fields are the one place that in-flight reservation lives.
+function isRecordingPathTaken(p) {
+    return p === live.outputPath || p === recorder.outputPath || fs.existsSync(p);
+}
+
 function spawnHelperWithJsonStdout(onEvent) {
     const helper = liveHelperPath();
     if (!fs.existsSync(helper)) {
-        return { ok: false, error: `Live helper binary not found at ${helper}. Run 'npm run build:helper' first.` };
+        return { ok: false, error: 'Live helper binary not found. Run \'npm run build:helper\' first.' };
     }
     const proc = spawn(helper, [], { stdio: ['pipe', 'pipe', 'pipe'] });
     let buf = '';
@@ -3632,7 +3879,7 @@ function spawnHelperWithJsonStdout(onEvent) {
         }
     });
     proc.stderr.on('data', (d) => {
-        process.stderr.write(d);
+        if (process.env.TRANSCRIBER_LIVE_DEBUG) process.stderr.write(d);
         for (const line of String(d).split(/\r?\n/)) {
             const t = line.trim();
             if (t) onEvent({ type: 'helperLog', line: t });
@@ -3664,7 +3911,7 @@ ipcMain.handle('record:start', async (_e, opts) => {
     const stem = defaultRecordingStem(title);
     let outputPath = path.join(RECORDINGS_FOLDER, `${stem}.wav`);
     let n = 2;
-    while (fs.existsSync(outputPath)) {
+    while (isRecordingPathTaken(outputPath)) {
         outputPath = path.join(RECORDINGS_FOLDER, `${stem} (${n}).wav`);
         n++;
     }
@@ -3754,6 +4001,7 @@ ipcMain.handle('record:autoQueueTranscribe', (_e, filePath, language, participan
         typeof language === 'string' ? language : '',
         Array.isArray(participants) ? participants : [],
     );
+    if (!job) return { ok: false, error: 'Recording is empty or too short to transcribe.' };
     return { ok: true, jobId: job.id };
 });
 
@@ -3839,7 +4087,7 @@ function flushNotesSidecar(slot) {
     if (!slot.outputPath || !slot.notes.length) return;
     try {
         const notes = resolveNotes(slot.notes, slot.notesStartedAt);
-        fs.writeFileSync(notesSidecarPath(slot.outputPath), JSON.stringify(notes), 'utf-8');
+        writeFileAtomic(notesSidecarPath(slot.outputPath), JSON.stringify(notes));
     } catch { /* best-effort — notes are an enhancement, never block stop/quit */ }
 }
 
@@ -3881,7 +4129,7 @@ ipcMain.handle('record:delete', async (_e, filePath) => {
         removeNotesSidecar(filePath);
         return { ok: true };
     } catch (err) {
-        return { ok: false, error: err.message };
+        return { ok: false, error: describeFsError(err) };
     }
 });
 
@@ -3939,10 +4187,8 @@ ipcMain.handle('record:rename', async (_e, wavPath, newTitle) => {
         const newStem = cleaned || oldStem;
 
         let newWavPath = path.join(RECORDINGS_FOLDER, `${newStem}.wav`);
-        let n = 2;
-        while (fs.existsSync(newWavPath) && newWavPath !== wavPath) {
-            newWavPath = path.join(RECORDINGS_FOLDER, `${newStem} (${n}).wav`);
-            n++;
+        if (newWavPath !== wavPath && fs.existsSync(newWavPath)) {
+            newWavPath = uniqueFilePath(RECORDINGS_FOLDER, newStem, '.wav');
         }
 
         const oldTranscriptPath = recordingTranscriptPath(wavPath);
@@ -3967,15 +4213,13 @@ ipcMain.handle('record:rename', async (_e, wavPath, newTitle) => {
                 setHeaderLine(partialContent, 'Meeting', titleLine),
                 'Source', newWavPath,
             );
-            fs.writeFileSync(oldPartialPath, updatedPartial, 'utf-8');
+            writeFileAtomic(oldPartialPath, updatedPartial);
 
             if (newWavPath !== wavPath) {
                 const newPartialStem = path.basename(newWavPath, '.wav');
                 let newPartialPath = path.join(TRANSCRIPTS_FOLDER, `${newPartialStem}.partial.txt`);
-                let pn = 2;
-                while (fs.existsSync(newPartialPath)) {
-                    newPartialPath = path.join(TRANSCRIPTS_FOLDER, `${newPartialStem} (${pn}).partial.txt`);
-                    pn++;
+                if (fs.existsSync(newPartialPath)) {
+                    newPartialPath = uniqueFilePath(TRANSCRIPTS_FOLDER, newPartialStem, '.partial.txt');
                 }
                 fs.renameSync(oldPartialPath, newPartialPath);
             }
@@ -3983,14 +4227,21 @@ ipcMain.handle('record:rename', async (_e, wavPath, newTitle) => {
 
         if (hasTranscript) {
             const newTranscriptStem = path.basename(newWavPath, '.wav');
-            const newTranscriptPath = path.join(TRANSCRIPTS_FOLDER, `${newTranscriptStem}.txt`);
+            let newTranscriptPath = path.join(TRANSCRIPTS_FOLDER, `${newTranscriptStem}.txt`);
 
             const content = fs.readFileSync(oldTranscriptPath, 'utf-8');
             const titleLine = trimmed || oldStem;
             const updated = setHeaderLine(content, 'Meeting', titleLine);
-            fs.writeFileSync(oldTranscriptPath, updated, 'utf-8');
+            writeFileAtomic(oldTranscriptPath, updated);
 
-            if (newTranscriptPath !== oldTranscriptPath && !fs.existsSync(newTranscriptPath)) {
+            // Bump to a unique name rather than silently leaving the transcript
+            // under its old name when the plain destination is already taken —
+            // a skipped rename here desyncs the transcript from the wav it was
+            // just renamed to follow.
+            if (newTranscriptPath !== oldTranscriptPath && fs.existsSync(newTranscriptPath)) {
+                newTranscriptPath = uniqueFilePath(TRANSCRIPTS_FOLDER, newTranscriptStem, '.txt');
+            }
+            if (newTranscriptPath !== oldTranscriptPath) {
                 fs.renameSync(oldTranscriptPath, newTranscriptPath);
             }
 
@@ -4006,8 +4257,11 @@ ipcMain.handle('record:rename', async (_e, wavPath, newTitle) => {
                 const { mtimeMs } = readTranscriptInfoSync(actualTxt);
                 const newSummaryBase = defaultSummaryBase(actualTxt, { title: titleLine }, mtimeMs);
                 const summaryDir = path.dirname(oldSummaryPath);
-                const newSummaryPath = path.join(summaryDir, newSummaryBase + '.summary.md');
-                if (newSummaryPath !== oldSummaryPath && !fs.existsSync(newSummaryPath)) {
+                let newSummaryPath = path.join(summaryDir, newSummaryBase + '.summary.md');
+                if (newSummaryPath !== oldSummaryPath && fs.existsSync(newSummaryPath)) {
+                    newSummaryPath = uniqueFilePath(summaryDir, newSummaryBase, '.summary.md');
+                }
+                if (newSummaryPath !== oldSummaryPath) {
                     fs.renameSync(oldSummaryPath, newSummaryPath);
                 }
             }
@@ -4015,7 +4269,7 @@ ipcMain.handle('record:rename', async (_e, wavPath, newTitle) => {
 
         return { ok: true, newFilePath: newWavPath };
     } catch (err) {
-        return { ok: false, error: err.message };
+        return { ok: false, error: describeFsError(err) };
     }
 });
 
@@ -4073,7 +4327,7 @@ ipcMain.handle('record:pickAudioFile', async () => {
             mtime: stat.mtimeMs,
         };
     } catch (err) {
-        return { ok: false, error: err.message };
+        return { ok: false, error: describeFsError(err) };
     }
 });
 
@@ -4384,7 +4638,7 @@ async function runRecordTranscribeJob(opts, sendEvent) {
         return { ok: true, transcriptPath };
     } catch (err) {
         noteSessionFlushed('transcriber');
-        return { ok: false, error: err.message };
+        return { ok: false, error: describeFsError(err) };
     }
 }
 
@@ -4461,7 +4715,7 @@ ipcMain.handle('record:deleteModel', async (_e, modelName) => {
         await fs.promises.rm(dir, { recursive: true, force: true });
         return { ok: true, removed: true };
     } catch (err) {
-        return { ok: false, error: err.message };
+        return { ok: false, error: describeFsError(err) };
     }
 });
 

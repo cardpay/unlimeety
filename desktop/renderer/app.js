@@ -829,6 +829,11 @@ if (!PLAYER_OK) console.warn("[player] audio player DOM not found, feature disab
 
 const SPEEDS = [1, 1.5, 2, 0.75];
 const WAVEFORM_BARS = 80;
+// A multi-hour recording decoded whole into an ArrayBuffer (buildWaveform's
+// only path) can OOM the renderer just to draw 80 bars. Above this, skip the
+// decode — playerShowPath's placeholder waveform (already drawn before
+// buildWaveform runs) stays up, same as any other decode failure.
+const WAVEFORM_MAX_BYTES = 300 * 1024 * 1024;
 let speedIdx = 0;
 let waveformBars = [];        // current bar DOM nodes
 let waveformPlayedIdx = -1;   // last index marked played, for cheap diff
@@ -879,7 +884,17 @@ function updateWaveformProgress(pct) {
 }
 
 async function buildWaveform(audioPath, numBars) {
-  const buf = await fetch(`file://${encodeURI(audioPath)}`).then(r => r.arrayBuffer());
+  const res = await fetch(`file://${encodeURI(audioPath)}`);
+  // ponytail: relies on Chromium's file:// fetch setting Content-Length; if
+  // it's ever missing or non-numeric, Number(null) is NaN and this check
+  // just never fires (the same as before this cap existed) — degrade, don't
+  // block, on a header this code cannot control. Upgrade to a streamed/
+  // chunked read with its own byte counter if that ever proves unreliable.
+  const len = Number(res.headers.get("content-length"));
+  if (len > WAVEFORM_MAX_BYTES) {
+    throw new Error(`audio file too large to decode for a waveform (${len} bytes)`);
+  }
+  const buf = await res.arrayBuffer();
   const ctx = new (window.AudioContext || window.webkitAudioContext)();
   try {
     const audio = await ctx.decodeAudioData(buf);
@@ -4616,7 +4631,7 @@ function finishEnhance(info, job) {
   }
 }
 
-async function runEnhance(m) {
+async function runEnhance(m, confirmed = false) {
   // flushBeforeReplace, not saveFile: a keystroke landing during the save leaves
   // a remainder that saveFile only schedules, and that autosave would then change
   // the file a second into the run and cost the whole pass.
@@ -4624,9 +4639,16 @@ async function runEnhance(m) {
 
   let result;
   try {
-    result = await api.enhanceTranscript(m.id);
+    result = await api.enhanceTranscript(m.id, confirmed);
   } catch (err) {
     result = { ok: false, error: err?.message || String(err) };
+  }
+  if (result?.needsConfirmation) {
+    const proceed = window.confirm(
+      `This transcript has ${result.chunks} parts to enhance — it may take a while. Continue?`
+    );
+    if (proceed) return runEnhance(m, true);
+    return;
   }
   if (!result?.ok) {
     console.error("Enhance: could not submit job:", result?.error);

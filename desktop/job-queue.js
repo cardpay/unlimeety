@@ -216,6 +216,15 @@ function createJobQueue() {
                 l.current = null;
                 pruneTerminal(job.id);
                 emit();
+                // The broadcast just above is the one moment a renderer reads
+                // job.result.content (runEnhanceJob's own result / app.js's
+                // finishEnhance) — every later broadcast (a sibling job's
+                // progress tick) would otherwise keep re-serializing the same
+                // full transcript text to the renderer for no reason.
+                if (job.result && typeof job.result.content === 'string') {
+                    const { content, ...rest } = job.result;
+                    job.result = rest;
+                }
                 drain(job.type);
             });
     }
@@ -234,7 +243,26 @@ function createJobQueue() {
             if (job.canceling) return false; // already stopping — don't invoke the lane's cancel twice
             job.canceling = true;
             const l = lane(job.type);
-            if (typeof l.cancel === 'function') l.cancel(job);
+            if (typeof l.cancel === 'function') {
+                // A lane's cancel() is only ever expected to kick the in-flight
+                // work off (write stdin, flip a flag) — never something that
+                // should be able to leave the queue itself in a broken state.
+                // If it throws anyway, the job is already marked canceling
+                // above, and the executor's own promise settling (however it
+                // settles) still drains the lane normally. Every current lane's
+                // cancel() is synchronous, but wrapping the return value in
+                // Promise.resolve(...).catch(...) means a future one that
+                // returns a promise can reject too without becoming an
+                // unhandled rejection main.js's own process-wide handler would
+                // otherwise treat as fatal.
+                try {
+                    Promise.resolve(l.cancel(job)).catch((err) => {
+                        console.warn(`queue: lane "${job.type}"'s cancel() rejected:`, err);
+                    });
+                } catch (err) {
+                    console.warn(`queue: lane "${job.type}"'s cancel() threw:`, err);
+                }
+            }
             emit();
             return true;
         }

@@ -69,7 +69,7 @@ contextBridge.exposeInMainWorld('transcriber', {
     // Submits a job and returns { ok, jobId } — progress and the final result
     // (including updated content, for the in-editor reload) arrive via
     // queueApi.onChanged. Cancel goes through queueApi.cancel(jobId) now.
-    enhanceTranscript: (filePath) => ipcRenderer.invoke('transcripts:enhance', filePath),
+    enhanceTranscript: (filePath, confirmed) => ipcRenderer.invoke('transcripts:enhance', filePath, confirmed),
     onTranscriptsChanged: (cb) => ipcRenderer.on('transcripts:changed', () => cb()),
 
     // ── Follow-up draft ───────────────────────────────────────────────────────
