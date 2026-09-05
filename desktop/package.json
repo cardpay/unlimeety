@@ -7,6 +7,7 @@
         "start": "electron .",
         "test": "node --test",
         "check:layout": "node scripts/layout-check.mjs",
+        "screenshots": "node scripts/screenshots.mjs",
         "dev": "electron . --dev",
         "build:helper": "cd live-helper && swift build -c release && codesign --force --sign \"Developer ID Application\" --options runtime --entitlements ../build/entitlements.mac.inherit.plist --timestamp .build/release/unlimeety-live",
         "build:mac": "npm run build:helper && electron-builder --mac --arm64",
