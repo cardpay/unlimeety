@@ -2,6 +2,7 @@ const { app, BrowserWindow, Menu, Tray, nativeImage, screen, dialog, ipcMain, sh
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const crypto = require('crypto');
 const { execFile, spawn } = require('child_process');
 const { normalizeSummary, hasValidFrontmatter } = require('./summary-frontmatter');
 const glossary = require('./glossary');
@@ -705,10 +706,20 @@ ipcMain.handle('file:saveAs', async (_e, content) => {
 // Render a standalone HTML document to a PDF buffer via an offscreen window.
 // The renderer hands us a fully self-contained HTML string (its own light
 // print CSS), so this window only ever loads our own static markup.
-let pdfExportSeq = 0;
 async function generatePdf(html) {
-    const tmpPath = path.join(app.getPath('temp'), `transcriber-export-${process.pid}-${pdfExportSeq++}.html`);
-    fs.writeFileSync(tmpPath, html, 'utf-8');
+    // Unpredictable name + 'wx' (fail-on-exists): a plain fs.writeFileSync at a
+    // predictable pid-based name follows a symlink planted ahead of time at
+    // that path on a shared /tmp, turning this scratch write into a write
+    // anywhere the attacker's symlink points. 'wx' refuses to open an existing
+    // path (symlink included), same convention as writeFileAtomic's temp file
+    // above.
+    const tmpPath = path.join(app.getPath('temp'), `transcriber-export-${crypto.randomBytes(16).toString('hex')}.html`);
+    const fd = fs.openSync(tmpPath, 'wx', 0o600);
+    try {
+        fs.writeFileSync(fd, html, 'utf-8');
+    } finally {
+        fs.closeSync(fd);
+    }
     const win = new BrowserWindow({
         show: false,
         webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true },
