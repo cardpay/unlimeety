@@ -50,7 +50,7 @@ const knownSpeakers = new Set();
 // and swallows the note's own body. A leading space breaks the anchor and is
 // invisible in the note.
 function escapeNoteText(text) {
-    return String(text || '').replace(/^\[/gm, ' [');
+    return String(text || '').replace(/\r\n?/g, '\n').replace(/^\[/gm, ' [');
 }
 
 // Wait for the DOM to load before injecting our UI
@@ -194,7 +194,8 @@ function injectUI() {
         if (btn) btn.title = `Theme: ${currentTheme} (click to change)`;
     }
     storageGet('gmt-theme', (res) => applyWidgetTheme(res && res['gmt-theme']));
-    document.getElementById('gmt-theme-toggle').addEventListener('click', () => {
+    document.getElementById('gmt-theme-toggle').addEventListener('click', (e) => {
+        if (!e.isTrusted) return;
         const next = THEME_CYCLE[(THEME_CYCLE.indexOf(currentTheme) + 1) % THEME_CYCLE.length];
         applyWidgetTheme(next);
         storageSet({ 'gmt-theme': next });
@@ -240,6 +241,7 @@ function injectUI() {
     });
 
     document.getElementById('gmt-language').addEventListener('change', (e) => {
+        if (!e.isTrusted) return;
         currentLanguage = e.target.value;
         // If captions are already on (i.e. we're recording), switch language immediately
         if (isRecording) {
@@ -265,6 +267,7 @@ function injectUI() {
     // Never stops a recording already in flight.
     const autoStartBox = document.getElementById('gmt-autostart');
     if (autoStartBox) autoStartBox.addEventListener('change', (e) => {
+        if (!e.isTrusted) return;
         autoStartEnabled = e.target.checked;
         autoStartLoaded = true; // an explicit click outranks a slow storage read
         const recBtn = document.getElementById('gmt-record-btn');
@@ -273,7 +276,8 @@ function injectUI() {
         storageSet({ 'gmt-autostart': autoStartEnabled });
     });
 
-    document.getElementById('gmt-record-btn').addEventListener('click', () => {
+    document.getElementById('gmt-record-btn').addEventListener('click', (e) => {
+        if (!e.isTrusted) return;
         if (!isRecording) {
             if (!isMeetingActive()) {
                 return;
@@ -284,7 +288,8 @@ function injectUI() {
         }
     });
 
-    document.getElementById('gmt-save-btn').addEventListener('click', () => {
+    document.getElementById('gmt-save-btn').addEventListener('click', (e) => {
+        if (!e.isTrusted) return;
         chrome.runtime.sendMessage({
             action: 'saveTranscript',
             meetingTitle: getMeetingTitle(),
@@ -300,6 +305,7 @@ function injectUI() {
     // app's Live/Record notes ("[time] Note:") so a shared summarizer prompt
     // can recognize either. See background.js's 'addNote' handler.
     document.getElementById('gmt-notes-input').addEventListener('keydown', (e) => {
+        if (!e.isTrusted) return;
         // With a CJK IME the Enter that commits a composition candidate also
         // arrives here; without this it would ship the half-composed buffer and
         // wipe the field mid-word.
@@ -994,6 +1000,33 @@ function mergeText(oldText, newText) {
     return null;
 }
 
+// Mirrors isPlaceholderLabel in desktop/transcript-enhance.js and
+// PHONETIC_LETTERS in desktop/main.js, plus background.js's reserved 'Note'
+// speaker label — a content script can't require() either module, so this is
+// a third literal copy. Keep the three in sync by hand if the placeholder
+// shape ever changes.
+const PHONETIC_LETTERS = [
+    'Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon', 'Zeta', 'Eta', 'Theta',
+    'Iota', 'Kappa', 'Lambda', 'Mu', 'Nu', 'Xi', 'Omicron', 'Pi',
+    'Rho', 'Sigma', 'Tau', 'Upsilon', 'Phi', 'Chi', 'Psi', 'Omega',
+];
+
+// A guest's Meet display name is free text they fully control. Left alone, a
+// name that collides with a label this pipeline's own writers reserve for
+// notes/placeholders (background.js's 'Note', the desktop app's `S<n>` /
+// phonetic / `Me`/`Speaker`/`?`/`…` shapes) would render in the saved
+// transcript as an indistinguishable turn — impersonating a real note or an
+// unresolved speaker.
+function isReservedSpeakerLabel(label) {
+    const s = String(label || '').trim();
+    if (!s) return false;
+    if (s === 'Note' || s === 'Me' || s === 'Speaker' || s === '?' || s === '…') return true;
+    if (/^S\d+$/i.test(s)) return true;
+    // `Beta`, and the wrap-around form `Beta 2`.
+    const m = /^(\p{L}+)(?: (\d+))?$/u.exec(s);
+    return Boolean(m && PHONETIC_LETTERS.some((p) => p.toLowerCase() === m[1].toLowerCase()));
+}
+
 function processSubtitle(speaker, text) {
     text = text.trim();
     if (text.length <= 3) return;
@@ -1001,6 +1034,22 @@ function processSubtitle(speaker, text) {
     // Normalize speaker: strip "(Presenting)"-style suffixes and unify self-label.
     speaker = cleanSpeakerName(speaker);
     if (speaker === 'Вы') speaker = 'You';
+
+    // Break the collision rather than silently laundering it: the label stays
+    // readable and visibly not the reserved one.
+    if (isReservedSpeakerLabel(speaker)) {
+        speaker = `${speaker} (guest)`;
+    }
+
+    // The saved .txt is line-oriented: an embedded \r/\n plus a leading `[` in
+    // either field could forge a fake "[hh:mm:ss] Speaker:" turn on save. The
+    // marker line itself ("[time] speaker:") has to stay on one physical line,
+    // so a bare (non-CRLF) newline surviving inside speaker — e.g. a
+    // data-sender-name attribute a page script set directly, bypassing the
+    // DOM's usual single-line display names — is flattened to a space too;
+    // text can stay multi-line, only a leading `[` there is dangerous.
+    speaker = escapeNoteText(speaker).replace(/\n/g, ' ');
+    text = escapeNoteText(text);
 
     // Track speaker for participant list
     if (speaker && speaker !== 'Speaker') {

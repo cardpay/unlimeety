@@ -627,7 +627,7 @@ function parseBlocks(body) {
 /// writers, the summarize gate and the renderer, and a copy here would be a
 /// fourth place to forget.
 function isNoteBlock(block, noteLabel = 'Note') {
-    return new RegExp(`\\]\\s*${noteLabel}:[ \\t\\r]*$`).test(block.marker || '');
+    return new RegExp(`\\]\\s*${escapeRe(noteLabel)}:[ \\t\\r]*$`).test(block.marker || '');
 }
 
 function blockSize(block) {

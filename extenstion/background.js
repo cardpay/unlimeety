@@ -135,6 +135,24 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   }
 });
 
+// Mirrors headerValue in desktop/main.js: the DOM-sourced meeting title and
+// participant names are free text with no length or control-char limit, and
+// this is the boundary where they land in the saved transcript's header.
+// Strip control/C1 chars, collapse whitespace, trim, and cap at the same
+// 120 chars sanitizeFilenameBase uses. The cap spreads into an array first —
+// same reason main.js's followup:share extractSubject does — a plain
+// .slice(0, 120) truncates by UTF-16 code unit and can split a surrogate
+// pair (an emoji straddling the cut), and the lone surrogate left behind
+// makes the caller's encodeURIComponent throw.
+function headerValue(v) {
+  return [...String(v)
+    .replace(/[\x00-\x1f\x7f-\x9f]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()]
+    .slice(0, 120)
+    .join('');
+}
+
 function saveTranscriptForTab(tabId) {
   const data = transcripts[tabId];
   if (!data || !data.lines || data.lines.length === 0) {
@@ -144,8 +162,16 @@ function saveTranscriptForTab(tabId) {
 
   const lines = data.lines;
   const startTime = data.startTimeStr || "00-00";
-  const meetingTitle = data.meetingTitle || "Untitled Meeting";
-  const participants = data.participants || [];
+  const meetingTitle = headerValue(data.meetingTitle || "Untitled Meeting") || "Untitled Meeting";
+  // Array.isArray + typeof guards a request forged (or a future caller shaped)
+  // with a non-array/non-string participants value: without the type filter,
+  // a null/undefined entry stringifies to the literal text "null"/"undefined"
+  // (String(v) survives headerValue's filter(Boolean) since those are
+  // non-empty strings) and would show up as a fake participant name.
+  const participants = (Array.isArray(data.participants) ? data.participants : [])
+    .filter((p) => typeof p === 'string')
+    .map(headerValue)
+    .filter(Boolean);
   const language = data.language || null;
 
   const LANGUAGE_NAMES = { ru: 'Русский', en: 'English', sr: 'Srpski' };
