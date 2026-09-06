@@ -14,6 +14,7 @@ contextBridge.exposeInMainWorld('transcriber', {
     saveAsFile: (content) => ipcRenderer.invoke('file:saveAs', content),
     exportPdf:  (html, defaultName) => ipcRenderer.invoke('export:pdf', html, defaultName),
     exportDocx: (payload)           => ipcRenderer.invoke('export:docx', payload),
+    exportRaw:  (text, defaultName) => ipcRenderer.invoke('export:raw', text, defaultName),
 
     // Menu events (main → renderer)
     onMenuNew: (cb) => ipcRenderer.on('menu:new', (_e) => cb()),

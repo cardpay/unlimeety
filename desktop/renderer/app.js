@@ -3724,6 +3724,9 @@ async function exportContent(kind, format, providedText) {
   if (format === "pdf") {
     return api.exportPdf(buildExportHtml(kind, text), exportDefaultName(kind, "pdf"));
   }
+  if (format === "raw") {
+    return api.exportRaw(text, exportDefaultName(kind, "txt"));
+  }
   return api.exportDocx({ kind, text, title: exportTitle(), defaultName: exportDefaultName(kind, "docx") });
 }
 
