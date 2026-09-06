@@ -83,6 +83,14 @@
                 }
             ],
             "category": "Utility"
+        },
+        "electronFuses": {
+            "runAsNode": false,
+            "enableNodeCliInspectArguments": false,
+            "enableNodeOptionsEnvironmentVariable": false,
+            "onlyLoadAppFromAsar": true,
+            "enableEmbeddedAsarIntegrityValidation": true,
+            "enableCookieEncryption": true
         }
     },
     "keywords": [],
