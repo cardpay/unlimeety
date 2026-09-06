@@ -760,6 +760,24 @@ async function generatePdf(html) {
     }
 }
 
+// Raw export: the transcript text as-is, no PDF/DOCX conversion.
+ipcMain.handle('export:raw', async (_e, text, defaultName) => {
+    if (typeof text !== 'string' || !text.trim()) return { ok: false, error: 'No content to export.' };
+    const result = await dialog.showSaveDialog(mainWindow, {
+        title: 'Export as text',
+        defaultPath: defaultName || 'export.txt',
+        filters: [{ name: 'Text', extensions: ['txt'] }],
+    });
+    if (result.canceled || !result.filePath) return { ok: false, canceled: true };
+    try {
+        fs.writeFileSync(result.filePath, text, 'utf-8');
+        registerReadablePath(result.filePath); // user-picked target: allow showInFinder
+        return { ok: true, filePath: result.filePath };
+    } catch (err) {
+        return { ok: false, error: describeFsError(err) };
+    }
+});
+
 ipcMain.handle('export:pdf', async (_e, html, defaultName) => {
     if (typeof html !== 'string' || !html) return { ok: false, error: 'No content to export.' };
     const result = await dialog.showSaveDialog(mainWindow, {
