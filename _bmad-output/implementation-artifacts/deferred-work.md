@@ -420,3 +420,15 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-transcript-search-scroll-edit-mode.md`
   summary: Neither `scrollToRange` nor the new `scrollToTextareaOffset` re-run when the pane is resized (window resize, sidebar toggle) while the find bar is open on a current match — the geometry is only recomputed on the next explicit navigation, so a resize can leave the current match out of view until the user steps again.
   evidence: Raised independently by the blind-hunter review layer. Pre-existing gap for `scrollToRange` (unaffected by this change); the new textarea path inherits the same limitation by construction. Fixing needs a `ResizeObserver` wired to re-run `goto(idx)`, which is a general find-bar improvement rather than specific to the edit-mode scroll bug this change targets.
+
+- source_spec: none
+  summary: Add a "Raw (.txt)" export option to the transcript editor's export menu that writes the current text as-is, without PDF/DOCX conversion.
+  evidence: Split out of a combined request ("copy file path" + "raw export") per the multi-goal gate — independently shippable, no shared code path with the copy-file-path menu item.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-meeting-card-copy-file-path.md`
+  summary: "Copy file path" gives no success/failure feedback — the meeting-card context menu already closes (and the clicked button is gone) by the time `navigator.clipboard.writeText` resolves or rejects, unlike the rail's "Copy summary" button (swaps its icon to a checkmark for 1.5s) or the summary modal's "Copy" button (swaps its label for 2s).
+  evidence: Raised independently by the blind-hunter review layer, verified by reading `openMeetingMenu`'s click handler in `desktop/renderer/app.js` (it calls `closeMeetingMenu()` before dispatching any action, including this one) alongside `btnRailCopy`/`modal-btn-copy`'s existing feedback patterns. Real gap, but closing it needs either a new toast/snackbar component (nothing like it exists yet for a transient popover) or restructuring the shared close-then-dispatch order that every other menu action also relies on — bigger than this one-line addition's scope.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-meeting-card-copy-file-path.md`
+  summary: The new `ICON_PATHS.copy` SVG path data is byte-for-byte duplicated from two pre-existing inline copy-icon SVGs (`btnRailCopy`'s checkmark-swap markup and its own copy-icon revert string) instead of those two call sites being refactored to reuse the new shared `iconSvg("copy")` helper.
+  evidence: Raised independently by the blind-hunter review layer, verified by reading the three occurrences of the same path string in `desktop/renderer/app.js`. Pre-existing duplication (the two inline copies existed before this change); folding all three into one shared definition is a small, low-risk cleanup but touches unrelated call sites outside this spec's scope.
