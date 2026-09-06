@@ -1,6 +1,6 @@
 {
     "name": "unlimeety-desktop",
-    "version": "1.5.5",
+    "version": "1.6.0",
     "description": "Companion desktop app for Unlimeety",
     "main": "main.js",
     "scripts": {
@@ -26,6 +26,7 @@
         "files": [
             "main.js",
             "preload.js",
+            "preload-panel.js",
             "summary-frontmatter.js",
             "glossary.js",
             "transcript-enhance.js",
@@ -83,13 +84,21 @@
                 }
             ],
             "category": "Utility"
+        },
+        "electronFuses": {
+            "runAsNode": false,
+            "enableNodeCliInspectArguments": false,
+            "enableNodeOptionsEnvironmentVariable": false,
+            "onlyLoadAppFromAsar": true,
+            "enableEmbeddedAsarIntegrityValidation": true,
+            "enableCookieEncryption": true
         }
     },
     "keywords": [],
     "author": "",
     "license": "MIT",
     "devDependencies": {
-        "electron": "^41.1.1",
+        "electron": "^44.2.0",
         "electron-builder": "^26.8.1"
     },
     "dependencies": {

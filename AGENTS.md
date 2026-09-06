@@ -56,3 +56,13 @@ WhisperKit/SpeakerKit helper, and a Chrome extension. `README.md` covers usage, 
   file silently. `test/renderer-globals.test.js` guards this.
 
 <!-- /bmad:context -->
+
+## Personal data
+
+Kept outside the `bmad:context` block on purpose — a context refresh must not drop it.
+
+- Real colleagues' names, corporate e-mail addresses and internal meeting titles never go into the
+  repository — not into code, comments, tests, or `_bmad-output/` specs. Use synthetic names and
+  `@example.com`. The history was rewritten once (2026-09-06) to strip such data; it cannot be
+  rewritten cheaply a second time.
+- Before pushing: `git diff --cached | rg -i '@unlimit\.com'` — a hit means stop and rename.

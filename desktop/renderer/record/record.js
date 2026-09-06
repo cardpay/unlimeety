@@ -1293,7 +1293,7 @@
         window.live.onEvent((evt) => {
             if (!evt || evt.type !== 'modelDownloadProgress') return;
             if (!tsModelGrid) return;
-            const card = tsModelGrid.querySelector(`.ts-model-card[data-model="${evt.model}"]`);
+            const card = tsModelGrid.querySelector(`.ts-model-card[data-model="${CSS.escape(evt.model)}"]`);
             if (!card) return;
             const badge = card.querySelector('.ts-badge-installed, .ts-badge-download');
             if (!badge) return;

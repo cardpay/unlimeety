@@ -610,7 +610,7 @@
             case 'modelDownloadProgress': {
                 // Standalone pre-fetch from the model picker (no live session).
                 // Update the matching card's footer badge in place.
-                const card = modelGrid?.querySelector(`.ts-model-card[data-model="${event.model}"]`);
+                const card = modelGrid?.querySelector(`.ts-model-card[data-model="${CSS.escape(event.model)}"]`);
                 if (!card) break;
                 const badge = card.querySelector('.ts-badge-installed, .ts-badge-download');
                 if (!badge) break;

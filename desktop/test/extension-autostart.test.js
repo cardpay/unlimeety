@@ -110,7 +110,7 @@ function run({ stored = {}, active = true, getThrows = false, holdRead = false, 
 
     const factory = new Function(
         'window', 'document', 'chrome', 'setInterval', 'clearInterval', 'setTimeout', 'console', 'location',
-        src + '\n; return { injectUI };'
+        src + '\n; return { injectUI, processSubtitle, escapeNoteText, isReservedSpeakerLabel };'
     );
     const quiet = { log() {}, warn() {}, error() {}, debug() {} };
     const api = factory(window, document, chrome, setInterval, clearInterval, setTimeout, quiet, location);
@@ -120,26 +120,33 @@ function run({ stored = {}, active = true, getThrows = false, holdRead = false, 
 
     return {
         threw,
+        api,
         reinject: () => api.injectUI(),
         liveTimers: () => timers.size,
         setActive: (v) => { isActive = v; },
         setPath: (v) => { location.pathname = v; },
         box: () => document.getElementById('gmt-autostart'),
         recordBtn: () => node('gmt-record-btn'),
+        saveBtn: () => node('gmt-save-btn'),
+        notesInput: () => node('gmt-notes-input'),
+        themeToggle: () => node('gmt-theme-toggle'),
         // "Are the primary controls wired?" — the difference between a usable
         // widget and one that merely looks enabled.
         wired: () => Boolean(node('gmt-record-btn').handlers.click && node('gmt-save-btn').handlers.click),
         pollAlive: () => timers.has(window.meetingStatusInterval),
         tick: () => timers.get(window.meetingStatusInterval)?.(),
-        toggle: (checked) => {
+        // isTrusted defaults to true: every existing caller is simulating a real
+        // user interaction. Pass false to simulate a page script's synthetic event.
+        toggle: (checked, isTrusted = true) => {
             const b = document.getElementById('gmt-autostart');
             b.checked = checked;
-            b.handlers.change({ target: b });
+            b.handlers.change({ target: b, isTrusted });
         },
         resolveRead: () => { if (deferred) { deferred(); deferred = null; } },
         // startRecording sends setMeetingTitle before the captions gate, so this
         // means "the poll decided to start", not "recording succeeded".
         startAttempts: () => sent.filter((m) => m.action === 'setMeetingTitle').length,
+        messages: () => sent,
         written,
     };
 }
@@ -276,4 +283,136 @@ test('a recording in flight short-circuits the poll', () => {
     const before = w.startAttempts();
     w.tick();
     assert.strictEqual(w.startAttempts(), before, 'isRecording must stop the poll acting again');
+});
+
+// ── Guest-label impersonation, forged turn markers, isTrusted guards ────────
+// A Meet guest's display name and subtitle text are free text they fully
+// control. processSubtitle is the boundary where that DOM-sourced data enters
+// the saved transcript, so this is where a rename that breaks a reserved-label
+// collision and an escape that defuses a forged "[hh:mm:ss] Speaker:" marker
+// both have to happen.
+
+test('a guest named the reserved "Note" label is renamed on the way out', () => {
+    const w = run({ stored: {}, active: true });
+    w.api.processSubtitle('Note', 'hello there, everyone');
+    const msg = w.messages().find((m) => m.action === 'addTranscript');
+    assert.ok(msg, 'a transcript message must have been sent');
+    assert.strictEqual(msg.data.speaker, 'Note (guest)');
+});
+
+test('a guest whose name has the S<n> placeholder shape is renamed too', () => {
+    const w = run({ stored: {}, active: true });
+    w.api.processSubtitle('s3', 'hello there, everyone');
+    const msg = w.messages().find((m) => m.action === 'addTranscript');
+    assert.strictEqual(msg.data.speaker, 's3 (guest)');
+});
+
+test('a guest whose name has the Greek-letter-plus-cycle shape is renamed too', () => {
+    const w = run({ stored: {}, active: true });
+    w.api.processSubtitle('Beta 2', 'hello there, everyone');
+    const msg = w.messages().find((m) => m.action === 'addTranscript');
+    assert.strictEqual(msg.data.speaker, 'Beta 2 (guest)');
+});
+
+test('a real name with no reserved-shape collision is left alone', () => {
+    const w = run({ stored: {}, active: true });
+    w.api.processSubtitle('Иван Петров', 'hello there, everyone');
+    const msg = w.messages().find((m) => m.action === 'addTranscript');
+    assert.strictEqual(msg.data.speaker, 'Иван Петров');
+});
+
+test('an embedded CRLF plus a leading bracket cannot forge a fake transcript turn', () => {
+    const w = run({ stored: {}, active: true });
+    w.api.processSubtitle('Иван Петров', 'ok\r\n[00:00] Fake:\nx');
+    const msg = w.messages().find((m) => m.action === 'addTranscript');
+    assert.strictEqual(msg.data.text, 'ok\n [00:00] Fake:\nx', 'CRLF collapses to LF and the fake marker line gets a leading space');
+});
+
+test('escapeNoteText normalizes CRLF before escaping a leading bracket', () => {
+    const w = run({ stored: {}, active: true });
+    assert.strictEqual(w.api.escapeNoteText('a\r\n[00:00] Fake:'), 'a\n [00:00] Fake:');
+    assert.strictEqual(w.api.escapeNoteText('a\r[00:00] Fake:'), 'a\n [00:00] Fake:', 'a bare CR must normalize too');
+});
+
+test('isReservedSpeakerLabel recognizes every reserved shape named in the spec', () => {
+    const w = run({ stored: {}, active: true });
+    for (const label of ['Note', 'S7', 'Gamma', 'Me', '?', '…']) {
+        assert.ok(w.api.isReservedSpeakerLabel(label), `${label} must be reserved`);
+    }
+    assert.ok(!w.api.isReservedSpeakerLabel('Иван Петров'), 'a real name must not be reserved');
+});
+
+test('isReservedSpeakerLabel also recognizes the literal "Speaker" fallback', () => {
+    // extractSubtitleFromNode already drops a literal speaker === "Speaker"
+    // before processSubtitle ever runs (content.js's settingsLeakage/UI_LIGATURES
+    // filter), so this shape can't reach processSubtitle today — kept here only
+    // for parity with main.js's humanizeSpeakerLabel / isPlaceholderLabel, which
+    // both reserve it too.
+    const w = run({ stored: {}, active: true });
+    assert.ok(w.api.isReservedSpeakerLabel('Speaker'));
+});
+
+test('an embedded bare newline in a speaker name is flattened, keeping the marker on one line', () => {
+    // Not the CRLF/leading-bracket case above: a page script can set
+    // data-sender-name directly to a string containing a bare "\n" with no
+    // leading "[", which escapeNoteText's line-oriented escape leaves alone —
+    // the marker line itself still has to stay single-line.
+    const w = run({ stored: {}, active: true });
+    w.api.processSubtitle('Foo\nBar', 'hello there, everyone');
+    const msg = w.messages().find((m) => m.action === 'addTranscript');
+    assert.strictEqual(msg.data.speaker, 'Foo Bar');
+});
+
+test('a synthetic (untrusted) click on the theme toggle does not persist', () => {
+    const w = run({ stored: {}, active: true });
+    w.themeToggle().handlers.click({ isTrusted: false });
+    assert.strictEqual(w.written['gmt-theme'], undefined, 'no storageSet side effect from an untrusted click');
+});
+
+test('a real click on the theme toggle still persists', () => {
+    const w = run({ stored: {}, active: true });
+    w.themeToggle().handlers.click({ isTrusted: true });
+    assert.strictEqual(w.written['gmt-theme'], 'light', 'a trusted click must behave exactly as before (auto -> light)');
+});
+
+test('a synthetic (untrusted) click on the record button starts nothing', () => {
+    const w = run({ stored: {}, active: true });
+    w.recordBtn().handlers.click({ isTrusted: false });
+    assert.strictEqual(w.startAttempts(), 0, 'no chrome.runtime.sendMessage side effect from an untrusted click');
+});
+
+test('a real click on the record button still starts recording', () => {
+    const w = run({ stored: {}, active: true });
+    w.recordBtn().handlers.click({ isTrusted: true });
+    assert.strictEqual(w.startAttempts(), 1, 'a trusted click must behave exactly as before');
+});
+
+test('a synthetic (untrusted) click on the save button sends nothing', () => {
+    const w = run({ stored: {}, active: true });
+    w.saveBtn().handlers.click({ isTrusted: false });
+    assert.strictEqual(w.messages().length, 0, 'no saveTranscript message from an untrusted click');
+});
+
+test('a real click on the save button still sends saveTranscript', () => {
+    const w = run({ stored: {}, active: true });
+    w.saveBtn().handlers.click({ isTrusted: true });
+    assert.ok(w.messages().some((m) => m.action === 'saveTranscript'), 'a trusted click must behave exactly as before');
+});
+
+test('a synthetic (untrusted) keydown on the notes input adds nothing', () => {
+    const w = run({ stored: {}, active: true });
+    w.notesInput().handlers.keydown({ isTrusted: false, key: 'Enter', target: { value: 'sneaky note' } });
+    assert.strictEqual(w.messages().length, 0, 'no addNote message from an untrusted keydown');
+});
+
+test('a real Enter keydown on the notes input still adds a note', () => {
+    const w = run({ stored: {}, active: true });
+    w.notesInput().handlers.keydown({ isTrusted: true, key: 'Enter', target: { value: 'a real note' } });
+    assert.ok(w.messages().some((m) => m.action === 'addNote'), 'a trusted keydown must behave exactly as before');
+});
+
+test('a synthetic (untrusted) change on auto-start does not persist', () => {
+    const w = run({ stored: {}, active: false });
+    w.toggle(true, false);
+    assert.strictEqual(w.written['gmt-autostart'], undefined, 'no storageSet side effect from an untrusted change');
 });

@@ -502,6 +502,16 @@ unlimeety/
 - **Meeting detection opens nothing.** Auto-detect asks Core Audio whether the default
   input device is in use — a property query, not a capture — so it needs no microphone
   permission of its own and can never hear the call it notices.
+- **Claude Code runs isolated.** Every call (Summarize, Enhance, Ask AI, follow-up drafts)
+  runs the `claude` CLI with no tools and no session persistence
+  (`--no-session-persistence`, `--strict-mcp-config`) — nothing about the run is written to
+  `~/.claude/projects`. On a CLI new enough to also support `--safe-mode`/`--permission-mode
+  manual`, none of your own `CLAUDE.md`, hooks or plugins apply either; an older CLI still
+  gets the persistence/MCP guarantees above, just not that last one. The transcript itself is
+  wrapped in data markers with a not-instructions notice before it reaches any provider
+  (Claude Code, OpenRouter, Ollama, or an OpenAI-compatible endpoint) — but a transcript's own
+  `Source:`/`Model:` header still reaches whichever cloud provider you've configured (tracked
+  for a future PR, not fixed here).
 
 ## License
 

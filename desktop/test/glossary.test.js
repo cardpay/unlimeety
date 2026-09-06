@@ -128,4 +128,17 @@ const { parse, select, render, blockFor, withinDistance, MAX_ENTRIES, REFERENCE_
     assert.strictEqual(select(parse('C++'), 'пишем на C++ давно').length, 1, 'regex specials are escaped');
 }
 
+// spec-security-model-isolation.md: a control character mid-term (a stray \r
+// from a CRLF-pasted glossary) survives a bare .trim() and rides into the
+// prompt unnoticed — it must be stripped to a space instead.
+{
+    assert.strictEqual(parse('Pay\rCore\talias')[0].term, 'Pay Core', 'a control char is turned into a space');
+    assert.deepStrictEqual(parse('Term\t\x00alias\x1f')[0].aliases, ['alias'], 'aliases are cleaned the same way');
+    // A term made entirely of control characters passes a raw `.trim()` check
+    // (a control char isn't whitespace) but collapses to '' once cleaned — the
+    // emptiness check must run after cleaning, or a bogus empty-term entry
+    // gets pushed.
+    assert.strictEqual(parse('\x00\x01\talias').length, 0, 'a control-char-only term is dropped, not pushed empty');
+}
+
 console.log('glossary: all checks passed');

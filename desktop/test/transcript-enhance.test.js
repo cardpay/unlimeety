@@ -73,6 +73,21 @@ const TRANSCRIPT = [
     assert.strictEqual(blocks[0].text, '[неразборчиво] дальше по тексту');
 }
 
+// spec-extension-hardening.md: isNoteBlock now escapeRe()s a caller-supplied
+// noteLabel before building its RegExp. noteLabel is always the hard-coded
+// 'Note' literal today, so this exercises the escaping directly rather than
+// through any real caller — proving a metacharacter in a future noteLabel
+// (e.g. if notes-list.js's own copy of the label ever drifted) can't widen
+// the match or throw as a broken regex.
+{
+    const dotBlock = { marker: '[00:30] NoXe:', text: 'x' };
+    assert.strictEqual(isNoteBlock(dotBlock, 'No.e'), false,
+        'an escaped "." must not match an unrelated character — "NoXe" is not "No.e"');
+    const literalBlock = { marker: '[00:30] No.e:', text: 'x' };
+    assert.strictEqual(isNoteBlock(literalBlock, 'No.e'), true,
+        'the literal label with its literal dot must still match');
+}
+
 // ─── assembleTranscript ───────────────────────────────────────────────────────
 {
     const { header, body } = splitTranscript(TRANSCRIPT);
