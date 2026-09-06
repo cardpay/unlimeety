@@ -366,5 +366,12 @@
   // "place the textarea's viewport at this character offset" geometry this
   // module already had to solve for find-navigation, and reimplementing the
   // mirror-<div> measurement a second time would only risk the two drifting.
-  window.findInNote = { open, close, isOpen, scrollToOffset: scrollToTextareaOffset };
+  //
+  // rescan is exposed for the View<->Edit toggle too: switching panes swaps
+  // which one scan() reads from (visible(view) vs visible(editor)), but
+  // neither showTranscriptView() nor showEditorTextarea() fires a mutation or
+  // input event, so without this the find bar (if left open across a toggle)
+  // keeps whatever "range" or "ta" hits it had before the switch — pointing at
+  // a now-hidden pane, painting nothing.
+  window.findInNote = { open, close, isOpen, scrollToOffset: scrollToTextareaOffset, rescan };
 })();

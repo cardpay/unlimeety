@@ -1371,11 +1371,13 @@ if (PLAYER_OK) {
         // this is a caret, not a find match.
         window.findInNote?.scrollToOffset(editor, offset, 0);
       }
+      window.findInNote?.rescan();
     } else {
       renderTranscriptView(editor.value);
       showTranscriptView();
       lastActiveSeg = null;
       if (!transcriptView.classList.contains("hidden")) syncTranscriptToTime(audioEl.currentTime);
+      window.findInNote?.rescan();
     }
   });
 }
