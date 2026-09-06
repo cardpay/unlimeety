@@ -24,6 +24,7 @@
   let idx = -1;
   let rescanTimer = null;
   let typeTimer = null;
+  let taHighlight = null; // lazily built overlay for the current "ta" hit
 
   function injectStyles() {
     const css = `
@@ -52,6 +53,17 @@
         border: none; border-radius: 6px; cursor: pointer;
       }
       #find-bar button:hover { background: var(--bg-hover, rgba(255,255,255,0.07)); color: var(--text-primary); }
+
+      /* Faked highlight for a "ta" (Edit mode) hit: a <textarea>'s internal
+         text isn't real DOM, so it can't take a CSS Custom Highlight the way
+         View mode's Range hits do below, and Chromium only paints native
+         selection while the textarea itself has focus — which goto() hands
+         back to #find-bar's own input right after navigating. Position/size
+         are set inline per hit; only the static look lives here. */
+      #find-ta-highlight {
+        position: fixed; pointer-events: none; z-index: 450;
+        background: var(--accent-dim); display: none;
+      }
     `;
     const el = document.createElement("style");
     el.textContent = css;
@@ -191,16 +203,50 @@
   }
 
   function paint() {
-    if (!CAN_HIGHLIGHT) return;
-    // Built with add() rather than new Highlight(...ranges): spreading tens of
-    // thousands of ranges blows V8's argument limit.
-    const all = new Highlight();
-    for (const h of hits) if (h.kind === "range") all.add(h.range);
-    if (all.size) CSS.highlights.set(HL_ALL, all);
-    else CSS.highlights.delete(HL_ALL);
     const cur = hits[idx];
-    if (cur && cur.kind === "range") CSS.highlights.set(HL_CUR, new Highlight(cur.range));
-    else CSS.highlights.delete(HL_CUR);
+
+    if (CAN_HIGHLIGHT) {
+      // Built with add() rather than new Highlight(...ranges): spreading tens
+      // of thousands of ranges blows V8's argument limit.
+      const all = new Highlight();
+      for (const h of hits) if (h.kind === "range") all.add(h.range);
+      if (all.size) CSS.highlights.set(HL_ALL, all);
+      else CSS.highlights.delete(HL_ALL);
+      if (cur?.kind === "range") CSS.highlights.set(HL_CUR, new Highlight(cur.range));
+      else CSS.highlights.delete(HL_CUR);
+    }
+
+    const editor = cur?.kind === "ta" && document.getElementById("editor");
+    if (editor) positionTaHighlight(editor, measureTextareaOffset(editor, cur.start, cur.len));
+    else hideTaHighlight();
+  }
+
+  function ensureTaHighlight() {
+    if (!taHighlight) {
+      taHighlight = document.createElement("div");
+      taHighlight.id = "find-ta-highlight";
+      document.body.appendChild(taHighlight);
+    }
+    return taHighlight;
+  }
+
+  // geo is in editor-content coordinates (see measureTextareaOffset) — convert
+  // to viewport coordinates via editor's own rect + its current scroll.
+  function positionTaHighlight(editor, geo) {
+    const el = ensureTaHighlight();
+    const rect = editor.getBoundingClientRect();
+    el.style.top = `${rect.top + geo.top - editor.scrollTop}px`;
+    el.style.left = `${rect.left + geo.left}px`;
+    el.style.width = `${geo.width}px`;
+    el.style.height = `${geo.height}px`;
+    el.style.display = "block";
+    // ponytail: doesn't track #editor's own scroll/resize after this paint —
+    // same known gap already logged for scrollToRange/scrollToTextareaOffset
+    // in deferred-work.md; the overlay goes stale exactly when they would.
+  }
+
+  function hideTaHighlight() {
+    if (taHighlight) taHighlight.style.display = "none";
   }
 
   // Scroll from the range's own geometry: every hit in a note without timecodes
@@ -215,17 +261,17 @@
     }
   }
 
-  // A <textarea> has no Range/getBoundingClientRect for its text, and
-  // setSelectionRange() does not scroll the match into view (verified: focus +
-  // setSelectionRange leaves scrollTop untouched). Rebuild scrollToRange's
-  // geometry check with an offscreen mirror <div> that copies every
-  // text-affecting property, so wrapping lands the marker on the same line the
-  // real caret would reach. Width is clientWidth (padding-box, already
-  // excluding both border and the scrollbar's track — unlike the computed
-  // "width", which is the textarea's own border-box and still includes the
-  // scrollbar), so the mirror wraps at the same column as the visible text
-  // once a note is long enough to need scrolling.
-  function scrollToTextareaOffset(editor, start, len) {
+  // A <textarea> has no Range/getBoundingClientRect for its text. Measure it
+  // with an offscreen mirror <div> that copies every text-affecting property,
+  // so wrapping lands the marker on the same line (and column) the real text
+  // would reach. Width is clientWidth (padding-box, already excluding both
+  // border and the scrollbar's track — unlike the computed "width", which is
+  // the textarea's own border-box and still includes the scrollbar), so the
+  // mirror wraps at the same column as the visible text once a note is long
+  // enough to need scrolling. Returns editor-content coordinates (i.e. before
+  // subtracting editor.scrollTop) — a wrapped (multi-line) match's box covers
+  // its full bounding rect, not just its first line.
+  function measureTextareaOffset(editor, start, len) {
     const style = getComputedStyle(editor);
     const mirror = document.createElement("div");
     mirror.style.cssText =
@@ -243,14 +289,25 @@
     marker.textContent = editor.value.slice(start, start + Math.max(len, 1)) || ".";
     mirror.appendChild(marker);
     document.body.appendChild(mirror);
-    const markerTop = marker.offsetTop;
-    const markerHeight = marker.offsetHeight || parseFloat(style.lineHeight) || 16;
+    const geo = {
+      top: marker.offsetTop,
+      left: marker.offsetLeft,
+      width: marker.offsetWidth,
+      height: marker.offsetHeight || parseFloat(style.lineHeight) || 16,
+    };
     mirror.remove();
+    return geo;
+  }
 
-    const lineTop = markerTop - editor.scrollTop;
-    const lineBottom = lineTop + markerHeight;
+  // setSelectionRange() does not scroll the match into view (verified: focus +
+  // setSelectionRange leaves scrollTop untouched) — do it manually from the
+  // same geometry scrollToRange uses for its Range hits.
+  function scrollToTextareaOffset(editor, start, len) {
+    const geo = measureTextareaOffset(editor, start, len);
+    const lineTop = geo.top - editor.scrollTop;
+    const lineBottom = lineTop + geo.height;
     if (lineTop < 0 || lineBottom > editor.clientHeight) {
-      editor.scrollTop += lineTop - (editor.clientHeight - markerHeight) / 2;
+      editor.scrollTop += lineTop - (editor.clientHeight - geo.height) / 2;
     }
   }
 
@@ -302,6 +359,7 @@
     hits = [];
     idx = -1;
     if (CAN_HIGHLIGHT) { CSS.highlights.delete(HL_ALL); CSS.highlights.delete(HL_CUR); }
+    hideTaHighlight();
   }
 
   // scrollToOffset is exposed for app.js's View->Edit toggle: it needs the same
