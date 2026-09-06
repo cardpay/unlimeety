@@ -1,6 +1,6 @@
 {
     "name": "unlimeety-desktop",
-    "version": "1.5.5",
+    "version": "1.6.0",
     "description": "Companion desktop app for Unlimeety",
     "main": "main.js",
     "scripts": {
