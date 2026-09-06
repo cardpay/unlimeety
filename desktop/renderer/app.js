@@ -3911,8 +3911,17 @@ dropOverlay.addEventListener("drop", async (e) => {
   dropOverlay.classList.add("hidden");
   const file = e.dataTransfer.files[0];
   if (!file) return;
+  // File.path was removed in Electron 32 — webUtils.getPathForFile (exposed
+  // through preload.js, since a sandboxed/contextIsolated renderer can't
+  // require('electron') for it directly) is the replacement. It can still
+  // come back empty for a File with no real on-disk path (e.g. dragged from
+  // a source that only ever produced in-memory content) — bail out rather
+  // than push an empty path into editor/save state, same as file:accepted's
+  // own `!filePath` guard.
+  const filePath = api.getPathForFile(file);
+  if (!filePath) return;
   const reader = new FileReader();
-  reader.onload = () => loadContent(file.path, reader.result);
+  reader.onload = () => loadContent(filePath, reader.result);
   reader.readAsText(file);
 });
 
@@ -5267,14 +5276,23 @@ async function openSettingsModal() {
   settingsTimeFormatRadios.forEach((r) => {
     r.checked = r.value === timeFormat;
   });
-  settingsOrKey.value = cfg?.openrouter?.apiKey || "";
+  // Write-only: settings:getSummarizer only ever hands back `hasKey`, never
+  // the actual secret (main.js), so the field is never pre-filled — only its
+  // placeholder and dataset.hasKey (read by saveSettings' validation and by
+  // main.js's "empty means keep the stored key" convention) reflect whether
+  // one is already stored.
+  settingsOrKey.value = "";
+  settingsOrKey.dataset.hasKey = cfg?.openrouter?.hasKey ? "1" : "";
+  settingsOrKey.placeholder = cfg?.openrouter?.hasKey ? "•••••••• (leave blank to keep)" : "sk-or-…";
   settingsOrModel.value = cfg?.openrouter?.model || "";
   settingsOrUrl.value = cfg?.openrouter?.baseUrl || "";
   settingsOlUrl.value = cfg?.ollama?.baseUrl || "";
   settingsOlModel.value = cfg?.ollama?.model || "";
   settingsOlCtx.value = cfg?.ollama?.contextTokens || "";
   settingsOaiUrl.value = cfg?.openaiCompatible?.baseUrl || "";
-  settingsOaiKey.value = cfg?.openaiCompatible?.apiKey || "";
+  settingsOaiKey.value = "";
+  settingsOaiKey.dataset.hasKey = cfg?.openaiCompatible?.hasKey ? "1" : "";
+  settingsOaiKey.placeholder = cfg?.openaiCompatible?.hasKey ? "•••••••• (leave blank to keep)" : "sk-…";
   settingsOaiModel.value = cfg?.openaiCompatible?.model || "";
   const autoStopEl = document.getElementById("settings-autostop");
   if (autoStopEl && api.getAutoStop) autoStopEl.checked = await api.getAutoStop();
@@ -5297,7 +5315,11 @@ async function saveSettings() {
     'input[name="settings-provider"]:checked',
   )?.value || "claude-code";
 
-  if (provider === "openrouter" && !settingsOrKey.value.trim()) {
+  if (
+    provider === "openrouter" &&
+    !settingsOrKey.value.trim() &&
+    settingsOrKey.dataset.hasKey !== "1"
+  ) {
     settingsError.textContent = "OpenRouter requires an API key.";
     settingsError.classList.remove("hidden");
     return;

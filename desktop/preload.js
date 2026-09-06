@@ -1,8 +1,12 @@
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 contextBridge.exposeInMainWorld('transcriber', {
     // File operations
     openFile: () => ipcRenderer.invoke('file:open'),
+    // Electron >= 32 no longer populates a dropped File's `.path` — this is
+    // the replacement. Sandboxed/contextIsolated renderers can't `require`
+    // electron's webUtils themselves, so it has to come through here.
+    getPathForFile: (file) => webUtils.getPathForFile(file),
     saveFile: (filePath, content) => ipcRenderer.invoke('file:save', filePath, content),
     // Blocking twin of saveFile, for beforeunload: the async path can lose the
     // race against process exit on ⌘Q.

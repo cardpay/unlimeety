@@ -97,7 +97,7 @@ function makeHandler(queueSubmitCalls) {
     const src = sliceIpcHandlerFn('transcripts:enhance');
     const factory = new Function(
         'isPathInside', 'TRANSCRIPTS_FOLDER', 'path', 'canReadPath', 'fs',
-        'ENHANCE_PRECHECK_PARSE_CAP', 'enhance', 'NOTE_LABEL', 'ENHANCE_CONFIRM_CHUNKS', 'queue',
+        'ENHANCE_PRECHECK_PARSE_CAP', 'enhance', 'NOTE_LABEL', 'ENHANCE_CONFIRM_CHUNKS', 'queue', 'fromMain',
         `return ${src};`,
     );
     return factory(
@@ -107,6 +107,7 @@ function makeHandler(queueSubmitCalls) {
         constValue('NOTE_LABEL'),
         constValue('ENHANCE_CONFIRM_CHUNKS'),
         { submit: (type, key, opts) => { queueSubmitCalls.push({ type, key, opts }); return { id: 'job1' }; } },
+        () => true, // fromMain — this test is about the chunk-count precheck, not the sender guard
     );
 }
 

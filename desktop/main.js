@@ -142,6 +142,20 @@ let mainWindow = null;
 let currentFilePath = null;
 let isDirty = false;
 
+// ─── Defense-in-depth: sender identity ────────────────────────────────────────
+// preload.js (the main window) and preload-panel.js (the notes/prompt
+// companion windows) are two different contextBridge surfaces, but every
+// ipcMain handler is one process-wide table — nothing before this stopped a
+// window loaded with preload.js from invoking a channel meant for the main
+// window only. The preload split already keeps file:*/summary:*/settings:*
+// and the destructive transcripts:*/record:* channels off the companion
+// windows' bridge, but this is the check that actually enforces it rather
+// than relying on preload wiring alone. mainWindow can be null very early/
+// late in the app lifecycle, so this fails closed rather than open.
+function fromMain(e) {
+    return !!mainWindow && e.sender === mainWindow.webContents;
+}
+
 let pendingFilePath = null; // file queued before window ready
 
 // ─── Single instance lock ─────────────────────────────────────────────────────
@@ -504,7 +518,8 @@ function openFileFromPath(filePath) {
     }
 }
 
-ipcMain.on('file:accepted', (_e, filePath) => {
+ipcMain.on('file:accepted', (e, filePath) => {
+    if (!fromMain(e)) return;
     if (typeof filePath !== 'string' || !filePath) return;
     currentFilePath = filePath;
     isDirty = false;
@@ -571,7 +586,8 @@ function buildMenu() {
 
 // ─── IPC: File operations ─────────────────────────────────────────────────────
 
-ipcMain.handle('file:open', async () => {
+ipcMain.handle('file:open', async (e) => {
+    if (!fromMain(e)) return null;
     const result = await dialog.showOpenDialog(mainWindow, {
         title: 'Open Transcript',
         filters: [
@@ -655,7 +671,10 @@ function writeTranscriptFile(filePath, content) {
     }
 }
 
-ipcMain.handle('file:save', (_e, filePath, content) => writeTranscriptFile(filePath, content));
+ipcMain.handle('file:save', (e, filePath, content) => {
+    if (!fromMain(e)) return { ok: false, error: 'Forbidden' };
+    return writeTranscriptFile(filePath, content);
+});
 
 // Synchronous twin for the renderer's beforeunload flush (see saveFileSync in
 // preload.js): sendSync blocks the renderer, which is what makes the write land
@@ -664,6 +683,7 @@ ipcMain.handle('file:save', (_e, filePath, content) => writeTranscriptFile(fileP
 // is, and this runs while the window is closing — a throw here would hang the
 // quit and cost the user the very edits this flush protects.
 ipcMain.on('file:saveSync', (e, filePath, content) => {
+    if (!fromMain(e)) { e.returnValue = { ok: false, error: 'Forbidden' }; return; }
     try {
         e.returnValue = writeTranscriptFile(filePath, content);
     } catch (err) {
@@ -684,7 +704,8 @@ async function handleSaveAs(content) {
     return result.filePath;
 }
 
-ipcMain.handle('file:saveAs', async (_e, content) => {
+ipcMain.handle('file:saveAs', async (e, content) => {
+    if (!fromMain(e)) return { ok: false, error: 'Forbidden' };
     const filePath = await handleSaveAs(content);
     if (!filePath) return { ok: false, canceled: true };
     try {
@@ -996,11 +1017,13 @@ function findExistingSummaryPath(transcriptPath, folderOverride, preReadHead) {
     return null;
 }
 
-ipcMain.handle('settings:getSummaryFolder', () => {
+ipcMain.handle('settings:getSummaryFolder', (e) => {
+    if (!fromMain(e)) return null;
     return readConfig().summaryFolder || null;
 });
 
-ipcMain.handle('settings:setSummaryFolder', async () => {
+ipcMain.handle('settings:setSummaryFolder', async (e) => {
+    if (!fromMain(e)) return { ok: false, error: 'Forbidden' };
     const result = await dialog.showOpenDialog(mainWindow, {
         title: 'Choose folder for summaries',
         properties: ['openDirectory', 'createDirectory'],
@@ -1013,7 +1036,8 @@ ipcMain.handle('settings:setSummaryFolder', async () => {
     return { ok: true, folder };
 });
 
-ipcMain.handle('settings:pickFolder', async () => {
+ipcMain.handle('settings:pickFolder', async (e) => {
+    if (!fromMain(e)) return { ok: false, error: 'Forbidden' };
     const result = await dialog.showOpenDialog(mainWindow, {
         title: 'Choose folder for this prompt\'s summaries',
         properties: ['openDirectory', 'createDirectory'],
@@ -1058,9 +1082,13 @@ ipcMain.handle('prompts:save', (_e, prompt) => {
 // chunk costs a few hundred ms, and every one of those blocks IPC.
 const MAX_GLOSSARY_CHARS = 16 * 1024;
 
-ipcMain.handle('settings:getGlossary', () => readConfig().glossary || '');
+ipcMain.handle('settings:getGlossary', (e) => {
+    if (!fromMain(e)) return '';
+    return readConfig().glossary || '';
+});
 
-ipcMain.handle('settings:setGlossary', (_e, text) => {
+ipcMain.handle('settings:setGlossary', (e, text) => {
+    if (!fromMain(e)) return { ok: false, error: 'Forbidden' };
     if (typeof text !== 'string') return { ok: false, error: 'invalid glossary payload' };
     if (text.length > MAX_GLOSSARY_CHARS) {
         return { ok: false, error: `Glossary is too long (max ${MAX_GLOSSARY_CHARS / 1024} KB).` };
@@ -1087,7 +1115,8 @@ function frontmatterWarning(text) {
         : 'Frontmatter is missing or unterminated — Obsidian Bases/Dataview will skip this note.';
 }
 
-ipcMain.handle('summary:save', (_e, transcriptPath, text, folder) => {
+ipcMain.handle('summary:save', (e, transcriptPath, text, folder) => {
+    if (!fromMain(e)) return { ok: false, error: 'Forbidden' };
     if (!canReadPath(transcriptPath) || !summaryDirAllowed(transcriptPath, folder || null)) {
         return { ok: false, error: 'Refusing to operate on a path outside the managed folders.' };
     }
@@ -1104,7 +1133,8 @@ ipcMain.handle('summary:save', (_e, transcriptPath, text, folder) => {
 // Overwrite an existing summary in place — writes back to the exact file the
 // summary was loaded from (findExistingSummaryPath), so editing never spawns a
 // duplicate under a different (default/legacy) name.
-ipcMain.handle('summary:overwrite', (_e, transcriptPath, text, folder) => {
+ipcMain.handle('summary:overwrite', (e, transcriptPath, text, folder) => {
+    if (!fromMain(e)) return { ok: false, error: 'Forbidden' };
     if (!canReadPath(transcriptPath) || !summaryDirAllowed(transcriptPath, folder || null)) {
         return { ok: false, error: 'Refusing to operate on a path outside the managed folders.' };
     }
@@ -1119,7 +1149,8 @@ ipcMain.handle('summary:overwrite', (_e, transcriptPath, text, folder) => {
     }
 });
 
-ipcMain.handle('summary:setName', (_e, transcriptPath, customName) => {
+ipcMain.handle('summary:setName', (e, transcriptPath, customName) => {
+    if (!fromMain(e)) return { ok: false, error: 'Forbidden' };
     const cfg = readConfig();
     if (!cfg.summaryNames) cfg.summaryNames = {};
     const safe = customName ? sanitizeSummaryBase(customName) : null;
@@ -1132,7 +1163,8 @@ ipcMain.handle('summary:setName', (_e, transcriptPath, customName) => {
     return { ok: true };
 });
 
-ipcMain.handle('summary:load', (_e, transcriptPath, folder) => {
+ipcMain.handle('summary:load', (e, transcriptPath, folder) => {
+    if (!fromMain(e)) return { ok: false, error: 'Forbidden' };
     if (!canReadPath(transcriptPath) || !summaryDirAllowed(transcriptPath, folder || null)) {
         return { ok: false, error: 'Refusing to operate on a path outside the managed folders.' };
     }
@@ -1224,15 +1256,51 @@ function readSummarizerConfig() {
     };
 }
 
-ipcMain.handle('settings:getSummarizer', () => readSummarizerConfig());
+// Renderer-facing shape of the summarizer config: never hands back a
+// decrypted secret, only whether one is set. readSummarizerConfig() itself
+// keeps returning the real key — the four provider call sites (runOpenRouter/
+// runOpenAICompat/the two chat:ask branches) need it to actually authenticate.
+function publicSummarizerConfig() {
+    const cfg = readSummarizerConfig();
+    return {
+        provider: cfg.provider,
+        openrouter: { hasKey: Boolean(cfg.openrouter.apiKey), model: cfg.openrouter.model, baseUrl: cfg.openrouter.baseUrl },
+        ollama: cfg.ollama,
+        openaiCompatible: { hasKey: Boolean(cfg.openaiCompatible.apiKey), model: cfg.openaiCompatible.model, baseUrl: cfg.openaiCompatible.baseUrl },
+    };
+}
+
+// An empty key submitted from Settings means "leave the stored key alone",
+// not "clear it" — otherwise saving an unrelated field (model, base URL) with
+// a write-only key input that the renderer never re-populates would silently
+// wipe apiKeyEnc. Carries over whichever raw (encrypted or legacy plaintext)
+// field the provider's stored config already had.
+function preserveApiKeyFields(existingProviderCfg) {
+    const out = {};
+    if (typeof existingProviderCfg?.apiKeyEnc === 'string') out.apiKeyEnc = existingProviderCfg.apiKeyEnc;
+    if (typeof existingProviderCfg?.apiKey === 'string') out.apiKey = existingProviderCfg.apiKey;
+    return out;
+}
+
+ipcMain.handle('settings:getSummarizer', (e) => {
+    if (!fromMain(e)) return null;
+    return publicSummarizerConfig();
+});
 
 // Shown at the foot of Settings. `app.getVersion()` reads the packaged
 // Info.plist, so a built app reports its real version rather than whatever
 // package.json happened to say at bundle time.
 ipcMain.handle('app:version', () => app.getVersion());
 
-ipcMain.handle('settings:getAutoStop', () => autoStopEnabled());
-ipcMain.handle('settings:setAutoStop', (_e, on) => { setAutoStopEnabled(Boolean(on)); return { ok: true }; });
+ipcMain.handle('settings:getAutoStop', (e) => {
+    if (!fromMain(e)) return false;
+    return autoStopEnabled();
+});
+ipcMain.handle('settings:setAutoStop', (e, on) => {
+    if (!fromMain(e)) return { ok: false, error: 'Forbidden' };
+    setAutoStopEnabled(Boolean(on));
+    return { ok: true };
+});
 
 // Trims, strips a trailing slash, then either accepts an http(s) URL, falls
 // back to `dflt` when nothing was given, or rejects — a scheme a provider
@@ -1249,7 +1317,8 @@ function normalizeBaseUrl(raw, dflt) {
     return { ok: true, value: trimmed };
 }
 
-ipcMain.handle('settings:setSummarizer', (_e, summarizer) => {
+ipcMain.handle('settings:setSummarizer', (e, summarizer) => {
+    if (!fromMain(e)) return { ok: false, error: 'Forbidden' };
     if (!summarizer || typeof summarizer !== 'object') {
         return { ok: false, error: 'invalid summarizer payload' };
     }
@@ -1257,6 +1326,7 @@ ipcMain.handle('settings:setSummarizer', (_e, summarizer) => {
     const provider = allowed.has(summarizer.provider) ? summarizer.provider : 'claude-code';
     const apiKey = String(summarizer.openrouter?.apiKey || '').trim();
     const oaiKey = String(summarizer.openaiCompatible?.apiKey || '').trim();
+    const existing = readConfig().summarizer || {};
 
     const openrouterUrl = normalizeBaseUrl(summarizer.openrouter?.baseUrl, DEFAULT_SUMMARIZER.openrouter.baseUrl);
     if (!openrouterUrl.ok) return openrouterUrl;
@@ -1268,7 +1338,8 @@ ipcMain.handle('settings:setSummarizer', (_e, summarizer) => {
     const stored = {
         provider,
         openrouter: {
-            ...encryptApiKey(apiKey),
+            // Empty input keeps the stored key — see preserveApiKeyFields.
+            ...(apiKey ? encryptApiKey(apiKey) : preserveApiKeyFields(existing.openrouter)),
             model: String(summarizer.openrouter?.model || DEFAULT_SUMMARIZER.openrouter.model).trim(),
             baseUrl: openrouterUrl.value,
         },
@@ -1278,7 +1349,7 @@ ipcMain.handle('settings:setSummarizer', (_e, summarizer) => {
             contextTokens: parsePositiveInt(summarizer.ollama?.contextTokens, MAX_OLLAMA_CONTEXT_TOKENS),
         },
         openaiCompatible: {
-            ...encryptApiKey(oaiKey),
+            ...(oaiKey ? encryptApiKey(oaiKey) : preserveApiKeyFields(existing.openaiCompatible)),
             model: String(summarizer.openaiCompatible?.model || DEFAULT_SUMMARIZER.openaiCompatible.model).trim(),
             baseUrl: openaiUrl.value,
         },
@@ -1286,8 +1357,9 @@ ipcMain.handle('settings:setSummarizer', (_e, summarizer) => {
     const cfg = readConfig();
     cfg.summarizer = stored;
     writeConfig(cfg);
-    // Hand the decrypted shape back so the settings UI keeps working unchanged.
-    return { ok: true, summarizer: readSummarizerConfig() };
+    // Masked shape back — never hand the (possibly just re-encrypted) secret
+    // back to the renderer just because it asked to save something else.
+    return { ok: true, summarizer: publicSummarizerConfig() };
 });
 
 // ─── IPC: Summarization ───────────────────────────────────────────────────────
@@ -2444,7 +2516,8 @@ ipcMain.handle('transcripts:getAudioPath', (_e, filePath) => {
     return paths[0] || null;
 });
 
-ipcMain.handle('transcripts:delete', async (_e, filePath) => {
+ipcMain.handle('transcripts:delete', async (e, filePath) => {
+    if (!fromMain(e)) return { ok: false, error: 'Forbidden' };
     // Match the *Only delete handlers: never operate on a renderer-supplied path
     // that lies outside the transcripts folder (defense-in-depth vs a compromised
     // renderer). The summary/audio it also removes are derived, not passed in.
@@ -2515,7 +2588,8 @@ ipcMain.handle('transcripts:openFile', async (_e, filePath) => {
 });
 
 // Delete only the .txt transcript. Audio and summary stay on disk.
-ipcMain.handle('transcripts:deleteTranscriptOnly', async (_e, filePath) => {
+ipcMain.handle('transcripts:deleteTranscriptOnly', async (e, filePath) => {
+    if (!fromMain(e)) return { ok: false, error: 'Forbidden' };
     if (typeof filePath !== 'string' || !isPathInside(filePath, TRANSCRIPTS_FOLDER)) {
         return { ok: false, error: 'Refusing to operate on a path outside the transcripts folder.' };
     }
@@ -2540,7 +2614,8 @@ ipcMain.handle('transcripts:deleteTranscriptOnly', async (_e, filePath) => {
 });
 
 // Delete only the summary paired with a transcript. Transcript and audio stay.
-ipcMain.handle('transcripts:deleteSummaryOnly', async (_e, filePath) => {
+ipcMain.handle('transcripts:deleteSummaryOnly', async (e, filePath) => {
+    if (!fromMain(e)) return { ok: false, error: 'Forbidden' };
     if (typeof filePath !== 'string' || !isPathInside(filePath, TRANSCRIPTS_FOLDER)) {
         return { ok: false, error: 'Refusing to operate on a path outside the transcripts folder.' };
     }
@@ -2567,7 +2642,8 @@ ipcMain.handle('transcripts:deleteSummaryOnly', async (_e, filePath) => {
 
 // Delete only the audio recording(s) paired with a transcript. Transcript and
 // summary stay on disk.
-ipcMain.handle('transcripts:deleteAudioOnly', async (_e, filePath) => {
+ipcMain.handle('transcripts:deleteAudioOnly', async (e, filePath) => {
+    if (!fromMain(e)) return { ok: false, error: 'Forbidden' };
     if (typeof filePath !== 'string' || !isPathInside(filePath, TRANSCRIPTS_FOLDER)) {
         return { ok: false, error: 'Refusing to operate on a path outside the transcripts folder.' };
     }
@@ -2614,7 +2690,8 @@ function uniqueFilePath(dir, base, ext) {
     return candidate;
 }
 
-ipcMain.handle('transcripts:create', async (_e, payload) => {
+ipcMain.handle('transcripts:create', async (e, payload) => {
+    if (!fromMain(e)) return { ok: false, error: 'Forbidden' };
     try {
         const title = String(payload?.title || '').trim();
         const body = String(payload?.content || '').replace(/\r\n/g, '\n');
@@ -2982,7 +3059,8 @@ const ENHANCE_PRECHECK_PARSE_CAP = 2 * 1024 * 1024;
 // content, for the in-editor reload) arrives via `queue:changed`. `confirmed`
 // lets the renderer skip the chunk-count check once the user has already
 // seen and accepted it.
-ipcMain.handle('transcripts:enhance', (_e, filePath, confirmed) => {
+ipcMain.handle('transcripts:enhance', (e, filePath, confirmed) => {
+    if (!fromMain(e)) return { ok: false, error: 'Forbidden' };
     // Same gate runEnhanceJob itself applies before ever reading the file —
     // this precheck reads too, so it needs the identical guard, not just the
     // real run. Any path that fails it just skips straight to submit, where
@@ -3010,7 +3088,8 @@ ipcMain.handle('transcripts:enhance', (_e, filePath, confirmed) => {
     return { ok: true, jobId: job.id };
 });
 
-ipcMain.handle('transcripts:rename', async (_e, filePath, newTitle) => {
+ipcMain.handle('transcripts:rename', async (e, filePath, newTitle) => {
+    if (!fromMain(e)) return { ok: false, error: 'Forbidden' };
     // The only one of the delete/rename handlers that also writes — needs
     // canWritePath alongside the containment check (mirrors runEnhanceJob).
     if (typeof filePath !== 'string' || !isPathInside(filePath, TRANSCRIPTS_FOLDER) || !canWritePath(filePath)) {
@@ -4111,7 +4190,8 @@ function readNotesSidecar(wavPath) {
     }
 }
 
-ipcMain.handle('record:delete', async (_e, filePath) => {
+ipcMain.handle('record:delete', async (e, filePath) => {
+    if (!fromMain(e)) return { ok: false, error: 'Forbidden' };
     if (typeof filePath !== 'string' || !isPathInside(filePath, RECORDINGS_FOLDER)) {
         return { ok: false, error: 'Refusing to delete file outside recordings folder.' };
     }
@@ -4136,7 +4216,8 @@ ipcMain.handle('record:delete', async (_e, filePath) => {
 // Bulk-delete several recordings behind a single confirmation. Mirrors
 // record:delete — only the .wav files are removed; transcripts and summaries
 // (if any) are kept.
-ipcMain.handle('record:deleteMany', async (_e, paths) => {
+ipcMain.handle('record:deleteMany', async (e, paths) => {
+    if (!fromMain(e)) return { ok: false, error: 'Forbidden' };
     if (!Array.isArray(paths)) {
         return { ok: false, error: 'Expected an array of recording paths.' };
     }
@@ -4170,7 +4251,8 @@ ipcMain.handle('record:deleteMany', async (_e, paths) => {
     return { ok: true, deleted, errors };
 });
 
-ipcMain.handle('record:rename', async (_e, wavPath, newTitle) => {
+ipcMain.handle('record:rename', async (e, wavPath, newTitle) => {
+    if (!fromMain(e)) return { ok: false, error: 'Forbidden' };
     if (typeof wavPath !== 'string' || !isPathInside(wavPath, RECORDINGS_FOLDER)) {
         return { ok: false, error: 'Refusing to operate on a path outside the recordings folder.' };
     }
@@ -4699,7 +4781,8 @@ ipcMain.handle('record:getInstalledModels', () => {
 // Remove a WhisperKit model directory from disk. Renderer surfaces this
 // from the model picker; on success the badge flips back to "↓ download"
 // and the next Start re-downloads it.
-ipcMain.handle('record:deleteModel', async (_e, modelName) => {
+ipcMain.handle('record:deleteModel', async (e, modelName) => {
+    if (!fromMain(e)) return { ok: false, error: 'Forbidden' };
     try {
         // Tight allow-list on the name shape so an oddly-typed value can't
         // make path.join escape the cache directory.
@@ -4837,7 +4920,8 @@ function showNotesWindow() {
         type: 'panel',
         acceptFirstMouse: true,
         webPreferences: {
-            preload: path.join(__dirname, 'preload.js'),
+            // Narrower than the main window's preload.js — see preload-panel.js.
+            preload: path.join(__dirname, 'preload-panel.js'),
             contextIsolation: true,
             nodeIntegration: false,
             sandbox: true,
@@ -4989,7 +5073,8 @@ function showPromptWindow(data) {
         focusable: false,
         acceptFirstMouse: true,
         webPreferences: {
-            preload: path.join(__dirname, 'preload.js'),
+            // Narrower than the main window's preload.js — see preload-panel.js.
+            preload: path.join(__dirname, 'preload-panel.js'),
             contextIsolation: true,
             nodeIntegration: false,
             sandbox: true,
