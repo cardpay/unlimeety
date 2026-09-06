@@ -215,6 +215,45 @@
     }
   }
 
+  // A <textarea> has no Range/getBoundingClientRect for its text, and
+  // setSelectionRange() does not scroll the match into view (verified: focus +
+  // setSelectionRange leaves scrollTop untouched). Rebuild scrollToRange's
+  // geometry check with an offscreen mirror <div> that copies every
+  // text-affecting property, so wrapping lands the marker on the same line the
+  // real caret would reach. Width is clientWidth (padding-box, already
+  // excluding both border and the scrollbar's track — unlike the computed
+  // "width", which is the textarea's own border-box and still includes the
+  // scrollbar), so the mirror wraps at the same column as the visible text
+  // once a note is long enough to need scrolling.
+  function scrollToTextareaOffset(editor, start, len) {
+    const style = getComputedStyle(editor);
+    const mirror = document.createElement("div");
+    mirror.style.cssText =
+      "position:absolute; visibility:hidden; top:0; left:-9999px; height:auto;" +
+      // #editor has border:none, so border-box == padding-box == clientWidth;
+      // this assumption breaks if #editor ever gains a border.
+      `box-sizing:border-box; width:${editor.clientWidth}px;` +
+      `font-family:${style.fontFamily}; font-size:${style.fontSize}; font-weight:${style.fontWeight};` +
+      `font-style:${style.fontStyle}; letter-spacing:${style.letterSpacing}; line-height:${style.lineHeight};` +
+      `padding:${style.padding};` +
+      `white-space:${style.whiteSpace}; overflow-wrap:${style.overflowWrap}; tab-size:${style.tabSize};` +
+      `direction:${style.direction}; text-align:${style.textAlign};`;
+    mirror.textContent = editor.value.slice(0, start);
+    const marker = document.createElement("span");
+    marker.textContent = editor.value.slice(start, start + Math.max(len, 1)) || ".";
+    mirror.appendChild(marker);
+    document.body.appendChild(mirror);
+    const markerTop = marker.offsetTop;
+    const markerHeight = marker.offsetHeight || parseFloat(style.lineHeight) || 16;
+    mirror.remove();
+
+    const lineTop = markerTop - editor.scrollTop;
+    const lineBottom = lineTop + markerHeight;
+    if (lineTop < 0 || lineBottom > editor.clientHeight) {
+      editor.scrollTop += lineTop - (editor.clientHeight - markerHeight) / 2;
+    }
+  }
+
   // Navigation — the only path allowed to move the scroll position or the focus.
   function goto(n) {
     idx = hits.length ? ((n % hits.length) + hits.length) % hits.length : -1;
@@ -222,11 +261,13 @@
     if (hit?.kind === "range") {
       scrollToRange(hit);
     } else if (hit?.kind === "ta") {
-      // Focus so Chromium scrolls the textarea to the selection, then hand focus
-      // back to the find input; the selection stays drawn.
       const editor = document.getElementById("editor");
+      // Focus first so the native selection actually renders, then scroll it
+      // into view — setSelectionRange alone does not scroll — then hand focus
+      // back to the find input so typing keeps refining the search.
       editor.focus();
       editor.setSelectionRange(hit.start, hit.start + hit.len);
+      scrollToTextareaOffset(editor, hit.start, hit.len);
       input.focus();
     }
     paint();
