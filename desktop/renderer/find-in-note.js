@@ -59,10 +59,17 @@
          View mode's Range hits do below, and Chromium only paints native
          selection while the textarea itself has focus — which goto() hands
          back to #find-bar's own input right after navigating. Position/size
-         are set inline per hit; only the static look lives here. */
+         are set inline per hit; only the static look lives here. Drawn OVER
+         already-painted glyphs (not behind them, the way a real selection or
+         ::highlight background is composited), so --accent-dim's usual 12%
+         alpha reads as barely-there here — a stronger, explicitly-mixed tint
+         plus a solid edge instead, close enough to opaque to read as "found"
+         at a glance while the character underneath stays legible through it. */
       #find-ta-highlight {
         position: fixed; pointer-events: none; z-index: 450;
-        background: var(--accent-dim); display: none;
+        background: color-mix(in srgb, var(--accent) 55%, transparent);
+        outline: 1px solid var(--accent);
+        display: none;
       }
     `;
     const el = document.createElement("style");
