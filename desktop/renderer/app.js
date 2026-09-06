@@ -991,6 +991,9 @@ if (PLAYER_OK) {
 }
 
 // ─── Transcript view ──────────────────────────────────────────────────────────
+// Also read by the View->Edit toggle (resolveEditCaretOffset) to land the
+// textarea's caret on the same segment — every reset to null below (a note
+// switch, a rename, a revert) doubles as "forget where Edit mode should land".
 let lastActiveSeg = null;
 let userScrolledAt = 0;
 
@@ -1003,15 +1006,19 @@ function fmtTc(sec) {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
+// ── segment offsets (extracted verbatim by test/segment-offsets.test.js) ──
+// A segment line opens with a bracketed timestamp: either an audio offset
+// "[m:ss]" or a wall-clock time from a text export, e.g. "[1:00:32 PM]".
+// Shared by parseSegments and segmentOffsets so the two can't drift apart —
+// they must agree line-for-line on what counts as a new segment.
+const SEGMENT_LINE_RE = /^\[(\d[^\]]*)\]\s*(.*)/;
+
 function parseSegments(content) {
   const lines = content.split("\n");
   const segments = [];
   let cur = null;
-  // A segment line opens with a bracketed timestamp: either an audio offset
-  // "[m:ss]" or a wall-clock time from a text export, e.g. "[1:00:32 PM]".
-  const re = /^\[(\d[^\]]*)\]\s*(.*)/;
   for (const line of lines) {
-    const match = re.exec(line);
+    const match = SEGMENT_LINE_RE.exec(line);
     if (match) {
       if (cur) segments.push(cur);
       const label = match[1].trim();
@@ -1028,6 +1035,33 @@ function parseSegments(content) {
   if (cur) segments.push(cur);
   return segments;
 }
+
+// Character offset into `content` where each parseSegments(content) entry's
+// timestamp line starts — the raw-text anchor a View-mode segment maps back
+// to when switching to Edit mode (see resolveEditCaretOffset). Assumes LF line
+// endings, same as parseSegments (both split on "\n" — a lone "\r" would throw
+// the two out of step with each other).
+function segmentOffsets(content) {
+  const offsets = [];
+  let pos = 0;
+  for (const line of content.split("\n")) {
+    if (SEGMENT_LINE_RE.test(line)) offsets.push(pos);
+    pos += line.length + 1; // +1 for the "\n" split() consumed
+  }
+  return offsets;
+}
+
+// The View->Edit toggle's only decision logic, pulled out so it's testable
+// without a real <textarea> or DOM segment element: `activeSeg` is whatever
+// lastActiveSeg was in View mode (or null — a freshly opened note, or one
+// with no timed segments, has never set it; the toggle then leaves the
+// textarea's own caret position alone rather than guessing).
+function resolveEditCaretOffset(activeSeg, editorValue) {
+  const idx = activeSeg ? parseInt(activeSeg.dataset.idx, 10) : NaN;
+  if (Number.isNaN(idx)) return null;
+  return segmentOffsets(editorValue)[idx] ?? null;
+}
+// ── end segment offsets ──
 
 // An Enhance-bound entry keeps the address it was read from as a trailing
 // annotation — "Полина Зорина (Beta) <p.zorina@example.com>" — so a wrong
@@ -1208,7 +1242,7 @@ function buildTranscriptViewHtml(content, carded) {
     if (header) {
       html += transcriptMetaHtml(header, { inlineRows: !carded });
     }
-    for (const seg of parseSegments(content)) {
+    for (const [i, seg] of parseSegments(content).entries()) {
       // "Note" is the reserved label the recording UIs write for the user's own
       // typed notes — it's not a speaker, so it gets a plain label instead of a
       // rename chip. Renaming it would rewrite every "] Note:" line and
@@ -1222,7 +1256,10 @@ function buildTranscriptViewHtml(content, carded) {
       // a wall-clock label (no audio to seek), so render them without data-t.
       const seekAttr = seg.t != null ? ` data-t="${seg.t}"` : "";
       const tc = seg.t != null ? fmtTc(seg.t) : seg.label;
-      html += `<div class="tv-seg${seg.t != null ? "" : " tv-seg--noseek"}"${seekAttr}>` +
+      // data-idx pairs this element back to segmentOffsets(content)'s array —
+      // its index into the same parseSegments(content) order — so the
+      // View->Edit toggle can find this segment's raw-text position.
+      html += `<div class="tv-seg${seg.t != null ? "" : " tv-seg--noseek"}" data-idx="${i}"${seekAttr}>` +
               `<span class="tv-time">${escHtml(tc)}</span>` +
               `<span class="tv-body">${speaker}${escHtml(seg.text)}</span>` +
               `</div>`;
@@ -1325,6 +1362,15 @@ if (PLAYER_OK) {
   btnToggleView.addEventListener("click", () => {
     if (editor.classList.contains("hidden")) {
       showEditorTextarea();
+      // Land the caret where the user was in View mode instead of wherever the
+      // textarea's value was last assigned (its native end-of-text default).
+      const offset = resolveEditCaretOffset(lastActiveSeg, editor.value);
+      if (offset != null) {
+        editor.setSelectionRange(offset, offset);
+        // len=0: reused for its line-height geometry only, not a highlight —
+        // this is a caret, not a find match.
+        window.findInNote?.scrollToOffset(editor, offset, 0);
+      }
     } else {
       renderTranscriptView(editor.value);
       showTranscriptView();

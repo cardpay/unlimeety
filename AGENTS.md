@@ -54,6 +54,10 @@ WhisperKit/SpeakerKit helper, and a Chrome extension. `README.md` covers usage, 
 - A renderer script's top-level `const` must never share a name with a `contextBridge` global
   (`transcriber`, `queueApi`, `recordApi`, …) — it is a parse-time SyntaxError that kills the whole
   file silently. `test/renderer-globals.test.js` guards this.
+- `.tv-seg`'s `data-idx` (`buildTranscriptViewHtml`) and `segmentOffsets(content)` (both in
+  `desktop/renderer/app.js`) must be computed from the same `content` string — index `i` is only
+  meaningful against the `parseSegments(content)` call that produced it. This is what the View→Edit
+  toggle uses to land the caret; a stale or mismatched `content` resolves to the wrong segment.
 
 <!-- /bmad:context -->
 

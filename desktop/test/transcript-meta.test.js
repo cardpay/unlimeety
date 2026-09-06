@@ -9,18 +9,7 @@
 // dependency on them, this test is what breaks first.
 
 const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const { findRegion } = require('./lib/find-region');
-
-const RENDERER = path.join(__dirname, '..', 'renderer');
-
-function region(file, name) {
-    const src = fs.readFileSync(path.join(RENDERER, file), 'utf-8');
-    const m = findRegion(src, name);
-    assert.ok(m, `"${name}" region markers not found in renderer/${file}`);
-    return m[0];
-}
+const { region } = require('./lib/find-region');
 
 // Stubs, not the real collaborators: what is under test is which key goes
 // through which formatter and what markup comes out, not Intl's output on this

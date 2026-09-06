@@ -304,5 +304,9 @@
     if (CAN_HIGHLIGHT) { CSS.highlights.delete(HL_ALL); CSS.highlights.delete(HL_CUR); }
   }
 
-  window.findInNote = { open, close, isOpen };
+  // scrollToOffset is exposed for app.js's View->Edit toggle: it needs the same
+  // "place the textarea's viewport at this character offset" geometry this
+  // module already had to solve for find-navigation, and reimplementing the
+  // mirror-<div> measurement a second time would only risk the two drifting.
+  window.findInNote = { open, close, isOpen, scrollToOffset: scrollToTextareaOffset };
 })();

@@ -17,16 +17,12 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
-const { findRegion } = require('./lib/find-region');
+const { region: regionOf } = require('./lib/find-region');
 
-const APP = path.join(__dirname, '..', 'renderer', 'app.js');
-const src = fs.readFileSync(APP, 'utf-8');
-
-function region(name) {
-    const m = findRegion(src, name);
-    assert.ok(m, `"${name}" region markers not found in renderer/app.js`);
-    return m[0];
-}
+// `src` is also sliced directly below (PROMPTS, buildExportHtml) outside the
+// `// ── <name> ──` marker convention regionOf() reads.
+const src = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'app.js'), 'utf-8');
+const region = (name) => regionOf('app.js', name);
 
 const escapeHtml = (s) => String(s)
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
