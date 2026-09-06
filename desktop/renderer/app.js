@@ -2162,9 +2162,11 @@ function openMeetingMenu(x, y, m) {
   closeMeetingMeta();
   contextMenu = { x, y, meetingId: m.id };
 
-  // Clamp so the popover stays on-screen.
+  // Clamp so the popover stays on-screen. H is sized for the tallest variant:
+  // the 8 buttons + 1 divider an audio-only row renders (its extra "Show in
+  // Finder" item plus "Copy file path", both present on every other row too).
   const W = 220;
-  const H = 280;
+  const H = 310;
   const left = Math.max(8, Math.min(x, window.innerWidth - W - 8));
   const top = Math.max(8, Math.min(y, window.innerHeight - H - 8));
 
@@ -2231,6 +2233,10 @@ function openMeetingMenu(x, y, m) {
         <span class="meeting-menu-icon">${iconSvg("folder", { size: 13 })}</span>
         <span>Show in Finder</span>
       </button>` : ""}
+      <button class="meeting-menu-item" data-action="copy-path" type="button" role="menuitem">
+        <span class="meeting-menu-icon">${iconSvg("copy", { size: 13 })}</span>
+        <span>Copy file path</span>
+      </button>
       <div class="meeting-menu-divider"></div>
       <button class="meeting-menu-item danger" data-action="delete-audio" type="button" role="menuitem" ${audioReason || enhancing ? "disabled" : ""}${reasonTitle(audioReason)}>
         <span class="meeting-menu-icon">${iconSvg("trash", { size: 13 })}</span>
@@ -2294,6 +2300,10 @@ function openMeetingMenu(x, y, m) {
         if (m.audioPath) sendToTranscribeSettings([m.audioPath]);
       } else if (action === "reveal") {
         recApi?.showInFinder(m.id);
+      } else if (action === "copy-path") {
+        // m.id is the transcript .txt path when there is one, else the wav —
+        // same file "rename"/"delete transcript"/"delete audio" above key on.
+        try { await navigator.clipboard.writeText(m.id); } catch (_) {}
       } else if (action === "delete-audio") {
         await deleteMeetingArtifact(m, noTranscript ? "recording" : "audio");
       } else if (action === "delete-transcript") {
@@ -2705,6 +2715,7 @@ const ICON_PATHS = {
   pencil:  '<path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"/>',
   info:    '<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>',
   folder:  '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>',
+  copy:    '<rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
 };
 
 function iconSvg(name, opts = {}) {
