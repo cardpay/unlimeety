@@ -4949,6 +4949,17 @@ function showNotesWindow() {
 }
 
 function closeNotesWindow() {
+    // Unlike promptWindow above, this panel is focusable (real keyboard input
+    // for typing), so clicking its own close button leaves it as the key
+    // window. Destroying the key window makes macOS auto-promote mainWindow
+    // to key-and-front — surfacing it over whatever app (e.g. the meeting)
+    // was frontmost. app.hide() undoes that activation instead of letting
+    // mainWindow steal it; skipped when the panel isn't focused (e.g. Stop
+    // clicked from mainWindow, or a helper crash) so that path is untouched.
+    if (process.platform === 'darwin' && notesWindow && !notesWindow.isDestroyed()
+        && notesWindow.isFocused()) {
+        app.hide();
+    }
     if (notesWindow && !notesWindow.isDestroyed()) {
         try { notesWindow.close(); } catch {}
     }
