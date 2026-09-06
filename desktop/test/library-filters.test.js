@@ -490,6 +490,13 @@ assert.ok(itemOf(audioOnlyMenu, 'reveal'), 'a recording offers Show in Finder');
 assert.ok(!/data-action="reveal"/.test(menuFor(meeting({ hasAudio: true }))),
     'Show in Finder is the recording row\'s item, not every row\'s');
 
+// Unlike reveal, Copy file path is every row's item — transcribed or not —
+// and is never gated on any of the above conditions.
+assert.ok(!/disabled/.test(itemOf(audioOnlyMenu, 'copy-path')),
+    'a recording with no transcript still offers Copy file path');
+assert.ok(!/disabled/.test(itemOf(withTurns, 'copy-path')),
+    'a transcribed meeting also offers Copy file path');
+
 // A transcribe job already running on the same wav — the queue keys on that
 // exact path, so the item can see it.
 sandbox.activeJobFor = (type) => (type === 'transcribe' ? { id: 'job' } : null);
