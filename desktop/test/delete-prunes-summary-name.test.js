@@ -59,7 +59,7 @@ function makeHandler({ cfg, unlinkResults = {} }) {
     const factory = new Function(
         'TRANSCRIPTS_FOLDER', 'dialog', 'mainWindow', 'fs', 'path',
         'findExistingSummaryPath', 'findRelatedAudioPaths', 'removeNotesSidecar',
-        'readConfig', 'writeConfig',
+        'readConfig', 'writeConfig', 'fromMain',
         src,
     );
     const writeConfigCalls = [];
@@ -78,6 +78,7 @@ function makeHandler({ cfg, unlinkResults = {} }) {
         () => {},     // removeNotesSidecar
         () => cfg,
         (newCfg) => { writeConfigCalls.push(newCfg); Object.assign(cfg, newCfg); },
+        () => true,   // fromMain — this test is about the summaryNames prune, not the sender guard
     );
     return { handler, writeConfigCalls };
 }

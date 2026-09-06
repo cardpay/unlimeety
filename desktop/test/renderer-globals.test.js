@@ -21,9 +21,16 @@ const vm = require('vm');
 const DESKTOP = path.join(__dirname, '..');
 const RENDERER = path.join(DESKTOP, 'renderer');
 
+// Two preload files now (preload.js for the main window, preload-panel.js for
+// the notes/prompt companion windows — see spec-security-key-exposure-preload.md).
+// A renderer script never knows which one loaded it, so the shadow check below
+// scans every renderer script against the union of both bridge sets.
+const PRELOAD_FILES = ['preload.js', 'preload-panel.js'];
 const bridges = new Set(
-    [...fs.readFileSync(path.join(DESKTOP, 'preload.js'), 'utf-8')
-        .matchAll(/exposeInMainWorld\(\s*['"]([^'"]+)['"]/g)].map(m => m[1])
+    PRELOAD_FILES.flatMap((name) =>
+        [...fs.readFileSync(path.join(DESKTOP, name), 'utf-8')
+            .matchAll(/exposeInMainWorld\(\s*['"]([^'"]+)['"]/g)].map(m => m[1])
+    )
 );
 
 function rendererScripts(dir) {
@@ -37,7 +44,7 @@ function rendererScripts(dir) {
 // Column 0 only: anything indented is inside a function/IIFE and scoped safely.
 const TOP_LEVEL = /^(?:const|let|class|function)\s+([A-Za-z_$][\w$]*)/;
 
-assert.ok(bridges.size > 0, 'expected preload.js to expose at least one bridge');
+assert.ok(bridges.size > 0, 'expected preload.js/preload-panel.js to expose at least one bridge');
 
 const problems = [];
 for (const file of rendererScripts(RENDERER)) {
