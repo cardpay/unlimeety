@@ -5054,7 +5054,7 @@ function startCallMonitor() {
     callMonitor.proc.on('exit', () => { callMonitor.proc = null; });
     callMonitor.proc.on('error', () => { callMonitor.proc = null; });
     try {
-        callMonitor.proc.stdin.write(JSON.stringify({ cmd: 'monitorMic', debounceSec: 8 }) + '\n');
+        callMonitor.proc.stdin.write(JSON.stringify({ cmd: 'monitorMic', debounceSec: 3 }) + '\n');
     } catch { /* will be retried on next toggle */ }
 }
 

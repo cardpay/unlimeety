@@ -444,3 +444,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-popup-live-current-session.md`
   summary: Current-session calendar ownership still relies on title equality, so an explicit manual selection identical to the automatic title can be overwritten by a later refresh.
   evidence: The blind-hunter review identified that autoPrefill.ours() only compares input.value.trim() to its last automatic title; direct picker/smart selections do not signal manual ownership. This predates the session-reset fix. Separating current-session manual selection from automatic ownership requires its own input/selection tracking change.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-recording-prompt-three-second-delay.md`
+  summary: Investigate retry behavior when microphone process attribution is unavailable at activation time.
+  evidence: Existing MicActivityMonitor.evaluate clears pendingActivation and returns when activeInputApp is nil; it schedules no retry while input remains active. This predates the delay change; real-call impact has not been reproduced.
