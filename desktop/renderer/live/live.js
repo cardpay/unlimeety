@@ -458,13 +458,13 @@
     // Fired by main when the user accepts the "call detected" prompt. Surface
     // the Live tab and pre-fill the title from the calendar (if any); the user
     // presses Start manually.
-    live.onAutoStart?.(({ title } = {}) => {
+    live.onAutoStart?.(({ title, participants } = {}) => {
         document.querySelector('.tab-btn[data-tab="live"]')?.click();
         // Through the prefill, not straight into the field: main's title has to
         // win over a stale auto-filled one (the old `!titleInput.value.trim()`
         // guard is exactly why the prompt kept landing on the previous
         // meeting), while a title typed by hand still survives.
-        if (title) calPrefill?.put({ title });
+        if (title) calPrefill?.put({ title, participants });
     });
 
     // ─── Stop → save ─────────────────────────────────────────────────────

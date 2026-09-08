@@ -5164,8 +5164,8 @@ async function triggerAutoRecord() {
     mainWindow.show();
     mainWindow.focus();
 
-    const title = await currentCalendarTitle();
-    const send = () => mainWindow.webContents.send('live:autoStart', { title });
+    const calendarEvent = await currentCalendarTitle();
+    const send = () => mainWindow.webContents.send('live:autoStart', calendarEvent);
     if (mainWindow.webContents.isLoading()) {
         mainWindow.webContents.once('did-finish-load', send);
     } else {
@@ -5173,17 +5173,19 @@ async function triggerAutoRecord() {
     }
 }
 
-// Title of a calendar event overlapping "now", or '' (renderer falls back to
-// its timestamp-based default name). Reuses the one-shot calendar helper query.
+// The selected calendar event overlapping "now", or an empty payload (renderer
+// falls back to its timestamp-based default name). Reuses the one-shot calendar
+// helper query. Keep its participants here: a title alone cannot distinguish
+// consecutive events with the same name.
 async function currentCalendarTitle() {
-    if (process.platform !== 'darwin') return '';
+    if (process.platform !== 'darwin') return { title: '', participants: [] };
     try {
         const payload = { cmd: 'listCalendarEvents', windowBackMinutes: 30, windowForwardMinutes: 5 };
         const selected = readSelectedCalendarIds();
         if (selected) payload.calendarIds = selected;
         const res = await runCalendarQuery(payload, (e) =>
             e.type === 'calendarEvents' ? { ok: true, events: Array.isArray(e.events) ? e.events : [] } : null);
-        if (!res.ok) return '';
+        if (!res.ok) return { title: '', participants: [] };
         const now = Date.now();
         // Same two-phase shape as renderer/calendar-picker.js's currentEvent()
         // — not the same code (main has no access to renderer modules), but
@@ -5213,9 +5215,11 @@ async function currentCalendarTitle() {
             }
         }
         const hit = ongoing || next;
-        return hit ? String(hit.title) : '';
+        return hit
+            ? { title: String(hit.title), participants: Array.isArray(hit.participants) ? hit.participants : [] }
+            : { title: '', participants: [] };
     } catch {
-        return '';
+        return { title: '', participants: [] };
     }
 }
 

@@ -312,10 +312,11 @@
       writes++;
       onPick({
         title,
-        // A title that arrives without attendees is main's auto-record prompt,
-        // which knows none. Keeping the ones already stashed would file the new
-        // meeting under the previous one's guest list — unless it IS the same
-        // meeting, where `undefined` leaves them in place.
+        // A title-only caller has no attendee data. Keeping the ones already
+        // stashed would file a different meeting under the previous one's guest
+        // list — unless it IS the same meeting, where `undefined` leaves them
+        // in place. Main's auto-record route supplies an explicit array, so it
+        // replaces the list even when the title is unchanged.
         participants: Array.isArray(pick.participants) ? pick.participants : (same ? undefined : []),
       });
     };

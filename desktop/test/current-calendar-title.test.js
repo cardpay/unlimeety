@@ -33,6 +33,8 @@ function sliceFunction(name) {
 
 const src = sliceFunction('currentCalendarTitle');
 new vm.Script(src, { filename: 'slice:currentCalendarTitle' });
+const triggerSrc = sliceFunction('triggerAutoRecord');
+new vm.Script(triggerSrc, { filename: 'slice:triggerAutoRecord' });
 
 function makeCurrentCalendarTitle(events) {
     return new Function(
@@ -45,14 +47,38 @@ function makeCurrentCalendarTitle(events) {
     );
 }
 
+function makeTriggerAutoRecord(calendarEvent) {
+    const sent = [];
+    const mainWindow = {
+        isDestroyed: () => false,
+        isMinimized: () => false,
+        show() {},
+        focus() {},
+        webContents: {
+            isLoading: () => false,
+            send: (channel, payload) => sent.push({ channel, payload }),
+        },
+    };
+    const triggerAutoRecord = new Function(
+        'closePromptWindow', 'process', 'app', 'mainWindow', 'createWindow', 'currentCalendarTitle',
+        `${triggerSrc}\nreturn triggerAutoRecord;`,
+    )(
+        () => {}, { platform: 'darwin' }, { setActivationPolicy() {} }, mainWindow, () => {},
+        async () => calendarEvent,
+    );
+    return { triggerAutoRecord, sent };
+}
+
 const iso = (offsetMin) => new Date(Date.now() + offsetMin * 60000).toISOString();
+
+const titleOf = (event) => event.title;
 
 test('an all-day entry never outranks the real meeting happening inside it', async () => {
     const currentCalendarTitle = makeCurrentCalendarTitle([
         { title: 'PTO', start: iso(-12 * 60), end: iso(12 * 60) }, // all-day, "ongoing"
         { title: 'Daily Standup', start: iso(-5), end: iso(10) },   // the real, short call
     ]);
-    assert.strictEqual(await currentCalendarTitle(), 'Daily Standup');
+    assert.strictEqual(titleOf(await currentCalendarTitle()), 'Daily Standup');
 });
 
 test('an untitled event cannot be picked even when it is the only match', async () => {
@@ -60,19 +86,19 @@ test('an untitled event cannot be picked even when it is the only match', async 
         { title: '', start: iso(-5), end: iso(10) },
         { title: '   ', start: iso(-5), end: iso(10) },
     ]);
-    assert.strictEqual(await currentCalendarTitle(), '');
+    assert.strictEqual(titleOf(await currentCalendarTitle()), '');
 });
 
 test('no events in the window returns empty, not a throw', async () => {
     const currentCalendarTitle = makeCurrentCalendarTitle([]);
-    assert.strictEqual(await currentCalendarTitle(), '');
+    assert.strictEqual(titleOf(await currentCalendarTitle()), '');
 });
 
 test('a real ongoing meeting is still picked when nothing else overlaps', async () => {
     const currentCalendarTitle = makeCurrentCalendarTitle([
         { title: 'Weekly Sync', start: iso(-10), end: iso(20) },
     ]);
-    assert.strictEqual(await currentCalendarTitle(), 'Weekly Sync');
+    assert.strictEqual(titleOf(await currentCalendarTitle()), 'Weekly Sync');
 });
 
 test('an ongoing meeting outranks a merely-upcoming one, whatever their durations', async () => {
@@ -80,7 +106,7 @@ test('an ongoing meeting outranks a merely-upcoming one, whatever their duration
         { title: 'Already running (long)', start: iso(-5), end: iso(180) },
         { title: 'Starts soon (short)', start: iso(2), end: iso(15) },
     ]);
-    assert.strictEqual(await currentCalendarTitle(), 'Already running (long)');
+    assert.strictEqual(titleOf(await currentCalendarTitle()), 'Already running (long)');
 });
 
 test('among two merely-upcoming candidates, the earliest start wins — not the shortest', async () => {
@@ -91,7 +117,7 @@ test('among two merely-upcoming candidates, the earliest start wins — not the 
         { title: 'Long meeting starting first', start: iso(1), end: iso(240) },
         { title: 'Short meeting starting later', start: iso(4), end: iso(19) },
     ]);
-    assert.strictEqual(await currentCalendarTitle(), 'Long meeting starting first');
+    assert.strictEqual(titleOf(await currentCalendarTitle()), 'Long meeting starting first');
 });
 
 // ─── Parity with renderer/calendar-picker.js's currentEvent() ───────────────
@@ -124,7 +150,7 @@ const currentEvent = new Function(`${pickerRegion}\nreturn currentEvent;`)();
 
 async function bothPick(events) {
     const currentCalendarTitle = makeCurrentCalendarTitle(events);
-    const fromMain = await currentCalendarTitle();
+    const fromMain = titleOf(await currentCalendarTitle());
     const fromRenderer = currentEvent(events)?.title || '';
     assert.strictEqual(fromMain, fromRenderer,
         `main.js and calendar-picker.js disagree: ${JSON.stringify({ fromMain, fromRenderer, events })}`);
@@ -157,6 +183,41 @@ test('parity: two ongoing overlaps — shortest wins', async () => {
         { title: 'Focus block', start: iso(-90), end: iso(90) },
         { title: 'Actual call', start: iso(-5), end: iso(10) },
     ]), 'Actual call');
+});
+
+test('the selected same-title event keeps its own participants', async () => {
+    const currentCalendarTitle = makeCurrentCalendarTitle([
+        { title: 'Weekly Sync', start: iso(-30), end: iso(30), participants: ['old-a@example.com'] },
+        { title: 'Weekly Sync', start: iso(-5), end: iso(10), participants: ['current-a@example.com', 'current-b@example.com'] },
+    ]);
+    const selected = await currentCalendarTitle();
+    assert.strictEqual(selected.title, 'Weekly Sync');
+    assert.deepStrictEqual([...selected.participants], ['current-a@example.com', 'current-b@example.com']);
+});
+
+test('a selected event without participants returns an explicit empty list', async () => {
+    const currentCalendarTitle = makeCurrentCalendarTitle([
+        { title: 'Weekly Sync', start: iso(-5), end: iso(10) },
+    ]);
+    assert.deepStrictEqual(await currentCalendarTitle(), { title: 'Weekly Sync', participants: [] });
+});
+
+test('indistinguishable events retain the existing EventKit-order selection', async () => {
+    const currentCalendarTitle = makeCurrentCalendarTitle([
+        { title: 'Weekly Sync', start: iso(-5), end: iso(10), participants: ['first@example.com'] },
+        { title: 'Weekly Sync', start: iso(-5), end: iso(10), participants: ['second@example.com'] },
+    ]);
+    assert.deepStrictEqual(
+        [...(await currentCalendarTitle()).participants],
+        ['first@example.com'],
+    );
+});
+
+test('auto-record forwards the selected event payload without dropping participants', async () => {
+    const event = { title: 'Weekly Sync', participants: ['current-a@example.com'] };
+    const { triggerAutoRecord, sent } = makeTriggerAutoRecord(event);
+    await triggerAutoRecord();
+    assert.deepStrictEqual(sent, [{ channel: 'live:autoStart', payload: event }]);
 });
 
 console.log('current-calendar-title: all checks passed');

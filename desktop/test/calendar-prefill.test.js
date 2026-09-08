@@ -19,6 +19,8 @@ const vm = require('vm');
 
 const SRC = fs.readFileSync(
     path.join(__dirname, '..', 'renderer', 'calendar-picker.js'), 'utf-8');
+const LIVE_SRC = fs.readFileSync(
+    path.join(__dirname, '..', 'renderer', 'live', 'live.js'), 'utf-8');
 
 const iso = (minutesFromNow) => new Date(Date.now() + minutesFromNow * 60000).toISOString();
 const ev = (title, fromMin, toMin, participants = []) =>
@@ -248,9 +250,10 @@ function load(events, asked = [], out = {}) {
         assert.strictEqual(input.value, 'Planning');
     }
 
-    // (h) attendees follow the title they belong to. main's auto-record prompt
-    //     sends a title alone, and the previous meeting's guest list must not
-    //     ride along into the new one's header — unless it is the same meeting.
+    // (h) attendees follow the title they belong to. A title-only caller must
+    //     not carry a previous meeting's guest list into a different meeting,
+    //     while a same-title title-only write still preserves manual-picker
+    //     semantics.
     {
         const seen = [];
         const input = { value: '' };
@@ -262,7 +265,41 @@ function load(events, asked = [], out = {}) {
         assert.deepEqual([...seen[2].participants], [], 'a new title drops the old guest list');
     }
 
-    // (i) the clear is flagged, not inferred from an empty title: a nameless
+    // (i) Auto-record supplies the selected event's list explicitly. It must
+    //     replace a stale same-title list, including with an explicitly empty
+    //     list when the selected event has no participants.
+    {
+        const seen = [];
+        const input = { value: '' };
+        const p = load([]).autoPrefill({ input, onPick: (pick) => { seen.push(pick); input.value = pick.title; } });
+        p.put({ title: 'Weekly Sync', participants: ['old-a@example.com', 'old-b@example.com'] });
+        p.put({ title: 'Weekly Sync', participants: ['current-a@example.com', 'current-b@example.com'] });
+        assert.deepEqual([...seen.at(-1).participants], ['current-a@example.com', 'current-b@example.com']);
+        p.put({ title: 'Weekly Sync', participants: [] });
+        assert.deepEqual([...seen.at(-1).participants], [], 'an explicit empty list clears stale participants');
+    }
+
+    // (j) A refresh already reading an older same-title event must not restore
+    //     its participant list after auto-record writes the selected event.
+    {
+        const seen = [];
+        const input = { value: '' };
+        const p = load([ev('Weekly Sync', -10, 20, ['old-a@example.com'])])
+            .autoPrefill({ input, onPick: (pick) => { seen.push(pick); input.value = pick.title; } });
+        const inFlight = p.refresh();
+        p.put({ title: 'Weekly Sync', participants: ['current-a@example.com'] });
+        await inFlight;
+        assert.strictEqual(seen.length, 1, 'the stale refresh must be discarded after auto-record writes');
+        assert.deepEqual([...seen[0].participants], ['current-a@example.com']);
+    }
+
+    // The Live handoff must retain that explicit array when it reaches the
+    // participant-aware prefill sink; otherwise the tests above would only
+    // prove the sink, not the auto-record route that feeds it.
+    assert.match(LIVE_SRC, /live\.onAutoStart\?\.\(\(\{ title, participants \} = \{\}\) => \{/);
+    assert.match(LIVE_SRC, /calPrefill\?\.put\(\{ title, participants \}\)/);
+
+    // (k) the clear is flagged, not inferred from an empty title: a nameless
     //     event reaches the sinks as `title: ''` on the smart-router path, and
     //     that must not read as "wipe the field".
     {
@@ -278,7 +315,7 @@ function load(events, asked = [], out = {}) {
         assert.strictEqual(seen[0].clear, undefined);
     }
 
-    // (j) the popover itself: whichever event currentEvent() picks is the one
+    // (l) the popover itself: whichever event currentEvent() picks is the one
     //     rendered as pre-selected, nothing is pre-selected when every meeting
     //     is over, and an unreadable calendar shows its message instead of a
     //     list. This is the `.cal-default` half of the bug, one indexOf away
