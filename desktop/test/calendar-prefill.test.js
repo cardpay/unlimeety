@@ -82,6 +82,91 @@ function loadAutoStartHandler(calPrefill) {
     return { handler, wasClicked: () => clicked };
 }
 
+// Run the actual lifecycle callbacks together: popup acceptance clicks the
+// actual tab handler, and a successful stop/save sets the completion boundary.
+// Only DOM painting and the audio/filesystem bridges are stubbed.
+function loadLiveLifecycle(events = [], { calendarAvailable = true } = {}) {
+    const region = (from, to) => {
+        const start = LIVE_SRC.indexOf(from);
+        const end = LIVE_SRC.indexOf(to, start);
+        assert(start >= 0 && end > start, `Live lifecycle region missing: ${from}`);
+        return LIVE_SRC.slice(start, end);
+    };
+    const element = () => {
+        const classes = new Set();
+        const listeners = {};
+        const label = {};
+        return {
+            value: '', style: {}, dataset: {},
+            classList: {
+                add: (c) => classes.add(c), remove: (c) => classes.delete(c),
+                contains: (c) => classes.has(c),
+            },
+            addEventListener: (type, callback) => { listeners[type] = callback; },
+            click: () => listeners.click?.(),
+            querySelector: () => label, querySelectorAll: () => [],
+        };
+    };
+    const box = {
+        console, Date,
+        state: {
+            running: false, finished: false, stopping: false, crashed: null,
+            finalizedSegments: [], activePartials: new Map(),
+            calendarParticipants: [], speakerNames: {}, currentLanguage: 'en',
+        },
+        diarizationWarningShown: false, streamEmpty: null,
+        srcMicCheck: { checked: true }, srcSystemCheck: { checked: false },
+        configureLanes() {}, setStatus() {}, showSetupError() {},
+        startTimer() {}, startMeterPulse() {}, stopTimer() {}, stopMeterPulse() {},
+        refreshMicStatus() {}, setLevelMeter() {}, updateAskAiAvailability() {},
+        updateLiveRecordingIndicator() {}, switchTab() {}, defaultTitle: () => 'Timestamp fallback',
+        CustomEvent: function (type, options) { Object.assign(this, { type }, options); },
+        started: [], saved: [], saveResult: { ok: true, filePath: '/synthetic/transcript.txt' },
+    };
+    for (const key of ['titleInput', 'setupSection', 'recordingSection', 'setupError',
+        'startBtn', 'stopBtn', 'discardBtn', 'streamEl', 'downloadBox', 'progressBar', 'timerEl']) {
+        box[key] = element();
+    }
+    const liveButton = element();
+    liveButton.dataset.tab = 'live';
+    box.tabButtons = [liveButton];
+    box.document = { querySelector: () => liveButton, dispatchEvent() {} };
+    box.$ = element;
+    box.live = {
+        start: async (config) => { box.started.push(config); return { ok: true }; },
+        stop: async () => ({ ok: true }),
+        saveTranscript: async (payload) => { box.saved.push(payload); return box.saveResult; },
+        onAutoStart: (callback) => { box.popup = callback; },
+    };
+    box.window = { calendarPicker: calendarAvailable ? load(events) : undefined };
+    vm.runInNewContext([
+        region('    function applyCalendarPick(', '    // ─── Model picker'),
+        region("    tabButtons.forEach(btn => btn.addEventListener('click'", '    // Toolbar pill:'),
+        region("    startBtn.addEventListener('click'", '    // Re-shows the floating notes window'),
+        region('    function returnToSetup()', '    // ─── Ask AI'),
+        'this.prefill = calPrefill;',
+    ].join('\n'), box, { filename: 'renderer/live/live.js lifecycle' });
+    box.visit = () => liveButton.click();
+    return box;
+}
+
+const settle = () => new Promise(setImmediate);
+
+async function completedSession(box, route = 'picker', title = 'Previous review') {
+    const pick = { title, participants: ['previous@example.com'] };
+    if (route === 'manual') {
+        box.titleInput.value = title;
+        box.state.calendarParticipants = pick.participants;
+    } else if (route === 'automatic') box.prefill.put(pick);
+    else box.window.liveTab.applyCalendarPick(pick); // picker and smart banner share this sink
+    box.state.speakerNames = { S1: 'Previous speaker' };
+    await box.startBtn.click();
+    assert.strictEqual(box.titleInput.value, title, 'starting capture preserves setup metadata');
+    await box.stopBtn.click();
+    assert.strictEqual(box.state.finished, true, 'successful save marks the actual session complete');
+    assert.strictEqual(box.saved[0].title, title);
+}
+
 // ─── which event counts as "current" ────────────────────────────────────────
 {
     const { currentEvent } = load([]);
@@ -136,6 +221,169 @@ function loadAutoStartHandler(calPrefill) {
 
 // ─── autoPrefill: refresh replaces its own value, never the user's ──────────
 (async () => {
+    // Completed direct picks used to remain protected for the renderer lifetime.
+    // Exercise the real save -> tab re-entry -> popup chain before unit cases.
+    for (const route of ['picker', 'manual', 'automatic']) {
+        const box = loadLiveLifecycle([ev('Refresh candidate', -5, 20, ['refresh@example.com'])]);
+        await completedSession(box, route);
+        box.popup({ title: 'Current review', participants: ['current@example.com'] });
+        assert.strictEqual(box.titleInput.value, 'Current review', `${route}: popup replaces the completed session title`);
+        assert.deepEqual([...box.state.calendarParticipants], ['current@example.com']);
+        assert.deepEqual(Object.keys(box.state.speakerNames), []);
+        await settle();
+        assert.strictEqual(box.titleInput.value, 'Current review', 'tab refresh cannot supersede popup metadata');
+        assert.deepEqual([...box.state.calendarParticipants], ['current@example.com']);
+        if (route === 'picker') {
+            await box.startBtn.click();
+            assert.strictEqual(box.started[1].title, 'Current review', 'second capture uses the current popup title');
+            await box.stopBtn.click();
+            assert.strictEqual(box.saved[1].title, 'Current review');
+            assert.deepEqual([...box.saved[1].calendarParticipants], ['current@example.com']);
+            assert.deepEqual(Object.keys(box.saved[1].speakerNames), [], 'second save has no previous speaker overrides');
+        }
+    }
+
+    {
+        const box = loadLiveLifecycle([], { calendarAvailable: false });
+        await completedSession(box, 'manual');
+        box.discardBtn.click();
+        assert.strictEqual(box.titleInput.value, '', 'fresh setup clears title without the optional calendar picker');
+        assert.deepEqual([...box.state.calendarParticipants], [], 'participant cleanup does not require the calendar picker');
+        assert.deepEqual(Object.keys(box.state.speakerNames), []);
+    }
+
+    {
+        let resolveFresh;
+        const box = loadLiveLifecycle(() => new Promise(resolve => { resolveFresh = resolve; }));
+        await completedSession(box, 'automatic', 'Shared title');
+        box.discardBtn.click();
+        await settle();
+        box.titleInput.value = 'Shared title';
+        resolveFresh({ ok: true, events: [ev('Different suggestion', -5, 20)] });
+        await settle();
+        assert.strictEqual(box.titleInput.value, 'Shared title', 'previous automatic ownership does not extend to a new manual title');
+    }
+
+    for (const participants of [['current@example.com'], []]) {
+        const box = loadLiveLifecycle([ev('Weekly review', -5, 20, ['refresh@example.com'])]);
+        await completedSession(box, 'picker', 'Weekly review');
+        box.popup({ title: 'Weekly review', participants });
+        await settle();
+        assert.deepEqual([...box.state.calendarParticipants], participants, 'same-title popup replaces all attendees');
+    }
+
+    for (const outcome of [
+        () => ({ ok: true, events: [] }),
+        () => ({ ok: false, reason: 'calendar-permission' }),
+        () => { throw new Error('Calendar unavailable'); },
+    ]) {
+        const box = loadLiveLifecycle(outcome);
+        await completedSession(box, 'manual');
+        box.discardBtn.click(); // actual New recording callback
+        assert.strictEqual(box.titleInput.value, '', 'fresh setup clears previous manual input immediately');
+        await settle();
+        assert.strictEqual(box.titleInput.value, '', 'no event or failed query cannot restore previous metadata');
+        assert.deepEqual([...box.state.calendarParticipants], []);
+        assert.deepEqual(Object.keys(box.state.speakerNames), []);
+        await box.startBtn.click();
+        await box.stopBtn.click();
+        assert.strictEqual(box.saved.at(-1).title, 'Timestamp fallback');
+    }
+
+    {
+        const box = loadLiveLifecycle([ev('Fresh calendar review', -5, 20, ['fresh@example.com'])]);
+        await completedSession(box, 'manual');
+        box.discardBtn.click();
+        await settle();
+        assert.strictEqual(box.titleInput.value, 'Fresh calendar review');
+        assert.deepEqual([...box.state.calendarParticipants], ['fresh@example.com']);
+    }
+
+    {
+        let resolveOld;
+        let calls = 0;
+        const box = loadLiveLifecycle(() => ++calls === 1
+            ? new Promise(resolve => { resolveOld = resolve; })
+            : { ok: true, events: [] });
+        box.visit();
+        await settle();
+        await completedSession(box);
+        box.visit();
+        await settle();
+        resolveOld({ ok: true, events: [ev('Obsolete read', -5, 20, ['obsolete@example.com'])] });
+        await settle();
+        assert.strictEqual(box.titleInput.value, '', 'a pre-reset read cannot populate the fresh empty setup');
+        assert.deepEqual([...box.state.calendarParticipants], []);
+    }
+
+    // Ordinary visits and popup arrivals preserve a current manual edit.
+    {
+        const box = loadLiveLifecycle([ev('Calendar suggestion', -5, 20)]);
+        box.window.liveTab.applyCalendarPick({ title: 'Current manual edit', participants: ['draft@example.com'] });
+        box.state.speakerNames = { S1: 'Draft speaker' };
+        box.visit();
+        box.popup({ title: 'Popup suggestion', participants: [] });
+        await settle();
+        assert.strictEqual(box.titleInput.value, 'Current manual edit');
+        assert.deepEqual([...box.state.calendarParticipants], ['draft@example.com']);
+        assert.strictEqual(box.state.speakerNames.S1, 'Draft speaker');
+    }
+
+    // Loading, active, saving, failed-save, and crash-recovery sessions all
+    // retain metadata on the recording screen, even if it was auto-prefilled.
+    for (const phase of ['loading', 'recording', 'saving', 'failed-save', 'crash-recovery']) {
+        const box = loadLiveLifecycle([ev('Other calendar event', -5, 20)]);
+        box.prefill.put({ title: 'Unsaved review', participants: ['unsaved@example.com'] });
+        box.state.speakerNames = { S1: 'Unsaved speaker' };
+        if (phase === 'loading') {
+            let finishStart;
+            box.live.start = () => new Promise(resolve => { finishStart = resolve; });
+            const starting = box.startBtn.click();
+            box.visit();
+            box.popup({ title: 'Popup suggestion', participants: [] });
+            finishStart({ ok: true });
+            await starting;
+        } else {
+            await box.startBtn.click();
+            if (phase === 'failed-save') {
+                box.saveResult = { ok: false, error: 'Synthetic save failure' };
+                await box.stopBtn.click();
+            } else if (phase === 'crash-recovery') {
+                box.state.running = false;
+                box.state.crashed = 'Synthetic interruption';
+            } else if (phase === 'saving') {
+                let finishSave;
+                box.live.saveTranscript = () => new Promise(resolve => { finishSave = resolve; });
+                const saving = box.stopBtn.click();
+                await settle();
+                box.visit();
+                box.popup({ title: 'Popup suggestion', participants: [] });
+                finishSave({ ok: false });
+                await saving;
+            }
+            box.visit();
+            box.popup({ title: 'Popup suggestion', participants: [] });
+        }
+        await settle();
+        assert.strictEqual(box.titleInput.value, 'Unsaved review', phase);
+        assert.deepEqual([...box.state.calendarParticipants], ['unsaved@example.com'], phase);
+        assert.strictEqual(box.state.speakerNames.S1, 'Unsaved speaker', phase);
+    }
+
+    {
+        const box = loadLiveLifecycle([]);
+        box.titleInput.value = 'Discarded review';
+        box.state.calendarParticipants = ['discarded@example.com'];
+        box.state.speakerNames = { S1: 'Discarded speaker' };
+        box.setupSection.classList.add('hidden');
+        box.state.crashed = 'Synthetic interruption';
+        box.discardBtn.click();
+        await settle();
+        assert.strictEqual(box.titleInput.value, '', 'explicit discard starts a fresh session');
+        assert.deepEqual([...box.state.calendarParticipants], []);
+        assert.deepEqual(Object.keys(box.state.speakerNames), []);
+    }
+
     // (a) fills in the ongoing meeting, attendees included, and asks the helper
     //     for one hour back rather than its own two-hour default — past meetings
     //     are listed to be looked at, not that many of them

@@ -131,10 +131,10 @@
     // ─── Calendar pre-fill ───────────────────────────────────────────────
     // Shared by the picker (this tab's 📅 button) and the smart router
     // (calendar-smart.js), which routes here and pre-fills after switching tab.
-    // An absent `title` / `participants` leaves that half alone: the auto-record
-    // prompt hands over a title only, and must not wipe attendees the calendar
-    // refresh just filled in. Only an explicit `clear` empties the field — a
-    // nameless calendar event reaches the smart router as `title: ''`
+    // An absent `title` / `participants` leaves that half alone. The auto-record
+    // prompt supplies the current title and an explicit participant array, so
+    // even an empty array replaces the previous list. Only an explicit `clear`
+    // empties the field — a nameless event reaches the smart router as `title: ''`
     // (calendar-smart.js passes it raw), and that must never wipe a typed title.
     function applyCalendarPick({ title, participants, clear }) {
         if (clear) titleInput.value = '';
@@ -463,7 +463,8 @@
         // Through the prefill, not straight into the field: main's title has to
         // win over a stale auto-filled one (the old `!titleInput.value.trim()`
         // guard is exactly why the prompt kept landing on the previous
-        // meeting), while a title typed by hand still survives.
+        // meeting), while a title typed by hand in the current setup survives.
+        // The tab handler resets a completed session before this payload lands.
         if (title) calPrefill?.put({ title, participants });
     });
 
@@ -918,8 +919,10 @@
         // attendees fed its "Participants:" header line and the renames its
         // speaker labels. Cleared here rather than in resetRecordingUI(), which
         // also runs on Start — there it would wipe the pick for the session
-        // about to begin. The title is the refresh's business.
-        state.calendarParticipants = [];
+        // about to begin. Reset also clears title ownership and invalidates
+        // calendar reads started for the previous session before we read anew.
+        if (calPrefill) calPrefill.reset();
+        else applyCalendarPick({ title: '', participants: [], clear: true });
         state.speakerNames = {};
         calPrefill?.refresh();
     }

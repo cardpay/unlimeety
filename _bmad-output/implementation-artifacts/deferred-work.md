@@ -440,3 +440,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-beta-integration-pii-precommit-guard.md`
   summary: The beta extension archive is built from the local extension directory and can include untracked files that no staged-index hook checks.
   evidence: Raised by the blind-hunter review layer. This pre-existing release-archive behavior is independent of the new commit guard; fixing it needs a tracked-files archive or explicit packaging allowlist, which is broader than the requested local-commit protection.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-popup-live-current-session.md`
+  summary: Current-session calendar ownership still relies on title equality, so an explicit manual selection identical to the automatic title can be overwritten by a later refresh.
+  evidence: The blind-hunter review identified that autoPrefill.ours() only compares input.value.trim() to its last automatic title; direct picker/smart selections do not signal manual ownership. This predates the session-reset fix. Separating current-session manual selection from automatic ownership requires its own input/selection tracking change.
