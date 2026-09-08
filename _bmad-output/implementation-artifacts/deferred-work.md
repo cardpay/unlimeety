@@ -429,6 +429,14 @@
   summary: The new `ICON_PATHS.copy` SVG path data is byte-for-byte duplicated from two pre-existing inline copy-icon SVGs (`btnRailCopy`'s checkmark-swap markup and its own copy-icon revert string) instead of those two call sites being refactored to reuse the new shared `iconSvg("copy")` helper.
   evidence: Raised independently by the blind-hunter review layer, verified by reading the three occurrences of the same path string in `desktop/renderer/app.js`. Pre-existing duplication (the two inline copies existed before this change); folding all three into one shared definition is a small, low-risk cleanup but touches unrelated call sites outside this spec's scope.
 
-- source_spec: `_bmad-output/implementation-artifacts/spec-judo-pay-sync-participants.md`
+- source_spec: `_bmad-output/implementation-artifacts/spec-calendar-sync-participants.md`
   summary: Auto-record queries calendar metadata after a call-detection prompt is accepted, so an event boundary or two accepted prompts can let a slower earlier query overwrite the newer selection.
   evidence: Raised independently by the blind-hunter review layer. This predates the participant-retention change because the same asynchronous query already supplied the title, but preserving participants makes the stale result carry more metadata. Fixing it requires binding a calendar event to the detected prompt or adding a request-generation rule, neither of which belongs to this focused correction.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-beta-integration-pii-precommit-guard.md`
+  summary: The beta release procedure runs its checks before the version bump, leaving the committed and tagged release state unverified.
+  evidence: Raised by the blind-hunter review layer. The ordering predates the beta-policy documentation update and is outside this change's authorization/branch scope; correcting it needs a release-procedure-specific decision on where checks rerun.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-beta-integration-pii-precommit-guard.md`
+  summary: The beta extension archive is built from the local extension directory and can include untracked files that no staged-index hook checks.
+  evidence: Raised by the blind-hunter review layer. This pre-existing release-archive behavior is independent of the new commit guard; fixing it needs a tracked-files archive or explicit packaging allowlist, which is broader than the requested local-commit protection.

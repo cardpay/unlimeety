@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "rules": [
+    {
+      "label": "corporate-email-domain",
+      "kind": "email-domain",
+      "digests": [
+        "1b623cfe214a939e7ebd4d9dfee42f528acacbbeb875745a62ea32c3204c8cdd"
+      ]
+    },
+    {
+      "label": "incident-indicator",
+      "kind": "normalized-term",
+      "digests": [
+        "33f61f557e6fc088edf7d348cc8d3851740bfd264abf9f5c16683db3402ab8d0",
+        "12216fcf685c661535c0e317713c8ba1da3b12e2c1d9f7a4733f8b49383fcb9a",
+        "020af87da9553f5b93a3ab5ec026550d2948ba571eded565dae94e186f89f7d6",
+        "2cbbb8fd30151e957b4d8273e6da01ff4405bd66bacef390d25dd6f52c74ecfe",
+        "221013f7fdf56c08a4d4aa318fdedd5197960c889020e24d47bfc9f2023a9f29",
+        "909e9e616ad759e2916476901490d676efe425e523aa135c4626ad9b7b5a6bdf"
+      ]
+    }
+  ]
+}

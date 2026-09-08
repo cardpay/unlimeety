@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(git rev-parse --show-toplevel) || exit 1
+exec node "$repo_root/scripts/check-personal-data.js" --commit-msg "$1"
