@@ -456,8 +456,8 @@
 
     // ─── Auto-detect → open Live tab ─────────────────────────────────────
     // Fired by main when the user accepts the "call detected" prompt. Surface
-    // the Live tab and pre-fill the title from the calendar (if any); the user
-    // presses Start manually.
+    // the Live tab and pre-fill the selected calendar metadata (if any); the
+    // user presses Start manually.
     live.onAutoStart?.(({ title, participants } = {}) => {
         document.querySelector('.tab-btn[data-tab="live"]')?.click();
         // Through the prefill, not straight into the field: main's title has to

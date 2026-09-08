@@ -47,15 +47,20 @@ function makeCurrentCalendarTitle(events) {
     );
 }
 
-function makeTriggerAutoRecord(calendarEvent) {
+function makeTriggerAutoRecord(calendarEvent, { loading = false } = {}) {
     const sent = [];
+    let didFinishLoad;
     const mainWindow = {
         isDestroyed: () => false,
         isMinimized: () => false,
         show() {},
         focus() {},
         webContents: {
-            isLoading: () => false,
+            isLoading: () => loading,
+            once: (event, callback) => {
+                assert.strictEqual(event, 'did-finish-load');
+                didFinishLoad = callback;
+            },
             send: (channel, payload) => sent.push({ channel, payload }),
         },
     };
@@ -66,7 +71,14 @@ function makeTriggerAutoRecord(calendarEvent) {
         () => {}, { platform: 'darwin' }, { setActivationPolicy() {} }, mainWindow, () => {},
         async () => calendarEvent,
     );
-    return { triggerAutoRecord, sent };
+    return {
+        triggerAutoRecord,
+        sent,
+        finishLoading: () => {
+            assert.ok(didFinishLoad, 'the loading-window branch must register a send callback');
+            didFinishLoad();
+        },
+    };
 }
 
 const iso = (offsetMin) => new Date(Date.now() + offsetMin * 60000).toISOString();
@@ -202,6 +214,15 @@ test('a selected event without participants returns an explicit empty list', asy
     assert.deepStrictEqual(await currentCalendarTitle(), { title: 'Weekly Sync', participants: [] });
 });
 
+test('an upcoming selected event keeps its participants', async () => {
+    const currentCalendarTitle = makeCurrentCalendarTitle([
+        { title: 'Later Weekly Sync', start: iso(2), end: iso(30), participants: ['upcoming@example.com'] },
+    ]);
+    assert.deepStrictEqual(await currentCalendarTitle(), {
+        title: 'Later Weekly Sync', participants: ['upcoming@example.com'],
+    });
+});
+
 test('indistinguishable events retain the existing EventKit-order selection', async () => {
     const currentCalendarTitle = makeCurrentCalendarTitle([
         { title: 'Weekly Sync', start: iso(-5), end: iso(10), participants: ['first@example.com'] },
@@ -217,6 +238,15 @@ test('auto-record forwards the selected event payload without dropping participa
     const event = { title: 'Weekly Sync', participants: ['current-a@example.com'] };
     const { triggerAutoRecord, sent } = makeTriggerAutoRecord(event);
     await triggerAutoRecord();
+    assert.deepStrictEqual(sent, [{ channel: 'live:autoStart', payload: event }]);
+});
+
+test('auto-record retains the selected payload until a loading Live window finishes', async () => {
+    const event = { title: 'Weekly Sync', participants: ['current-a@example.com'] };
+    const { triggerAutoRecord, sent, finishLoading } = makeTriggerAutoRecord(event, { loading: true });
+    await triggerAutoRecord();
+    assert.deepStrictEqual(sent, []);
+    finishLoading();
     assert.deepStrictEqual(sent, [{ channel: 'live:autoStart', payload: event }]);
 });
 

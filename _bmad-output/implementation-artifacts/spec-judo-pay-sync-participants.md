@@ -72,7 +72,7 @@ The defect is a metadata-loss boundary, not an EventKit parsing failure: calenda
 **Manual checks (if no CLI):**
 - Create or modify two calendar events with the same title and different attendees, auto-record the current one, and confirm its transcript `Participants:` header matches the selected event only.
 
-## Suggested Review Order
+## Suggested Review Order (implementation)
 
 **Authoritative calendar metadata**
 
@@ -94,3 +94,26 @@ The defect is a metadata-loss boundary, not an EventKit parsing failure: calenda
 
 - Prove same-title replacement and stale-refresh discard at the prefill sink.
   [`calendar-prefill.test.js:268`](../../desktop/test/calendar-prefill.test.js#L268)
+
+## Suggested Review Order
+
+**Calendar metadata boundary**
+
+- Forward selected EventKit metadata without reducing it to a title.
+  [`main.js:5167`](../../desktop/main.js#L5167)
+
+- Normalize every no-event or malformed attendee result to an explicit empty array.
+  [`main.js:5217`](../../desktop/main.js#L5217)
+
+**Live prefill**
+
+- Feed authoritative attendees through the existing participant-aware state sink.
+  [`live.js:461`](../../desktop/renderer/live/live.js#L461)
+
+**Regression coverage**
+
+- Exercise equal-title, upcoming, loading-window, and IPC payload selection paths.
+  [`current-calendar-title.test.js:200`](../../desktop/test/current-calendar-title.test.js#L200)
+
+- Execute the Live callback against the real prefill sink and race guard.
+  [`calendar-prefill.test.js:285`](../../desktop/test/calendar-prefill.test.js#L285)

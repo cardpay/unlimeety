@@ -65,6 +65,23 @@ function load(events, asked = [], out = {}) {
     return sandbox.calendarPicker;
 }
 
+function loadAutoStartHandler(calPrefill) {
+    const start = LIVE_SRC.indexOf('    live.onAutoStart?.(');
+    const end = LIVE_SRC.indexOf('\n\n    // ─── Stop → save', start);
+    assert.notStrictEqual(start, -1, 'live auto-start handler not found');
+    assert.notStrictEqual(end, -1, 'live auto-start handler end not found');
+    const region = LIVE_SRC.slice(start, end);
+    let handler;
+    let clicked = false;
+    new Function('live', 'document', 'calPrefill', region)(
+        { onAutoStart: (callback) => { handler = callback; } },
+        { querySelector: () => ({ click: () => { clicked = true; } }) },
+        calPrefill,
+    );
+    assert.strictEqual(typeof handler, 'function', 'live auto-start callback must be registered');
+    return { handler, wasClicked: () => clicked };
+}
+
 // ─── which event counts as "current" ────────────────────────────────────────
 {
     const { currentEvent } = load([]);
@@ -293,11 +310,20 @@ function load(events, asked = [], out = {}) {
         assert.deepEqual([...seen[0].participants], ['current-a@example.com']);
     }
 
-    // The Live handoff must retain that explicit array when it reaches the
-    // participant-aware prefill sink; otherwise the tests above would only
-    // prove the sink, not the auto-record route that feeds it.
-    assert.match(LIVE_SRC, /live\.onAutoStart\?\.\(\(\{ title, participants \} = \{\}\) => \{/);
-    assert.match(LIVE_SRC, /calPrefill\?\.put\(\{ title, participants \}\)/);
+    // The Live handler must execute the participant-bearing auto-start payload
+    // against the real prefill sink, not merely retain matching source text.
+    {
+        const seen = [];
+        const input = { value: '' };
+        const p = load([]).autoPrefill({ input, onPick: (pick) => { seen.push(pick); input.value = pick.title; } });
+        p.put({ title: 'Weekly Sync', participants: ['old-a@example.com'] });
+        const { handler, wasClicked } = loadAutoStartHandler(p);
+        handler({ title: 'Weekly Sync', participants: ['current-a@example.com'] });
+        assert.strictEqual(wasClicked(), true, 'auto-start still selects the Live tab');
+        assert.deepEqual([...seen.at(-1).participants], ['current-a@example.com']);
+        handler({ title: 'Weekly Sync', participants: [] });
+        assert.deepEqual([...seen.at(-1).participants], [], 'the handler forwards an explicit empty array');
+    }
 
     // (k) the clear is flagged, not inferred from an empty title: a nameless
     //     event reaches the sinks as `title: ''` on the smart-router path, and
