@@ -16,6 +16,7 @@ const PRELOAD = fs.readFileSync(path.join(__dirname, '..', 'preload.js'), 'utf8'
 const DOWNLOADER = fs.readFileSync(path.join(__dirname, '..', 'local-model-download.js'), 'utf8');
 const APP = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'app.js'), 'utf8');
 const INDEX = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'index.html'), 'utf8');
+const STYLE = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'style.css'), 'utf8');
 
 // Fixture-only keypair: the production path uses normal certificate
 // validation. The injected transport below trusts this local server only.
@@ -258,9 +259,11 @@ test('local Hugging Face is disabled in Settings and the first-use chooser', () 
     assert.match(INDEX, /class="provider-choice" data-provider="local-hf" disabled/);
 });
 
-test('provider cards disclose cloud, quality, privacy, speed, and local trade-offs', () => {
+test('provider cards disclose cloud, quality, speed, and local trade-offs', () => {
     assert.match(INDEX, /Claude Code.*provider-badge-cloud.*Cloud.*provider-badge-quality.*Quality.*provider-badge-safety.*Safety/);
-    assert.match(INDEX, /Codex CLI.*provider-badge-cloud.*Cloud.*provider-badge-speed.*Speed.*provider-badge-privacy.*Less private/);
+    assert.match(INDEX, /Codex CLI.*provider-badge-cloud.*Cloud.*provider-badge-speed.*Speed/);
+    assert.match(INDEX, /OpenRouter.*provider-badge-cloud.*Cloud/);
     assert.match(INDEX, /Ollama.*provider-badge-local.*Local/);
     assert.match(INDEX, /OpenAI-compatible.*provider-badge-cloud.*Cloud/);
+    assert.match(STYLE, /\.provider-badge-speed \{ background: rgba\(52, 199, 89, 0\.14\); color: var\(--saved\); \}/);
 });
