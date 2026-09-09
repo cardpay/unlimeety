@@ -129,8 +129,9 @@ npm run build:mac          # arm64, ~5–10 min (notarize waits on Apple)
 ```
 
 The build:
-1. Compiles the Swift live-helper and signs it with hardened runtime.
-2. Packages the Electron `.app`, signs it, and embeds the helper.
+1. Downloads the pinned llama.cpp `b10516` macOS arm64 archive, verifies SHA-256 `ee3324327d621026ae80c24031670e65fa62a0b23a3a027dbe2f65f240affd30`, and signs its reviewed `llama-runner` binary with hardened runtime.
+2. Compiles the Swift live-helper and signs it with hardened runtime.
+3. Packages the Electron `.app`, signs it, and embeds both helpers.
 3. Submits the `.app` to Apple's notary service via `notarytool submit --wait` and staples the ticket onto it.
 
 Output: `desktop/dist/Unlimeety-arm64.dmg` (plus the unpacked `desktop/dist/mac-arm64/Unlimeety.app`).
@@ -166,6 +167,10 @@ codesign --display --verbose=4 dist/mac-arm64/Unlimeety.app | grep -E "Authority
 
 # 2. The Swift helper is signed too
 codesign --verify --verbose dist/mac-arm64/Unlimeety.app/Contents/MacOS/unlimeety-live
+
+# 2b. The local-LLM runner and its bundled dylibs are independently signed too
+codesign --verify --verbose dist/mac-arm64/Unlimeety.app/Contents/MacOS/llama-runner
+codesign --verify --verbose dist/mac-arm64/Unlimeety.app/Contents/MacOS/lib*.dylib
 
 # 3. Entitlements (mic + screen capture) are intact
 codesign --display --entitlements - dist/mac-arm64/Unlimeety.app

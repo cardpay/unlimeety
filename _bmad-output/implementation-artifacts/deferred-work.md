@@ -452,3 +452,7 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-recording-prompt-three-second-delay.md`
   summary: Investigate retry behavior when microphone process attribution is unavailable at activation time.
   evidence: Existing MicActivityMonitor.evaluate clears pendingActivation and returns when activeInputApp is nil; it schedules no retry while input remains active. This predates the delay change; real-call impact has not been reproduced.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-local-huggingface-summarizer.md`
+  summary: Before a beta/release, build the macOS arm64 artifact and smoke a reviewed downloaded model in the packaged app: verify runner and dylib signatures, then test offline Summarize, Ask AI, follow-up drafts, Enhance, and corrupted-cache rejection.
+  evidence: Automated checks cover the manifest, downloader integrity/cancellation, IPC boundary, and source-level packaging configuration, but a packaged Electron app and the multi-gigabyte model/runtime are deliberately not built or downloaded during this implementation. The release/build boundary requires explicit user authority.

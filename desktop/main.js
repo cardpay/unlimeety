@@ -8,6 +8,8 @@ const { normalizeSummary, hasValidFrontmatter } = require('./summary-frontmatter
 const glossary = require('./glossary');
 const enhance = require('./transcript-enhance');
 const { createJobQueue } = require('./job-queue');
+const { LOCAL_MODEL_MANIFEST, modelById, displayModel } = require('./local-model-manifest');
+const { downloadVerifiedArtifact } = require('./local-model-download');
 
 const TRANSCRIPTS_FOLDER = path.join(os.homedir(), 'Downloads', 'Meet_Transcripts');
 const RECORDINGS_FOLDER = path.join(os.homedir(), 'Downloads', 'Meet_Recordings');
@@ -1218,7 +1220,7 @@ function parsePositiveInt(value, max) {
 }
 
 const DEFAULT_SUMMARIZER = {
-    provider: 'claude-code', // 'claude-code' | 'codex-cli' | 'openrouter' | 'ollama' | 'openai-compatible'
+    provider: 'claude-code', // legacy fallback only; a missing stored choice is now deliberately blocked
     openrouter: {
         apiKey: '',
         model: 'anthropic/claude-3.5-sonnet',
@@ -1234,6 +1236,7 @@ const DEFAULT_SUMMARIZER = {
         model: 'gpt-5.4-mini',
         baseUrl: 'https://api.openai.com/v1',
     },
+    localHf: { modelId: '' },
 };
 
 // The OpenRouter API key is a secret. Persist it encrypted at rest via
@@ -1269,8 +1272,10 @@ function readSummarizerConfig() {
     const cfg = readConfig();
     const s = cfg.summarizer || {};
     const or = s.openrouter || {};
+    const providerExplicitlyChosen = ['claude-code', 'codex-cli', 'openrouter', 'ollama', 'openai-compatible', 'local-hf'].includes(s.provider);
     return {
-        provider: s.provider || DEFAULT_SUMMARIZER.provider,
+        provider: providerExplicitlyChosen ? s.provider : DEFAULT_SUMMARIZER.provider,
+        providerExplicitlyChosen,
         openrouter: {
             apiKey: decryptApiKey(or),
             model: or.model || DEFAULT_SUMMARIZER.openrouter.model,
@@ -1282,6 +1287,7 @@ function readSummarizerConfig() {
             model: (s.openaiCompatible || {}).model || DEFAULT_SUMMARIZER.openaiCompatible.model,
             baseUrl: (s.openaiCompatible || {}).baseUrl || DEFAULT_SUMMARIZER.openaiCompatible.baseUrl,
         },
+        localHf: { ...DEFAULT_SUMMARIZER.localHf, ...(s.localHf || {}) },
     };
 }
 
@@ -1293,10 +1299,214 @@ function publicSummarizerConfig() {
     const cfg = readSummarizerConfig();
     return {
         provider: cfg.provider,
+        providerExplicitlyChosen: cfg.providerExplicitlyChosen,
         openrouter: { hasKey: Boolean(cfg.openrouter.apiKey), model: cfg.openrouter.model, baseUrl: cfg.openrouter.baseUrl },
         ollama: cfg.ollama,
         openaiCompatible: { hasKey: Boolean(cfg.openaiCompatible.apiKey), model: cfg.openaiCompatible.model, baseUrl: cfg.openaiCompatible.baseUrl },
+        localHf: { modelId: cfg.localHf.modelId },
     };
+}
+
+const LOCAL_MODEL_PLATFORM = 'darwin-arm64';
+const LOCAL_MODEL_REDIRECT_HOSTS = new Set(['huggingface.co', 'cdn-lfs.huggingface.co', 'cas-bridge.xethub.hf.co']);
+const LOCAL_MODEL_DOWNLOADS = new Map();
+const LOCAL_MODEL_VERIFY_CACHE = new Map();
+// llama-cli reads the dynamic prompt from stdin in single-turn mode. These
+// flags are fixed app policy; the renderer never supplies a runner argument.
+const LOCAL_RUNNER_ARGS = [
+    '--single-turn', '--no-display-prompt', '--simple-io', '--color', 'off', '--jinja',
+    '--n-gpu-layers', '99', '--ctx-size', '8192', '--n-predict', '2048',
+];
+const LOCAL_RUNNER_TIMEOUT_MS = 600_000;
+const LOCAL_RUNNER_MAX_OUTPUT_BYTES = 1_000_000;
+
+function localModelsSupported() {
+    return process.platform === 'darwin' && process.arch === 'arm64';
+}
+
+function ensurePrivateDirectory(dir) {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const stat = fs.lstatSync(dir);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('Local model storage is unavailable.');
+    return dir;
+}
+
+function localModelDir() {
+    const models = ensurePrivateDirectory(path.join(app.getPath('userData'), 'models'));
+    return ensurePrivateDirectory(path.join(models, 'local-llm'));
+}
+
+function localModelPath(entry) {
+    return path.join(localModelDir(), entry.filename);
+}
+
+function localModelDownloadUrl(entry) {
+    return new URL(`https://huggingface.co/${entry.repository}/resolve/${entry.revision}/${entry.filename}?download=true`);
+}
+
+function localModelFingerprint(entry) {
+    try {
+        const stat = fs.lstatSync(localModelPath(entry));
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.size !== entry.bytes) return null;
+        return `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}`;
+    } catch {
+        return null;
+    }
+}
+
+async function localModelInstalled(entry) {
+    try { await verifyLocalModel(entry); return true; } catch { return false; }
+}
+
+async function localModelDisplayState() {
+    return {
+        supported: localModelsSupported(),
+        models: await Promise.all(LOCAL_MODEL_MANIFEST
+            .filter((entry) => entry.platforms.includes(LOCAL_MODEL_PLATFORM))
+            .map(async (entry) => {
+                const active = LOCAL_MODEL_DOWNLOADS.get(entry.id);
+                return {
+                    ...displayModel(entry), installed: await localModelInstalled(entry),
+                    downloading: Boolean(active), progress: active?.progress || 0,
+                    error: active?.error || '',
+                };
+            })),
+    };
+}
+
+function sendLocalModelState() {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    void localModelDisplayState().then((state) => {
+        if (!mainWindow || mainWindow.isDestroyed()) return;
+        mainWindow.webContents.send('localModels:status', state);
+    });
+}
+
+function localModelPreflight(entry) {
+    const dir = localModelDir();
+    const stat = fs.statfsSync(dir);
+    const available = Number(stat.bavail) * Number(stat.bsize);
+    // Keep a small operational margin so verification and config writes cannot
+    // turn a nearly-full user-data volume into a partial model cache.
+    if (!Number.isFinite(available) || available < entry.bytes + 64 * 1024 * 1024) {
+        throw new Error('Not enough free disk space for this local model.');
+    }
+}
+
+function hashLocalModel(filePath) {
+    return new Promise((resolve, reject) => {
+        const hash = crypto.createHash('sha256');
+        let bytes = 0;
+        const input = fs.createReadStream(filePath);
+        input.on('data', (chunk) => { bytes += chunk.length; hash.update(chunk); });
+        input.on('error', reject);
+        input.on('end', () => resolve({ bytes, sha256: hash.digest('hex') }));
+    });
+}
+
+async function verifyLocalModel(entry) {
+    const artifact = localModelPath(entry);
+    const before = localModelFingerprint(entry);
+    if (!before) {
+        LOCAL_MODEL_VERIFY_CACHE.delete(entry.id);
+        throw new Error('Local model verification failed.');
+    }
+    if (LOCAL_MODEL_VERIFY_CACHE.get(entry.id) === before) return artifact;
+    try {
+        const digest = await hashLocalModel(artifact);
+        const after = localModelFingerprint(entry);
+        if (after !== before || digest.bytes !== entry.bytes || digest.sha256 !== entry.sha256) throw new Error('Local model verification failed.');
+        LOCAL_MODEL_VERIFY_CACHE.set(entry.id, before);
+        return artifact;
+    } catch (err) {
+        LOCAL_MODEL_VERIFY_CACHE.delete(entry.id);
+        // Do not race a replacement: only discard the corrupt file if its
+        // metadata still matches what this verification actually read.
+        if (localModelFingerprint(entry) === before) {
+            try { fs.unlinkSync(artifact); } catch { /* app-owned cache only */ }
+        }
+        throw err;
+    }
+}
+
+function localModelRequest(url, entry, state) {
+    return downloadVerifiedArtifact({
+        url, destination: localModelPath(entry), expectedBytes: entry.bytes,
+        expectedSha256: entry.sha256, approvedHosts: LOCAL_MODEL_REDIRECT_HOSTS,
+        isCancelled: () => state.cancelled,
+        onRequest: (request) => { state.request = request; },
+        onProgress: (progress) => {
+            state.progress = progress;
+            sendLocalModelState();
+        },
+    });
+}
+
+async function downloadLocalModel(entry) {
+    if (!localModelsSupported()) return { ok: false, error: 'Local models require macOS on Apple Silicon.' };
+    if (LOCAL_MODEL_DOWNLOADS.has(entry.id)) return { ok: false, error: 'That model is already downloading.' };
+    let state;
+    try {
+        localModelPreflight(entry);
+        state = { progress: 0, cancelled: false, error: '', request: null };
+        LOCAL_MODEL_DOWNLOADS.set(entry.id, state);
+        sendLocalModelState();
+        await localModelRequest(localModelDownloadUrl(entry), entry, state);
+        state.progress = 100;
+        return { ok: true };
+    } catch (err) {
+        if (state) state.error = state.cancelled ? '' : 'Download failed. Please retry.';
+        return { ok: false, canceled: Boolean(state?.cancelled), error: state?.cancelled ? 'Download cancelled.' : 'Download failed. Please retry.' };
+    } finally {
+        LOCAL_MODEL_VERIFY_CACHE.delete(entry.id);
+        LOCAL_MODEL_DOWNLOADS.delete(entry.id);
+        sendLocalModelState();
+    }
+}
+
+function localRunnerPath() {
+    const dev = path.join(__dirname, 'local-llm', 'bin', 'llama-runner');
+    if (!app.isPackaged && fs.existsSync(dev)) return dev;
+    return path.join(path.dirname(app.getPath('exe')), 'llama-runner');
+}
+
+async function runLocalHf(content, promptInstruction, config, onAbort) {
+    if (!localModelsSupported()) return { ok: false, error: 'Local models require macOS on Apple Silicon.' };
+    const entry = modelById(config?.modelId);
+    if (!entry) return { ok: false, error: 'Choose an installed local model in Settings.' };
+    let modelPath;
+    try { modelPath = await verifyLocalModel(entry); } catch { return { ok: false, error: 'Local model is missing or failed verification. Download it again in Settings.' }; }
+    const runner = localRunnerPath();
+    if (!isExecutableFile(runner)) return { ok: false, error: 'Bundled local runner is unavailable.' };
+    return new Promise((resolve) => {
+        let stdout = '';
+        let stderr = '';
+        let outputBytes = 0;
+        let cancelled = false;
+        let settled = false;
+        const finish = (result) => { if (!settled) { settled = true; resolve(result); } };
+        const proc = spawn(runner, ['--model', modelPath, ...LOCAL_RUNNER_ARGS], {
+            cwd: app.getPath('userData'), stdio: ['pipe', 'pipe', 'pipe'], shell: false,
+        });
+        if (onAbort) onAbort({ abort: () => { cancelled = true; killClaudeProcess(proc); } });
+        proc.stdin.on('error', () => {});
+        proc.stdin.end(`${promptInstruction}\n\n${content}`, 'utf-8');
+        proc.stdout.on('data', (chunk) => {
+            outputBytes += chunk.length;
+            if (outputBytes > LOCAL_RUNNER_MAX_OUTPUT_BYTES) { killClaudeProcess(proc); return; }
+            stdout += chunk.toString();
+        });
+        proc.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+        const timer = setTimeout(() => { killClaudeProcess(proc); finish({ ok: false, error: 'Local model timed out (10 min).' }); }, LOCAL_RUNNER_TIMEOUT_MS);
+        proc.on('close', (code) => {
+            clearTimeout(timer);
+            if (cancelled) finish({ ok: false, canceled: true });
+            else if (outputBytes > LOCAL_RUNNER_MAX_OUTPUT_BYTES) finish({ ok: false, error: 'Local model produced too much output.' });
+            else if (code === 0 && stdout.trim()) finish({ ok: true, summary: stdout.trim() });
+            else finish({ ok: false, error: stderr.trim() || 'Local model did not return an answer.' });
+        });
+        proc.on('error', () => { clearTimeout(timer); finish(cancelled ? { ok: false, canceled: true } : { ok: false, error: 'Could not start the bundled local runner.' }); });
+    });
 }
 
 // An empty key submitted from Settings means "leave the stored key alone",
@@ -1314,6 +1524,41 @@ function preserveApiKeyFields(existingProviderCfg) {
 ipcMain.handle('settings:getSummarizer', (e) => {
     if (!fromMain(e)) return null;
     return publicSummarizerConfig();
+});
+
+ipcMain.handle('localModels:list', async (e) => {
+    if (!fromMain(e)) return null;
+    return localModelDisplayState();
+});
+
+ipcMain.handle('localModels:download', async (e, modelId) => {
+    if (!fromMain(e)) return { ok: false, error: 'Forbidden' };
+    const entry = modelById(modelId);
+    if (!entry) return { ok: false, error: 'Unknown local model.' };
+    return downloadLocalModel(entry);
+});
+
+ipcMain.handle('localModels:cancel', (e, modelId) => {
+    if (!fromMain(e)) return { ok: false, error: 'Forbidden' };
+    const state = LOCAL_MODEL_DOWNLOADS.get(modelId);
+    if (!state) return { ok: false, error: 'No matching download is running.' };
+    state.cancelled = true;
+    try { state.request?.destroy(new Error('Download cancelled.')); } catch {}
+    return { ok: true };
+});
+
+ipcMain.handle('localModels:remove', (e, modelId) => {
+    if (!fromMain(e)) return { ok: false, error: 'Forbidden' };
+    const entry = modelById(modelId);
+    if (!entry) return { ok: false, error: 'Unknown local model.' };
+    if (LOCAL_MODEL_DOWNLOADS.has(modelId)) return { ok: false, error: 'Cancel the download before removing this model.' };
+    try { fs.unlinkSync(localModelPath(entry)); } catch (err) { if (err.code !== 'ENOENT') return { ok: false, error: 'Could not remove the local model.' }; }
+    LOCAL_MODEL_VERIFY_CACHE.delete(entry.id);
+    const cfg = readConfig();
+    if (cfg.summarizer?.localHf?.modelId === modelId) cfg.summarizer.localHf.modelId = '';
+    writeConfig(cfg);
+    sendLocalModelState();
+    return { ok: true };
 });
 
 // Shown at the foot of Settings. `app.getVersion()` reads the packaged
@@ -1346,12 +1591,12 @@ function normalizeBaseUrl(raw, dflt) {
     return { ok: true, value: trimmed };
 }
 
-ipcMain.handle('settings:setSummarizer', (e, summarizer) => {
+ipcMain.handle('settings:setSummarizer', async (e, summarizer) => {
     if (!fromMain(e)) return { ok: false, error: 'Forbidden' };
     if (!summarizer || typeof summarizer !== 'object') {
         return { ok: false, error: 'invalid summarizer payload' };
     }
-    const allowed = new Set(['claude-code', 'codex-cli', 'openrouter', 'ollama', 'openai-compatible']);
+    const allowed = new Set(['claude-code', 'codex-cli', 'openrouter', 'ollama', 'openai-compatible', 'local-hf']);
     const provider = allowed.has(summarizer.provider) ? summarizer.provider : 'claude-code';
     const apiKey = String(summarizer.openrouter?.apiKey || '').trim();
     const oaiKey = String(summarizer.openaiCompatible?.apiKey || '').trim();
@@ -1363,6 +1608,10 @@ ipcMain.handle('settings:setSummarizer', (e, summarizer) => {
     if (!ollamaUrl.ok) return ollamaUrl;
     const openaiUrl = normalizeBaseUrl(summarizer.openaiCompatible?.baseUrl, DEFAULT_SUMMARIZER.openaiCompatible.baseUrl);
     if (!openaiUrl.ok) return openaiUrl;
+    const localModel = provider === 'local-hf' ? modelById(summarizer.localHf?.modelId) : null;
+    if (provider === 'local-hf' && summarizer.localHf?.modelId && (!localModel || !(await localModelInstalled(localModel)))) {
+        return { ok: false, error: 'Choose an installed local model.' };
+    }
 
     const stored = {
         provider,
@@ -1382,6 +1631,7 @@ ipcMain.handle('settings:setSummarizer', (e, summarizer) => {
             model: String(summarizer.openaiCompatible?.model || DEFAULT_SUMMARIZER.openaiCompatible.model).trim(),
             baseUrl: openaiUrl.value,
         },
+        localHf: { modelId: localModel?.id || '' },
     };
     const cfg = readConfig();
     cfg.summarizer = stored;
@@ -1942,7 +2192,11 @@ function framePrompt(instruction, content, label = 'TRANSCRIPT') {
 // One dispatch for every caller that sends text through the configured model —
 // summarize:run and transcripts:enhance. Returns { ok, summary } / { ok, error }.
 async function runSummarizerProvider(content, promptInstruction, cfg, onAbort) {
+    if (!cfg.providerExplicitlyChosen) {
+        return { ok: false, needsProviderChoice: true, error: 'Choose a summarizer before continuing.' };
+    }
     switch (cfg.provider) {
+        case 'local-hf':          return runLocalHf(content, promptInstruction, cfg.localHf, onAbort);
         case 'codex-cli':         return runCodexCli(content, promptInstruction, onAbort);
         case 'openrouter':        return runOpenRouter(content, promptInstruction, cfg.openrouter, onAbort);
         case 'ollama':            return runOllama(content, promptInstruction, cfg.ollama, onAbort);
@@ -2178,6 +2432,13 @@ async function runChatCodexCli(instruction, chat) {
     return { ok: true, reply: result.summary };
 }
 
+async function runChatLocalHf(instruction, chat, config) {
+    const rendered = chat.map((m) => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`).join('\n\n');
+    const result = await runLocalHf(rendered, instruction, config);
+    if (!result.ok) return result;
+    return { ok: true, reply: result.summary };
+}
+
 async function runChatOpenRouter(systemText, chat, config) {
     const { apiKey, model, baseUrl } = config;
     if (!apiKey) return { ok: false, error: 'OpenRouter API key is not set. Open Settings to add one.' };
@@ -2283,6 +2544,7 @@ ipcMain.handle('chat:ask', async (_e, target, messages) => {
     if (!chat) return { ok: false, error: 'Invalid conversation.' };
 
     const cfg = readSummarizerConfig();
+    if (!cfg.providerExplicitlyChosen) return { ok: false, needsProviderChoice: true, error: 'Choose a summarizer before continuing.' };
     // The transcript is framed once here and folded into the first turn's own
     // content — never into a system message — so every provider below sees
     // the same shape: a fixed system instruction plus a chat where turn one
@@ -2293,6 +2555,7 @@ ipcMain.handle('chat:ask', async (_e, target, messages) => {
         ? { ...m, content: `${framed.content}\n\n${m.content}` }
         : m);
     switch (cfg.provider) {
+        case 'local-hf':          return runChatLocalHf(framed.instruction, framedChat, cfg.localHf);
         case 'codex-cli':         return runChatCodexCli(framed.instruction, framedChat);
         case 'openrouter':        return runChatOpenRouter(framed.instruction, framedChat, cfg.openrouter);
         case 'ollama':            return runChatOllama(framed.instruction, framedChat, cfg.ollama);
