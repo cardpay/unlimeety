@@ -33,5 +33,9 @@ let package = Package(
                 ]),
             ]
         ),
+        .testTarget(
+            name: "TranscriberLiveTests",
+            dependencies: ["unlimeety-live"]
+        ),
     ]
 )

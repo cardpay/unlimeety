@@ -49,3 +49,10 @@ npm-debug.log*
 # Design handoff artefacts (work-in inputs, not part of product)
 design_handoff_summarize_record/
 meeting-transcriber-record-design.zip
+
+# Local release/design artifacts
+.worktrees/
+desktop/build/icon.ico
+desktop/build/icon.png
+store-listing.en.md
+store-listing.md
