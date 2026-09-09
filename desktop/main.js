@@ -5407,11 +5407,11 @@ ipcMain.on('prompt:dismiss', () => {
 
 // ─── Auto-stop when the meeting ends (mic+system recordings) ─────────────────
 // The helper emits `meetingEnded` when the conferencing app released the mic.
-// We show a 15 s countdown prompt with a "Keep recording" escape hatch; if it
+// We show a 10 s countdown prompt with a "Keep recording" escape hatch; if it
 // isn't cancelled (manually, or by a `meetingResumed` from a reconnect), we
 // drive the same graceful stop+save as the Stop button — delegated to the
 // active renderer so Live keeps its transcript-save flow.
-const AUTOSTOP_COUNTDOWN_SEC = 15;
+const AUTOSTOP_COUNTDOWN_SEC = 10;
 let autoStopTimer = null;
 // Which session's meeting ended — 'live' or 'record'. Live and a WAV recording
 // can run at once, and one meeting ending says nothing about the other session.
@@ -5430,12 +5430,6 @@ function onMeetingEnded(slot) {
         autoStopTimer = null;
         autoStopSlot = null;
         closePromptWindow();
-        // The conferencing app's own input device can report idle-then-active
-        // seconds after we stop, once it finally notices the mic released —
-        // same late flip that caused the original bug this cooldown avoids
-        // re-triggering on: a spurious "call just started" right after a call
-        // that just ended.
-        callMonitor.cooldownUntil = Date.now() + PROMPT_COOLDOWN_MS;
         triggerAutoStop([slot]);
     }, AUTOSTOP_COUNTDOWN_SEC * 1000);
 }
@@ -5471,7 +5465,7 @@ ipcMain.on('prompt:stopNow', () => {
     closePromptWindow();
     if (slot) {
         // The user explicitly ended this recording; the next micActive may be
-        // a new call, so only dismissals and unattended auto-stop use cooldown.
+        // a new call, so only explicit prompt dismissals use cooldown.
         triggerAutoStop([slot]);
     }
 });
