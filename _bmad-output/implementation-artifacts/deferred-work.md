@@ -199,6 +199,10 @@
   evidence: `selectedRecordings` is pruned only against what left the disk (`loadLibrary`), never against what the active chip and search box currently show. The bar's count is the only feedback. Pruning on every render was rejected as the fix: it would silently drop a selection the moment the user typed in the search box. The honest fix is showing which off-screen rows are selected, which is a design decision. `Select all` is already scoped to the visible rows (`selectableVisible`). Found by edge-case-hunter + blind-hunter review, 2026-08-26.
   resolved: Reconsidered and asked again on 2026-09-04 — the user knowingly picked the option the 2026-08-26 review had rejected ("clean silently") over building the off-screen-selection UI. `renderMeetings` now prunes `selectedRecordings` against `visible` (filter AND search both apply) right before `renderSelectionBar()`, so the bar's own count already reflects the pruned set. Not covered by an automated test — `renderMeetings` needs a real DOM; verified live over CDP.
 
+- source_spec: `_bmad-output/implementation-artifacts/spec-codex-cli-summarizer-provider.md`
+  summary: Ask AI, follow-up drafts, and Enhance have no UI-to-provider abort handle, so closing their UI can leave any configured provider running until it finishes or times out.
+  evidence: The corresponding existing calls to `runSummarizerProvider` and chat providers omit `onAbort`; Codex follows that pre-existing route contract rather than introducing the missing cancellation plumbing.
+
 - source_spec: `_bmad-output/implementation-artifacts/spec-recordings-in-meetings-list.md`
   summary: `record:deleteTranscript` and `record:deleteSummary`, plus both preload methods, now have zero renderer callers — the Record-tab card menu was their only one.
   evidence: `grep -rn 'deleteTranscript\|deleteSummary' desktop/renderer/` returns only the library's `transcripts:*` equivalents. The handlers (`main.js:3543`, `main.js:3570`) still exist and are still reachable over IPC. Removing them is a main-process change, which this spec's `Ask First` list reserves. Found by blind-hunter review, 2026-08-26.

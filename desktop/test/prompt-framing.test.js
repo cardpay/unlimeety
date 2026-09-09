@@ -4,7 +4,7 @@
 // spec-security-model-isolation.md: an untrusted transcript used to be handed
 // to a model with no separation from the instruction at all — Summarize/
 // follow-up/speaker-naming fed it straight into the prompt, and Chat put it
-// verbatim into a `role: 'system'` message for all four providers. framePrompt
+// verbatim into a `role: 'system'` message for all five providers. framePrompt
 // is the one helper every call site now routes an untrusted blob through
 // before it reaches a provider, and chatTurns is what keeps a chat payload
 // from smuggling a bogus role or non-string content into that request.
@@ -12,7 +12,7 @@
 // main.js requires electron and cannot be required directly, so the pure
 // helpers are sliced out of the source and evaluated in a vm context — same
 // technique as test/path-guards.test.js. The three IPC call sites and the
-// four chat providers are checked by pattern only (no execution needed).
+// five chat providers are checked by pattern only (no execution needed).
 
 const assert = require('assert');
 const fs = require('fs');
@@ -156,10 +156,17 @@ test('speaker naming keeps Meeting:/Participants: out of the instruction and ins
 });
 
 test('no chat provider still embeds the transcript with the old inline phrasing', () => {
-    for (const name of ['runChatClaudeCode', 'runChatOpenRouter', 'runChatOpenAICompat', 'runChatOllama']) {
+    for (const name of ['runChatClaudeCode', 'runChatCodexCli', 'runChatOpenRouter', 'runChatOpenAICompat', 'runChatOllama']) {
         assert.ok(!sliceFunction(name).includes('Here is the transcript'),
             `${name} still says "Here is the transcript" — the transcript must arrive already framed`);
     }
+});
+
+test('Codex receives the same framed content through both provider dispatch paths', () => {
+    const summarize = sliceFunction('runSummarizerProvider');
+    const chat = sliceIpcHandle('chat:ask');
+    assert.match(summarize, /case 'codex-cli':\s+return runCodexCli\(content, promptInstruction, onAbort\)/);
+    assert.match(chat, /case 'codex-cli':\s+return runChatCodexCli\(framed\.instruction, framedChat\)/);
 });
 
 // ─── mdToSlack ──────────────────────────────────────────────────────────────
