@@ -1150,12 +1150,12 @@
         <div class="settings-provider-group">
           <label class="settings-radio">
             <input type="radio" name="settings-provider" value="claude-code" />
-            <span class="settings-radio-title">Claude Code</span>
-            <span class="settings-radio-sub">Local CLI (claude.ai/code)</span>
+            <span class="settings-radio-title">Claude Code <span class="provider-badge provider-badge-cloud">Cloud</span><span class="provider-badge provider-badge-quality">Quality</span><span class="provider-badge provider-badge-safety">Safety</span></span>
+            <span class="settings-radio-sub">Cloud CLI (claude.ai/code)</span>
           </label>
           <label class="settings-radio">
             <input type="radio" name="settings-provider" value="codex-cli" />
-            <span class="settings-radio-title">Codex CLI (opt-in)</span>
+            <span class="settings-radio-title">Codex CLI (opt-in) <span class="provider-badge provider-badge-cloud">Cloud</span><span class="provider-badge provider-badge-speed">Speed</span><span class="provider-badge provider-badge-privacy">Less private</span></span>
             <span class="settings-radio-sub">Cloud CLI — read-only sandbox; tools cannot be disabled and may read files</span>
           </label>
           <label class="settings-radio">
@@ -1165,7 +1165,7 @@
           </label>
           <label class="settings-radio">
             <input type="radio" name="settings-provider" value="ollama" />
-            <span class="settings-radio-title">Ollama</span>
+            <span class="settings-radio-title">Ollama <span class="provider-badge provider-badge-local">Local</span></span>
             <span class="settings-radio-sub">Local model (e.g. llama3.1)</span>
           </label>
           <label class="settings-radio">
@@ -1175,7 +1175,7 @@
           </label>
           <label class="settings-radio">
             <input type="radio" name="settings-provider" value="openai-compatible" />
-            <span class="settings-radio-title">OpenAI-compatible</span>
+            <span class="settings-radio-title">OpenAI-compatible <span class="provider-badge provider-badge-cloud">Cloud</span></span>
             <span class="settings-radio-sub">OpenAI · Groq · Anthropic · vLLM · LM Studio</span>
           </label>
         </div>
@@ -1318,9 +1318,9 @@
         <div class="settings-radio-sub" style="margin-bottom:12px">Choose before any meeting text is processed. You can change this later in Settings.</div>
         <div class="provider-choice-grid">
           <button type="button" class="provider-choice" data-provider="local-hf" disabled title="Coming soon"><strong>Local Hugging Face</strong><span>Privacy recommended · Local</span><small>Coming soon — reviewed Qwen3 models downloaded to this Mac.</small></button>
-          <button type="button" class="provider-choice" data-provider="claude-code"><strong>Claude Code</strong><span>Quality · Cloud</span></button>
-          <button type="button" class="provider-choice" data-provider="codex-cli"><strong>Codex CLI</strong><span>Speed · Cloud</span></button>
-          <button type="button" class="provider-choice" data-provider="ollama"><strong>Ollama</strong><span>Local</span></button>
+          <button type="button" class="provider-choice" data-provider="claude-code"><strong>Claude Code</strong><span class="provider-choice-badges"><span class="provider-badge provider-badge-cloud">Cloud</span><span class="provider-badge provider-badge-quality">Quality</span><span class="provider-badge provider-badge-safety">Safety</span></span></button>
+          <button type="button" class="provider-choice" data-provider="codex-cli"><strong>Codex CLI</strong><span class="provider-choice-badges"><span class="provider-badge provider-badge-cloud">Cloud</span><span class="provider-badge provider-badge-speed">Speed</span><span class="provider-badge provider-badge-privacy">Less private</span></span></button>
+          <button type="button" class="provider-choice" data-provider="ollama"><strong>Ollama</strong><span class="provider-choice-badges"><span class="provider-badge provider-badge-local">Local</span></span></button>
         </div>
       </div>
     </div>

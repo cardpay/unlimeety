@@ -257,3 +257,10 @@ test('local Hugging Face is disabled in Settings and the first-use chooser', () 
     assert.match(INDEX, /name="settings-provider" value="local-hf" disabled/);
     assert.match(INDEX, /class="provider-choice" data-provider="local-hf" disabled/);
 });
+
+test('provider cards disclose cloud, quality, privacy, speed, and local trade-offs', () => {
+    assert.match(INDEX, /Claude Code.*provider-badge-cloud.*Cloud.*provider-badge-quality.*Quality.*provider-badge-safety.*Safety/);
+    assert.match(INDEX, /Codex CLI.*provider-badge-cloud.*Cloud.*provider-badge-speed.*Speed.*provider-badge-privacy.*Less private/);
+    assert.match(INDEX, /Ollama.*provider-badge-local.*Local/);
+    assert.match(INDEX, /OpenAI-compatible.*provider-badge-cloud.*Cloud/);
+});

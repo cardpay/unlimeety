@@ -2389,6 +2389,10 @@ body.mode-record #btn-ask-ai {
 }
 
 .provider-badge-local { background: var(--accent-dim); color: var(--accent); }
+.provider-badge-cloud { background: rgba(59, 130, 246, 0.14); color: var(--info); }
+.provider-badge-quality, .provider-badge-safety { background: rgba(52, 199, 89, 0.14); color: var(--saved); }
+.provider-badge-speed { background: rgba(59, 130, 246, 0.14); color: var(--info); }
+.provider-badge-privacy { background: rgba(240, 68, 56, 0.12); color: var(--danger); }
 
 .local-model-list { display: grid; gap: 8px; margin-top: 10px; }
 
@@ -2417,7 +2421,9 @@ body.mode-record #btn-ask-ai {
     cursor: pointer;
 }
 .provider-choice:hover { border-color: var(--accent); background: var(--accent-dim); }
-.provider-choice span, .provider-choice small { color: var(--text-muted); }
+.provider-choice > span, .provider-choice small { color: var(--text-muted); }
+.provider-choice-badges { display: flex; flex-wrap: wrap; gap: 4px; }
+.provider-choice .provider-badge { margin-left: 0; }
 .provider-choice:disabled { cursor: not-allowed; opacity: 0.5; }
 .provider-choice:disabled:hover { border-color: var(--border); background: var(--bg-elevated); }
 
