@@ -307,4 +307,14 @@ test('end-to-end: saving with a new key replaces the stored one', async () => {
     assert.strictEqual(decrypted, 'enc:sk-new', 'the newly submitted key must be what is now stored (fake-encrypted)');
 });
 
+test('end-to-end: Codex provider remains selected after Settings save', async () => {
+    const dir = fs.mkdtempSync(path.join(tmpRoot, 'e2e-codex-'));
+    const { handler, mainWindow } = makeSetSummarizerHandler(dir);
+    const result = await handler({ sender: mainWindow.webContents }, { provider: 'codex-cli' });
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.summarizer.provider, 'codex-cli');
+    const onDisk = JSON.parse(fs.readFileSync(path.join(dir, 'config.json'), 'utf-8'));
+    assert.strictEqual(onDisk.summarizer.provider, 'codex-cli');
+});
+
 console.log('summarizer-key-masking: all checks passed');

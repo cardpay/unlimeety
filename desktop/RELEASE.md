@@ -2,6 +2,16 @@
 
 End-to-end checklist for cutting a new signed and notarized macOS build of Unlimeety and publishing it to GitHub Releases.
 
+## Release authorization and branch policy
+
+Do not start a pre-release build, notarization, artifact upload, tag, or GitHub release until the
+user explicitly requests that specific release. A ready `beta` branch is not authorization to
+publish anything.
+
+Completed `feature/*` branches merge locally into `beta` without a PR, and `beta` may be pushed.
+Only `beta` may open a PR to `main`; `main` receives no direct pushes. The stable and beta
+procedures below apply only after the explicit release request has been received.
+
 The app is distributed **outside the Mac App Store**: signed with a *Developer ID Application* certificate and notarized through Apple's `notarytool`. Only Apple Silicon is shipped — the Swift live-helper builds for arm64 only, so an Intel DMG would carry a helper that cannot run. (`package.json` still defines `build:win`, `build:linux` and `build:all`; they produce a Live-less app and nothing here releases them. There is no Windows or Linux release path.) After publication a single DMG appears at:
 
 - `https://github.com/cardpay/unlimeety/releases/download/vX.Y.Z/Unlimeety-arm64.dmg`
@@ -79,17 +89,19 @@ DMGs are published through stable GitHub Release URLs on [github.com/cardpay/unl
 
 In `desktop/package.json` change `"version"` to the new value, e.g. `1.0.1`. `desktop/package-lock.json` carries the same version in two places — `npm version` keeps them in step, editing by hand does not.
 
-`main` takes no direct pushes, so the bump travels as a PR like any other change, and GitHub is driven through `gh`:
+Prepare the bump on `beta`. It is then the only branch permitted to open the PR into `main`:
 
 ```bash
-cd unlimeety/desktop
+cd unlimeety
+git checkout beta && git pull
+cd desktop
 npm version 1.0.1 --no-git-tag-version    # updates package.json + package-lock.json
 cd ..
-git checkout -b release/v1.0.1
 git add desktop/package.json desktop/package-lock.json
 git commit -m "desktop: bump version to 1.0.1"
-gh pr create --base main --fill
-gh pr merge --merge --delete-branch        # after review
+git push origin beta
+gh pr create --head beta --base main --fill
+gh pr merge --merge                        # after review
 ```
 
 ### Step 2. Run the checks
@@ -117,8 +129,9 @@ npm run build:mac          # arm64, ~5–10 min (notarize waits on Apple)
 ```
 
 The build:
-1. Compiles the Swift live-helper and signs it with hardened runtime.
-2. Packages the Electron `.app`, signs it, and embeds the helper.
+1. Downloads the pinned llama.cpp `b10516` macOS arm64 archive, verifies SHA-256 `ee3324327d621026ae80c24031670e65fa62a0b23a3a027dbe2f65f240affd30`, and signs its reviewed `llama-runner` binary with hardened runtime.
+2. Compiles the Swift live-helper and signs it with hardened runtime.
+3. Packages the Electron `.app`, signs it, and embeds both helpers.
 3. Submits the `.app` to Apple's notary service via `notarytool submit --wait` and staples the ticket onto it.
 
 Output: `desktop/dist/Unlimeety-arm64.dmg` (plus the unpacked `desktop/dist/mac-arm64/Unlimeety.app`).
@@ -155,6 +168,10 @@ codesign --display --verbose=4 dist/mac-arm64/Unlimeety.app | grep -E "Authority
 # 2. The Swift helper is signed too
 codesign --verify --verbose dist/mac-arm64/Unlimeety.app/Contents/MacOS/unlimeety-live
 
+# 2b. The local-LLM runner and its bundled dylibs are independently signed too
+codesign --verify --verbose dist/mac-arm64/Unlimeety.app/Contents/MacOS/llama-runner
+codesign --verify --verbose dist/mac-arm64/Unlimeety.app/Contents/MacOS/lib*.dylib
+
 # 3. Entitlements (mic + screen capture) are intact
 codesign --display --entitlements - dist/mac-arm64/Unlimeety.app
 
@@ -176,7 +193,8 @@ Final smoke test: copy the DMG onto a Mac that has never seen this app (or local
 
 ### Step 6. Bring main to the release commit
 
-The version-bump PR from step 1 must be merged before the release is cut. No tag is pushed by hand — `gh release create` in step 7 creates it on the target commit.
+The beta-to-main PR from step 1 must be merged before the release is cut. No tag is pushed by hand
+— `gh release create` in step 7 creates it on the target commit.
 
 ```bash
 cd unlimeety
@@ -209,6 +227,10 @@ curl -fLI https://github.com/cardpay/unlimeety/releases/latest/download/Unlimeet
 ## Cutting a beta
 
 A beta ships off the `beta` branch as a **prerelease**, and it must not disturb the stable download. Three things make that true, and all three matter:
+
+Only continue after the user explicitly asks to build and publish this beta. A branch named `beta`,
+completed checks, or a version bump does not authorize its build, notarization, upload, tag, or
+release publication.
 
 - **`--prerelease`.** GitHub's `/releases/latest` resolves to the most recent release that is neither a prerelease nor a draft, so the README's `releases/latest/download/Unlimeety-arm64.dmg` keeps serving the last stable build. Drop this flag and the beta becomes the download every reader of the README gets.
 - **`--target beta`.** No PR into `main`, no version-bump PR, no tag pushed by hand — `gh release create` tags the `beta` commit directly. `main` is not involved in a beta at all.

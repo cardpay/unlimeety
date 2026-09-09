@@ -199,6 +199,10 @@
   evidence: `selectedRecordings` is pruned only against what left the disk (`loadLibrary`), never against what the active chip and search box currently show. The bar's count is the only feedback. Pruning on every render was rejected as the fix: it would silently drop a selection the moment the user typed in the search box. The honest fix is showing which off-screen rows are selected, which is a design decision. `Select all` is already scoped to the visible rows (`selectableVisible`). Found by edge-case-hunter + blind-hunter review, 2026-08-26.
   resolved: Reconsidered and asked again on 2026-09-04 — the user knowingly picked the option the 2026-08-26 review had rejected ("clean silently") over building the off-screen-selection UI. `renderMeetings` now prunes `selectedRecordings` against `visible` (filter AND search both apply) right before `renderSelectionBar()`, so the bar's own count already reflects the pruned set. Not covered by an automated test — `renderMeetings` needs a real DOM; verified live over CDP.
 
+- source_spec: `_bmad-output/implementation-artifacts/spec-codex-cli-summarizer-provider.md`
+  summary: Ask AI, follow-up drafts, and Enhance have no UI-to-provider abort handle, so closing their UI can leave any configured provider running until it finishes or times out.
+  evidence: The corresponding existing calls to `runSummarizerProvider` and chat providers omit `onAbort`; Codex follows that pre-existing route contract rather than introducing the missing cancellation plumbing.
+
 - source_spec: `_bmad-output/implementation-artifacts/spec-recordings-in-meetings-list.md`
   summary: `record:deleteTranscript` and `record:deleteSummary`, plus both preload methods, now have zero renderer callers — the Record-tab card menu was their only one.
   evidence: `grep -rn 'deleteTranscript\|deleteSummary' desktop/renderer/` returns only the library's `transcripts:*` equivalents. The handlers (`main.js:3543`, `main.js:3570`) still exist and are still reachable over IPC. Removing them is a main-process change, which this spec's `Ask First` list reserves. Found by blind-hunter review, 2026-08-26.
@@ -428,3 +432,27 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-meeting-card-copy-file-path.md`
   summary: The new `ICON_PATHS.copy` SVG path data is byte-for-byte duplicated from two pre-existing inline copy-icon SVGs (`btnRailCopy`'s checkmark-swap markup and its own copy-icon revert string) instead of those two call sites being refactored to reuse the new shared `iconSvg("copy")` helper.
   evidence: Raised independently by the blind-hunter review layer, verified by reading the three occurrences of the same path string in `desktop/renderer/app.js`. Pre-existing duplication (the two inline copies existed before this change); folding all three into one shared definition is a small, low-risk cleanup but touches unrelated call sites outside this spec's scope.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-calendar-sync-participants.md`
+  summary: Auto-record queries calendar metadata after a call-detection prompt is accepted, so an event boundary or two accepted prompts can let a slower earlier query overwrite the newer selection.
+  evidence: Raised independently by the blind-hunter review layer. This predates the participant-retention change because the same asynchronous query already supplied the title, but preserving participants makes the stale result carry more metadata. Fixing it requires binding a calendar event to the detected prompt or adding a request-generation rule, neither of which belongs to this focused correction.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-beta-integration-pii-precommit-guard.md`
+  summary: The beta release procedure runs its checks before the version bump, leaving the committed and tagged release state unverified.
+  evidence: Raised by the blind-hunter review layer. The ordering predates the beta-policy documentation update and is outside this change's authorization/branch scope; correcting it needs a release-procedure-specific decision on where checks rerun.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-beta-integration-pii-precommit-guard.md`
+  summary: The beta extension archive is built from the local extension directory and can include untracked files that no staged-index hook checks.
+  evidence: Raised by the blind-hunter review layer. This pre-existing release-archive behavior is independent of the new commit guard; fixing it needs a tracked-files archive or explicit packaging allowlist, which is broader than the requested local-commit protection.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-popup-live-current-session.md`
+  summary: Current-session calendar ownership still relies on title equality, so an explicit manual selection identical to the automatic title can be overwritten by a later refresh.
+  evidence: The blind-hunter review identified that autoPrefill.ours() only compares input.value.trim() to its last automatic title; direct picker/smart selections do not signal manual ownership. This predates the session-reset fix. Separating current-session manual selection from automatic ownership requires its own input/selection tracking change.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-recording-prompt-three-second-delay.md`
+  summary: Investigate retry behavior when microphone process attribution is unavailable at activation time.
+  evidence: Existing MicActivityMonitor.evaluate clears pendingActivation and returns when activeInputApp is nil; it schedules no retry while input remains active. This predates the delay change; real-call impact has not been reproduced.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-local-huggingface-summarizer.md`
+  summary: Before a beta/release, build the macOS arm64 artifact and smoke a reviewed downloaded model in the packaged app: verify runner and dylib signatures, then test offline Summarize, Ask AI, follow-up drafts, Enhance, and corrupted-cache rejection.
+  evidence: Automated checks cover the manifest, downloader integrity/cancellation, IPC boundary, and source-level packaging configuration, but a packaged Electron app and the multi-gigabyte model/runtime are deliberately not built or downloaded during this implementation. The release/build boundary requires explicit user authority.
