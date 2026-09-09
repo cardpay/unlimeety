@@ -5470,7 +5470,8 @@ ipcMain.on('prompt:stopNow', () => {
     autoStopSlot = null;
     closePromptWindow();
     if (slot) {
-        callMonitor.cooldownUntil = Date.now() + PROMPT_COOLDOWN_MS;
+        // The user explicitly ended this recording; the next micActive may be
+        // a new call, so only dismissals and unattended auto-stop use cooldown.
         triggerAutoStop([slot]);
     }
 });
