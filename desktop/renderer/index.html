@@ -1169,9 +1169,9 @@
             <span class="settings-radio-sub">Local model (e.g. llama3.1)</span>
           </label>
           <label class="settings-radio">
-            <input type="radio" name="settings-provider" value="local-hf" />
+            <input type="radio" name="settings-provider" value="local-hf" disabled />
             <span class="settings-radio-title">Local Hugging Face <span class="provider-badge provider-badge-local">Privacy recommended · Local</span></span>
-            <span class="settings-radio-sub">Reviewed Qwen3 models, downloaded to this Mac</span>
+            <span class="settings-radio-sub">Coming soon — reviewed Qwen3 models downloaded to this Mac</span>
           </label>
           <label class="settings-radio">
             <input type="radio" name="settings-provider" value="openai-compatible" />
@@ -1317,7 +1317,7 @@
       <div class="modal-body">
         <div class="settings-radio-sub" style="margin-bottom:12px">Choose before any meeting text is processed. You can change this later in Settings.</div>
         <div class="provider-choice-grid">
-          <button type="button" class="provider-choice" data-provider="local-hf"><strong>Local Hugging Face</strong><span>Privacy recommended · Local</span><small>Download a reviewed Qwen3 model first.</small></button>
+          <button type="button" class="provider-choice" data-provider="local-hf" disabled title="Coming soon"><strong>Local Hugging Face</strong><span>Privacy recommended · Local</span><small>Coming soon — reviewed Qwen3 models downloaded to this Mac.</small></button>
           <button type="button" class="provider-choice" data-provider="claude-code"><strong>Claude Code</strong><span>Quality · Cloud</span></button>
           <button type="button" class="provider-choice" data-provider="codex-cli"><strong>Codex CLI</strong><span>Speed · Cloud</span></button>
           <button type="button" class="provider-choice" data-provider="ollama"><strong>Ollama</strong><span>Local</span></button>

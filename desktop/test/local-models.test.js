@@ -15,6 +15,7 @@ const MAIN = fs.readFileSync(path.join(__dirname, '..', 'main.js'), 'utf8');
 const PRELOAD = fs.readFileSync(path.join(__dirname, '..', 'preload.js'), 'utf8');
 const DOWNLOADER = fs.readFileSync(path.join(__dirname, '..', 'local-model-download.js'), 'utf8');
 const APP = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'app.js'), 'utf8');
+const INDEX = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'index.html'), 'utf8');
 
 // Fixture-only keypair: the production path uses normal certificate
 // validation. The injected transport below trusts this local server only.
@@ -250,4 +251,9 @@ test('fresh provider chooser persists a choice, opens Settings for local, and co
         'choosing local must lead to the model catalog');
     assert.match(APP, /if \(result\?\.needsProviderChoice\) \{\s*closeFollowupModal\(\);\s*openProviderChooser\(\);/,
         'follow-up must use the same fresh-profile chooser as the other routes');
+});
+
+test('local Hugging Face is disabled in Settings and the first-use chooser', () => {
+    assert.match(INDEX, /name="settings-provider" value="local-hf" disabled/);
+    assert.match(INDEX, /class="provider-choice" data-provider="local-hf" disabled/);
 });
