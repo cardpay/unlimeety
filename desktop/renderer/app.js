@@ -4509,6 +4509,7 @@ function buildResultSubtitle(meta) {
 
 const PROVIDER_LOADING_TEXT = {
   "claude-code": "Claude is reading the transcript…",
+  "codex-cli":   "Codex is reading the transcript…",
   openrouter:   "OpenRouter is reading the transcript…",
   ollama:       "Ollama is reading the transcript…",
 };
@@ -4740,9 +4741,9 @@ async function finishSummarize(info, job) {
 
   if (result?.notInstalled) {
     if (modalOnThisFile) {
-      modalErrorText.innerHTML =
-        "<strong>Claude Code not found.</strong><br>" +
-        "Install it from <strong>claude.ai/code</strong>, or switch the summarizer in <strong>Settings</strong>.";
+      modalErrorText.innerHTML = result.provider === "codex-cli"
+        ? "<strong>Codex CLI not found.</strong><br>Install it and run <strong>codex login</strong> in Terminal, or switch the summarizer in <strong>Settings</strong>."
+        : "<strong>Claude Code not found.</strong><br>Install it from <strong>claude.ai/code</strong>, or switch the summarizer in <strong>Settings</strong>.";
       showModalView(modalViewError);
     }
     return;

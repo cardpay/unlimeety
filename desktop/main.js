@@ -1218,7 +1218,7 @@ function parsePositiveInt(value, max) {
 }
 
 const DEFAULT_SUMMARIZER = {
-    provider: 'claude-code', // 'claude-code' | 'openrouter' | 'ollama' | 'openai-compatible'
+    provider: 'claude-code', // 'claude-code' | 'codex-cli' | 'openrouter' | 'ollama' | 'openai-compatible'
     openrouter: {
         apiKey: '',
         model: 'anthropic/claude-3.5-sonnet',
@@ -1351,7 +1351,7 @@ ipcMain.handle('settings:setSummarizer', (e, summarizer) => {
     if (!summarizer || typeof summarizer !== 'object') {
         return { ok: false, error: 'invalid summarizer payload' };
     }
-    const allowed = new Set(['claude-code', 'openrouter', 'ollama', 'openai-compatible']);
+    const allowed = new Set(['claude-code', 'codex-cli', 'openrouter', 'ollama', 'openai-compatible']);
     const provider = allowed.has(summarizer.provider) ? summarizer.provider : 'claude-code';
     const apiKey = String(summarizer.openrouter?.apiKey || '').trim();
     const oaiKey = String(summarizer.openaiCompatible?.apiKey || '').trim();
@@ -1423,6 +1423,49 @@ function findClaude() {
     });
 }
 
+function findCodex() {
+    const isWin = process.platform === 'win32';
+    const extraPaths = isWin
+        ? [
+            path.join(process.env.APPDATA || '', 'npm'),
+            path.join(process.env.LOCALAPPDATA || '', 'Programs', 'codex'),
+          ]
+        : ['/usr/local/bin', '/opt/homebrew/bin', path.join(os.homedir(), '.local', 'bin')];
+    const env = {
+        ...process.env,
+        PATH: [process.env.PATH, ...extraPaths].filter(Boolean).join(path.delimiter),
+    };
+    const whichCmd = isWin ? 'where' : 'which';
+    const codexExe = isWin ? 'codex.cmd' : 'codex';
+    const appCandidates = process.platform === 'darwin'
+        ? [
+            path.join('/Applications', 'ChatGPT.app', 'Contents', 'Resources', 'codex'),
+            path.join(os.homedir(), 'Applications', 'ChatGPT.app', 'Contents', 'Resources', 'codex'),
+          ]
+        : [];
+
+    return new Promise((resolve) => {
+        execFile(whichCmd, ['codex'], { env }, (err, stdout) => {
+            if (!err && stdout.trim()) {
+                resolve(stdout.trim().split('\n')[0].trim());
+                return;
+            }
+            const candidates = [...extraPaths.map(p => path.join(p, codexExe)), ...appCandidates];
+            resolve(candidates.find(isExecutableFile) || null);
+        });
+    });
+}
+
+function isExecutableFile(candidate) {
+    try {
+        if (!fs.statSync(candidate).isFile()) return false;
+        if (process.platform !== 'win32') fs.accessSync(candidate, fs.constants.X_OK);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
 // Summarization is a pure text task — the model needs no tools. We run with ALL
 // tools disabled (`--tools=`) and WITHOUT `--dangerously-skip-permissions`, so
 // a prompt-injection payload hidden in an untrusted transcript can't make Claude
@@ -1449,6 +1492,14 @@ const CLAUDE_BASE_ARGS = ['-p', '--output-format', 'text', '--tools=', '--no-ses
 // compressed prose in the body. `--safe-mode` drops every customization while
 // leaving OAuth auth working (unlike `--bare`, which demands an API key).
 const CLAUDE_ISOLATION_ARGS = ['--safe-mode', '--permission-mode', 'manual'];
+
+// Codex receives no prompt argv: the fixed instruction and framed untrusted
+// content travel exclusively on stdin. Its current CLI cannot disable tools.
+// Read-only blocks writes, but is not a filesystem read boundary; the UI makes
+// that residual risk an explicit opt-in.
+const CODEX_CLI_ARGS = ['exec', '--sandbox', 'read-only', '--ephemeral', '--ignore-user-config', '--ignore-rules', '--skip-git-repo-check'];
+const CODEX_TOOL_NOTICE = 'Do not use shell commands, web tools, file tools, or any other tools. Answer only from the text supplied on standard input.';
+const MAX_CODEX_OUTPUT_BYTES = 1_000_000;
 
 // A CLI that rejects the isolation flags rejects them every time. Remembering the
 // answer keeps the doomed first spawn off every later summary, follow-up draft and
@@ -1593,6 +1644,109 @@ function spawnClaude(claudePath, args, content, promptInstruction, extendedPath,
             clearTimeout(timer);
             if (canceled) { resolve({ ok: false, canceled: true }); return; }
             resolve({ ok: false, error: describeFsError(err) });
+        });
+    });
+}
+
+function codexChildEnv(extendedPath) {
+    // Keep just path lookup, the home-backed CLI login, and OS process basics.
+    // In particular, do not inherit project-specific configuration variables.
+    const env = { PATH: extendedPath, HOME: os.homedir() };
+    const names = process.platform === 'win32'
+        ? ['APPDATA', 'LOCALAPPDATA', 'USERPROFILE', 'SystemRoot', 'ComSpec', 'CODEX_HOME']
+        : ['USER', 'LOGNAME', 'TMPDIR', 'CODEX_HOME'];
+    for (const name of names) {
+        if (process.env[name]) env[name] = process.env[name];
+    }
+    return env;
+}
+
+async function runCodexCli(content, promptInstruction, onAbort) {
+    const codexPath = await findCodex();
+    if (!codexPath) {
+        return {
+            ok: false,
+            notInstalled: true,
+            provider: 'codex-cli',
+            error: 'Codex CLI not found. Install it and sign in with `codex login`, or pick another provider in Settings.',
+        };
+    }
+
+    const isWin = process.platform === 'win32';
+    const extraPaths = isWin
+        ? [
+            path.join(process.env.APPDATA || '', 'npm'),
+            path.join(process.env.LOCALAPPDATA || '', 'Programs', 'codex'),
+          ]
+        : ['/usr/local/bin', '/opt/homebrew/bin', path.join(os.homedir(), '.local', 'bin')];
+    const extendedPath = [process.env.PATH, ...extraPaths].filter(Boolean).join(path.delimiter);
+    let cwd;
+    try {
+        cwd = fs.mkdtempSync(path.join(app.getPath('userData'), 'codex-summary-'));
+    } catch (err) {
+        return { ok: false, error: `Could not create isolated Codex workspace: ${describeFsError(err)}` };
+    }
+    return spawnCodex(codexPath, content, promptInstruction, extendedPath, cwd, onAbort);
+}
+
+function spawnCodex(codexPath, content, promptInstruction, extendedPath, cwd, onAbort) {
+    return new Promise((resolve) => {
+        let stdout = '';
+        let stderr = '';
+        let canceled = false;
+        let outputTooLarge = false;
+        let outputBytes = 0;
+        let cleaned = false;
+        const cleanup = () => {
+            if (cleaned) return;
+            cleaned = true;
+            try { fs.rmSync(cwd, { recursive: true, force: true }); } catch { /* cleanup is best-effort */ }
+        };
+        const proc = spawn(
+            process.platform === 'win32' ? `"${codexPath}"` : codexPath,
+            CODEX_CLI_ARGS,
+            {
+                env: codexChildEnv(extendedPath),
+                cwd,
+                stdio: ['pipe', 'pipe', 'pipe'],
+                shell: process.platform === 'win32',
+            },
+        );
+
+        if (onAbort) onAbort({ abort: () => { canceled = true; killClaudeProcess(proc); } });
+        proc.stdin.on('error', () => { /* child died early; close resolves us */ });
+        proc.stdin.write(`${promptInstruction}\n\n${CODEX_TOOL_NOTICE}\n\n${content}`, 'utf-8');
+        proc.stdin.end();
+        const collectOutput = (stream, d) => {
+            outputBytes += d.length;
+            if (outputBytes > MAX_CODEX_OUTPUT_BYTES) {
+                outputTooLarge = true;
+                killClaudeProcess(proc);
+                return;
+            }
+            if (stream === 'stdout') stdout += d.toString();
+            else stderr += d.toString();
+        };
+        proc.stdout.on('data', (d) => collectOutput('stdout', d));
+        proc.stderr.on('data', (d) => collectOutput('stderr', d));
+
+        const timer = setTimeout(() => {
+            killClaudeProcess(proc);
+            resolve({ ok: false, error: 'Timed out (5 min). Make sure Codex CLI is authenticated.' });
+        }, 300_000);
+        proc.on('close', (code) => {
+            clearTimeout(timer);
+            cleanup();
+            if (canceled) { resolve({ ok: false, canceled: true }); return; }
+            if (outputTooLarge) { resolve({ ok: false, error: 'Codex CLI produced too much output.' }); return; }
+            if (code === 0 && stdout.trim()) resolve({ ok: true, summary: stdout.trim() });
+            else resolve({ ok: false, error: `Codex CLI exited with code ${code}. Try running 'codex login' in a terminal to re-authenticate.` });
+        });
+        proc.on('error', (err) => {
+            clearTimeout(timer);
+            cleanup();
+            if (canceled) { resolve({ ok: false, canceled: true }); return; }
+            resolve({ ok: false, error: 'Could not start Codex CLI.' });
         });
     });
 }
@@ -1763,7 +1917,7 @@ async function runOllama(content, promptInstruction, config, onAbort) {
 }
 
 // Every call site that hands an untrusted transcript to a model wraps it with
-// this before dispatch — never runSummarizerProvider/spawnClaude themselves,
+// this before dispatch — never runSummarizerProvider/spawnClaude/spawnCodex themselves,
 // since transcript-enhance.js's proofreading chunks must NOT be wrapped (a
 // small model echoing `<<<END…>>>` back into a chunk is indistinguishable from
 // real turn text to mergeEnhanced). The instruction half tells the model the
@@ -1789,6 +1943,7 @@ function framePrompt(instruction, content, label = 'TRANSCRIPT') {
 // summarize:run and transcripts:enhance. Returns { ok, summary } / { ok, error }.
 async function runSummarizerProvider(content, promptInstruction, cfg, onAbort) {
     switch (cfg.provider) {
+        case 'codex-cli':         return runCodexCli(content, promptInstruction, onAbort);
         case 'openrouter':        return runOpenRouter(content, promptInstruction, cfg.openrouter, onAbort);
         case 'ollama':            return runOllama(content, promptInstruction, cfg.ollama, onAbort);
         case 'openai-compatible': return runOpenAICompat(content, promptInstruction, cfg.openaiCompatible, onAbort);
@@ -2006,12 +2161,19 @@ function chatTurns(messages) {
 // Short and fixed — no transcript, no chat history. The transcript itself
 // travels inside `chat`'s framed first turn (see framePrompt below), never in
 // this string, so it never ends up in a `role: 'system'` message for any of
-// the four providers.
+// the five providers.
 const CHAT_INSTRUCTION = 'You are a helpful assistant answering questions about a meeting transcript. Be concise and factual.';
 
 async function runChatClaudeCode(instruction, chat) {
     const rendered = chat.map((m) => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`).join('\n\n');
     const result = await runClaudeCode(rendered, instruction);
+    if (!result.ok) return result;
+    return { ok: true, reply: result.summary };
+}
+
+async function runChatCodexCli(instruction, chat) {
+    const rendered = chat.map((m) => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`).join('\n\n');
+    const result = await runCodexCli(rendered, instruction);
     if (!result.ok) return result;
     return { ok: true, reply: result.summary };
 }
@@ -2131,6 +2293,7 @@ ipcMain.handle('chat:ask', async (_e, target, messages) => {
         ? { ...m, content: `${framed.content}\n\n${m.content}` }
         : m);
     switch (cfg.provider) {
+        case 'codex-cli':         return runChatCodexCli(framed.instruction, framedChat);
         case 'openrouter':        return runChatOpenRouter(framed.instruction, framedChat, cfg.openrouter);
         case 'ollama':            return runChatOllama(framed.instruction, framedChat, cfg.ollama);
         case 'openai-compatible': return runChatOpenAICompat(framed.instruction, framedChat, cfg.openaiCompatible);
