@@ -254,9 +254,10 @@ test('fresh provider chooser persists a choice, opens Settings for local, and co
         'follow-up must use the same fresh-profile chooser as the other routes');
 });
 
-test('local Hugging Face is disabled in Settings and the first-use chooser', () => {
-    assert.match(INDEX, /name="settings-provider" value="local-hf" disabled/);
-    assert.match(INDEX, /class="provider-choice" data-provider="local-hf" disabled/);
+test('local Hugging Face is available in Settings and the first-use chooser', () => {
+    assert.match(INDEX, /name="settings-provider" value="local-hf" \/>/);
+    assert.match(INDEX, /class="provider-choice" data-provider="local-hf"/);
+    assert.doesNotMatch(INDEX, /class="provider-choice" data-provider="local-hf" disabled/);
 });
 
 test('provider cards disclose cloud, quality, speed, and local trade-offs', () => {
