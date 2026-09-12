@@ -1308,7 +1308,7 @@ function publicSummarizerConfig() {
 }
 
 const LOCAL_MODEL_PLATFORM = 'darwin-arm64';
-const LOCAL_MODEL_REDIRECT_HOSTS = new Set(['huggingface.co', 'cdn-lfs.huggingface.co', 'cas-bridge.xethub.hf.co']);
+const LOCAL_MODEL_REDIRECT_HOSTS = new Set(['huggingface.co', 'cdn-lfs.huggingface.co', 'cas-bridge.xethub.hf.co', 'us.aws.cdn.hf.co']);
 const LOCAL_MODEL_DOWNLOADS = new Map();
 const LOCAL_MODEL_VERIFY_CACHE = new Map();
 // llama-cli reads the dynamic prompt from stdin in single-turn mode. These

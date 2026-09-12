@@ -231,6 +231,7 @@ test('local model IPCs are narrow and main-window-only', () => {
 test('download and inference stay manifest-derived, verified, and offline-capable', () => {
     assert.match(MAIN, /fs\.statfsSync\(dir\)/, 'download must preflight free space');
     assert.match(MAIN, /stat\.isSymbolicLink\(\)/, 'model storage must reject symlinked directories');
+    assert.match(MAIN, /'us\.aws\.cdn\.hf\.co'/, 'download must allow the current Hugging Face CDN redirect');
     assert.match(DOWNLOADER, /crypto\.randomBytes\(16\)/, 'download temp name must be unpredictable');
     assert.match(DOWNLOADER, /bytes !== expectedBytes \|\| hash\.digest\('hex'\) !== expectedSha256/, 'download must verify exact bytes and hash');
     assert.match(DOWNLOADER, /fs\.renameSync\(tmp, destination\)/, 'verified artifact must be atomically promoted');
