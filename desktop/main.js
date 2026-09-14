@@ -1311,11 +1311,12 @@ const LOCAL_MODEL_PLATFORM = 'darwin-arm64';
 const LOCAL_MODEL_REDIRECT_HOSTS = new Set(['huggingface.co', 'cdn-lfs.huggingface.co', 'cas-bridge.xethub.hf.co', 'us.aws.cdn.hf.co']);
 const LOCAL_MODEL_DOWNLOADS = new Map();
 const LOCAL_MODEL_VERIFY_CACHE = new Map();
-// llama-cli reads the dynamic prompt from stdin in single-turn mode. These
+// --file makes llama-cli read the whole multiline stdin as one turn. These
 // flags are fixed app policy; the renderer never supplies a runner argument.
 const LOCAL_RUNNER_ARGS = [
-    '--single-turn', '--no-display-prompt', '--simple-io', '--color', 'off', '--jinja',
-    '--n-gpu-layers', '99', '--ctx-size', '8192', '--n-predict', '2048',
+    '--file', '/dev/stdin', '--single-turn', '--no-display-prompt', '--simple-io', '--color', 'off', '--jinja',
+    '--reasoning', 'off',
+    '--n-gpu-layers', '99', '--ctx-size', '0', '--n-predict', '2048',
 ];
 const LOCAL_RUNNER_TIMEOUT_MS = 600_000;
 const LOCAL_RUNNER_MAX_OUTPUT_BYTES = 1_000_000;
@@ -1470,6 +1471,11 @@ function localRunnerPath() {
     return path.join(path.dirname(app.getPath('exe')), 'llama-runner');
 }
 
+function localRunnerReply(output, input) {
+    const prefix = `User:\n${input}\n\nAssistant:\n`;
+    return output.startsWith(prefix) ? output.slice(prefix.length).trim() : '';
+}
+
 async function runLocalHf(content, promptInstruction, config, onAbort) {
     if (!localModelsSupported()) return { ok: false, error: 'Local models require macOS on Apple Silicon.' };
     const entry = modelById(config?.modelId);
@@ -1478,23 +1484,30 @@ async function runLocalHf(content, promptInstruction, config, onAbort) {
     try { modelPath = await verifyLocalModel(entry); } catch { return { ok: false, error: 'Local model is missing or failed verification. Download it again in Settings.' }; }
     const runner = localRunnerPath();
     if (!isExecutableFile(runner)) return { ok: false, error: 'Bundled local runner is unavailable.' };
+    let runDir;
+    try { runDir = fs.mkdtempSync(path.join(app.getPath('userData'), 'local-llm-run-')); } catch { return { ok: false, error: 'Could not create a local model workspace.' }; }
+    const outputPath = path.join(runDir, 'response.txt');
+    const input = `${promptInstruction}\n\n${content}`;
     return new Promise((resolve) => {
-        let stdout = '';
         let stderr = '';
         let outputBytes = 0;
         let cancelled = false;
         let settled = false;
-        const finish = (result) => { if (!settled) { settled = true; resolve(result); } };
-        const proc = spawn(runner, ['--model', modelPath, ...LOCAL_RUNNER_ARGS], {
+        const finish = (result) => {
+            if (settled) return;
+            settled = true;
+            try { fs.rmSync(runDir, { recursive: true, force: true }); } catch { /* cleanup is best-effort */ }
+            resolve(result);
+        };
+        const proc = spawn(runner, ['--model', modelPath, '--output', outputPath, ...LOCAL_RUNNER_ARGS], {
             cwd: app.getPath('userData'), stdio: ['pipe', 'pipe', 'pipe'], shell: false,
         });
         if (onAbort) onAbort({ abort: () => { cancelled = true; killClaudeProcess(proc); } });
         proc.stdin.on('error', () => {});
-        proc.stdin.end(`${promptInstruction}\n\n${content}`, 'utf-8');
+        proc.stdin.end(input, 'utf-8');
         proc.stdout.on('data', (chunk) => {
             outputBytes += chunk.length;
             if (outputBytes > LOCAL_RUNNER_MAX_OUTPUT_BYTES) { killClaudeProcess(proc); return; }
-            stdout += chunk.toString();
         });
         proc.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
         const timer = setTimeout(() => { killClaudeProcess(proc); finish({ ok: false, error: 'Local model timed out (10 min).' }); }, LOCAL_RUNNER_TIMEOUT_MS);
@@ -1502,8 +1515,11 @@ async function runLocalHf(content, promptInstruction, config, onAbort) {
             clearTimeout(timer);
             if (cancelled) finish({ ok: false, canceled: true });
             else if (outputBytes > LOCAL_RUNNER_MAX_OUTPUT_BYTES) finish({ ok: false, error: 'Local model produced too much output.' });
-            else if (code === 0 && stdout.trim()) finish({ ok: true, summary: stdout.trim() });
-            else finish({ ok: false, error: stderr.trim() || 'Local model did not return an answer.' });
+            else if (code === 0) {
+                let reply = '';
+                try { reply = localRunnerReply(fs.readFileSync(outputPath, 'utf-8'), input); } catch { /* handled below */ }
+                finish(reply ? { ok: true, summary: reply } : { ok: false, error: 'Local model did not return an answer.' });
+            } else finish({ ok: false, error: stderr.trim() || 'Local model did not return an answer.' });
         });
         proc.on('error', () => { clearTimeout(timer); finish(cancelled ? { ok: false, canceled: true } : { ok: false, error: 'Could not start the bundled local runner.' }); });
     });
@@ -1747,7 +1763,10 @@ const CLAUDE_ISOLATION_ARGS = ['--safe-mode', '--permission-mode', 'manual'];
 // content travel exclusively on stdin. Its current CLI cannot disable tools.
 // Read-only blocks writes, but is not a filesystem read boundary; the UI makes
 // that residual risk an explicit opt-in.
-const CODEX_CLI_ARGS = ['exec', '--sandbox', 'read-only', '--ephemeral', '--ignore-user-config', '--ignore-rules', '--skip-git-repo-check'];
+const CODEX_CLI_ARGS = [
+    'exec', '--model', 'gpt-5.6-luna', '--config', 'model_reasoning_effort="high"',
+    '--sandbox', 'read-only', '--ephemeral', '--ignore-user-config', '--ignore-rules', '--skip-git-repo-check',
+];
 const CODEX_TOOL_NOTICE = 'Do not use shell commands, web tools, file tools, or any other tools. Answer only from the text supplied on standard input.';
 const MAX_CODEX_OUTPUT_BYTES = 1_000_000;
 

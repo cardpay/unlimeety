@@ -56,6 +56,8 @@ test('Codex argv is constant and keeps every supported isolation flag', () => {
     for (const arg of ['exec', '--sandbox', 'read-only', '--ephemeral', '--ignore-user-config', '--ignore-rules', '--skip-git-repo-check']) {
         assert.match(CODEX_ARGS, new RegExp(`['\"]${arg.replace(/[-]/g, '\\-')}['\"]`));
     }
+    assert.match(CODEX_ARGS, /'--model', 'gpt-5\.6-luna'/);
+    assert.match(CODEX_ARGS, /'--config', 'model_reasoning_effort="high"'/);
     for (const forbidden of ['--ask-for-approval', '--search', '--add-dir', '--output-file', '--dangerously-bypass-approvals-and-sandbox']) {
         assert.doesNotMatch(CODEX_ARGS, new RegExp(forbidden.replace(/[-]/g, '\\-')));
     }

@@ -17,6 +17,10 @@ const DOWNLOADER = fs.readFileSync(path.join(__dirname, '..', 'local-model-downl
 const APP = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'app.js'), 'utf8');
 const INDEX = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'index.html'), 'utf8');
 const STYLE = fs.readFileSync(path.join(__dirname, '..', 'renderer', 'style.css'), 'utf8');
+const localRunnerReplyStart = MAIN.indexOf('function localRunnerReply(');
+const localRunnerReply = new Function(
+    `${MAIN.slice(localRunnerReplyStart, MAIN.indexOf('\n}', localRunnerReplyStart) + 2)}\nreturn localRunnerReply;`,
+)();
 
 // Fixture-only keypair: the production path uses normal certificate
 // validation. The injected transport below trusts this local server only.
@@ -238,7 +242,19 @@ test('download and inference stay manifest-derived, verified, and offline-capabl
     assert.match(MAIN, /await verifyLocalModel\(entry\)/, 'inference must reject a later-corrupted artifact');
     assert.match(MAIN, /case 'local-hf':\s+return runLocalHf/, 'summary/enhance dispatch must not fall back');
     assert.match(MAIN, /case 'local-hf':\s+return runChatLocalHf/, 'Ask AI must not fall back');
-    assert.match(MAIN, /'--single-turn', '--no-display-prompt', '--simple-io'/, 'runner input must use the reviewed stdin-only mode');
+    assert.match(MAIN, /'--file', '\/dev\/stdin', '--single-turn', '--no-display-prompt', '--simple-io'/, 'runner input must use the reviewed multiline stdin mode');
+});
+
+test('local runner returns only the assistant reply', () => {
+    const input = 'Proofread only.\n\n[00:01] Speaker:\nhelo';
+    assert.strictEqual(
+        localRunnerReply(`User:\n${input}\n\nAssistant:\n[00:01] Speaker:\nHello.\n\n`, input),
+        '[00:01] Speaker:\nHello.',
+    );
+    assert.strictEqual(localRunnerReply('terminal banner and prompt noise', input), '');
+    assert.match(MAIN, /'--reasoning', 'off'/, 'Qwen must spend its output budget on the answer');
+    assert.match(MAIN, /'--ctx-size', '0'/, 'runner must use each model native context window');
+    assert.match(MAIN, /'--output', outputPath/, 'the terminal UI must not be mistaken for the answer');
 });
 
 test('profiles without an explicit provider are blocked before any provider runs', () => {
