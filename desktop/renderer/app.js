@@ -3521,6 +3521,11 @@ async function openFollowupModal(filePath) {
   const result = await api.draftFollowup(filePath);
 
   if (!result?.ok) {
+    if (result?.needsProviderChoice) {
+      closeFollowupModal();
+      openProviderChooser();
+      return;
+    }
     if (followupErrorText) followupErrorText.textContent = result?.error || "Unknown error.";
     showFollowupView("error");
     return;
@@ -4370,6 +4375,7 @@ async function sendChatMessage() {
     appendChatMessage("assistant", result.reply);
     chatHistory.push({ role: "assistant", content: result.reply });
   } else {
+    if (result.needsProviderChoice) openProviderChooser();
     appendChatMessage("assistant", `Error: ${result.error}`);
     chatHistory.pop();
   }
@@ -4509,6 +4515,7 @@ function buildResultSubtitle(meta) {
 
 const PROVIDER_LOADING_TEXT = {
   "claude-code": "Claude is reading the transcript…",
+  "codex-cli":   "Codex is reading the transcript…",
   openrouter:   "OpenRouter is reading the transcript…",
   ollama:       "Ollama is reading the transcript…",
 };
@@ -4686,7 +4693,10 @@ window.queuePanel = { open: () => setTimeout(openQueuePanel, 0) };
 // model mangles is left exactly as it was.
 function finishEnhance(info, job) {
   const result = job.result || (job.error ? { ok: false, error: job.error } : { ok: false });
-  if (!result.ok) return; // failed/canceled — the panel row already shows why
+  if (!result.ok) {
+    if (result.needsProviderChoice) openProviderChooser();
+    return;
+  }
 
   // Load the new text straight into the editor rather than reopening the file:
   // the reopen path flushes the editor first, and a keystroke landing during the
@@ -4740,11 +4750,16 @@ async function finishSummarize(info, job) {
 
   if (result?.notInstalled) {
     if (modalOnThisFile) {
-      modalErrorText.innerHTML =
-        "<strong>Claude Code not found.</strong><br>" +
-        "Install it from <strong>claude.ai/code</strong>, or switch the summarizer in <strong>Settings</strong>.";
+      modalErrorText.innerHTML = result.provider === "codex-cli"
+        ? "<strong>Codex CLI not found.</strong><br>Install it and run <strong>codex login</strong> in Terminal, or switch the summarizer in <strong>Settings</strong>."
+        : "<strong>Claude Code not found.</strong><br>Install it from <strong>claude.ai/code</strong>, or switch the summarizer in <strong>Settings</strong>.";
       showModalView(modalViewError);
     }
+    return;
+  }
+  if (result?.needsProviderChoice) {
+    if (modalOnThisFile) summarizeModal.classList.add("hidden");
+    openProviderChooser();
     return;
   }
   if (!result?.ok) {
@@ -5160,6 +5175,8 @@ const settingsError = document.getElementById("settings-error");
 const settingsSectionOpenRouter = document.getElementById("settings-section-openrouter");
 const settingsSectionOllama = document.getElementById("settings-section-ollama");
 const settingsSectionOpenAI = document.getElementById("settings-section-openai");
+const settingsSectionLocalHf = document.getElementById("settings-section-local-hf");
+const settingsLocalModels = document.getElementById("settings-local-models");
 const settingsOrKey = document.getElementById("settings-or-key");
 const settingsOrModel = document.getElementById("settings-or-model");
 const settingsOrUrl = document.getElementById("settings-or-url");
@@ -5174,6 +5191,8 @@ const settingsPresetBtns = document.querySelectorAll(".settings-preset");
 const settingsProviderRadios = document.querySelectorAll(
   'input[name="settings-provider"]',
 );
+let localModelsState = null;
+let selectedLocalModelId = "";
 
 function updateSettingsSections() {
   const provider = document.querySelector(
@@ -5182,7 +5201,69 @@ function updateSettingsSections() {
   settingsSectionOpenRouter.classList.toggle("hidden", provider !== "openrouter");
   settingsSectionOllama.classList.toggle("hidden", provider !== "ollama");
   settingsSectionOpenAI.classList.toggle("hidden", provider !== "openai-compatible");
+  settingsSectionLocalHf.classList.toggle("hidden", provider !== "local-hf");
 }
+
+function localModelSize(bytes) {
+  return `${(Number(bytes) / (1024 ** 3)).toFixed(1)} GB`;
+}
+
+function renderLocalModels(state) {
+  localModelsState = state || localModelsState;
+  if (!settingsLocalModels || !localModelsState) return;
+  settingsLocalModels.innerHTML = "";
+  if (!localModelsState.supported) {
+    settingsLocalModels.textContent = "Local Hugging Face models require macOS on Apple Silicon.";
+    return;
+  }
+  for (const model of localModelsState.models || []) {
+    const card = document.createElement("div");
+    card.className = `local-model-card${selectedLocalModelId === model.id ? " selected" : ""}`;
+    const title = document.createElement("strong");
+    title.textContent = `${model.tier} · ${model.name}`;
+    const meta = document.createElement("div");
+    meta.className = "local-model-meta";
+    meta.textContent = `${localModelSize(model.bytes)} · ${model.minRamGb} GB RAM minimum · ${model.disclosure}`;
+    const actions = document.createElement("div");
+    actions.className = "local-model-actions";
+    if (model.downloading) {
+      const progress = document.createElement("span");
+      progress.className = "settings-radio-sub";
+      progress.textContent = `Downloading and verifying… ${model.progress}%`;
+      const cancel = document.createElement("button");
+      cancel.className = "btn btn-ghost";
+      cancel.textContent = "Cancel";
+      cancel.addEventListener("click", () => api.cancelLocalModel(model.id));
+      actions.append(progress, cancel);
+    } else if (model.installed) {
+      const select = document.createElement("button");
+      select.className = "btn btn-primary";
+      select.textContent = selectedLocalModelId === model.id ? "Selected" : "Select";
+      select.disabled = selectedLocalModelId === model.id;
+      select.addEventListener("click", () => { selectedLocalModelId = model.id; renderLocalModels(); });
+      const remove = document.createElement("button");
+      remove.className = "btn btn-ghost";
+      remove.textContent = "Remove";
+      remove.addEventListener("click", async () => { await api.removeLocalModel(model.id); renderLocalModels(await api.listLocalModels()); });
+      actions.append(select, remove);
+    } else {
+      const download = document.createElement("button");
+      download.className = "btn btn-primary";
+      download.textContent = "Download";
+      download.addEventListener("click", async () => {
+        const result = await api.downloadLocalModel(model.id);
+        if (!result?.ok && !result?.canceled) settingsError.textContent = result?.error || "Model download failed.";
+        if (!result?.ok && !result?.canceled) settingsError.classList.remove("hidden");
+        renderLocalModels(await api.listLocalModels());
+      });
+      actions.append(download);
+    }
+    card.append(title, meta, actions);
+    settingsLocalModels.appendChild(card);
+  }
+}
+
+if (api.onLocalModelsStatus) api.onLocalModelsStatus(renderLocalModels);
 
 settingsProviderRadios.forEach((r) =>
   r.addEventListener("change", updateSettingsSections),
@@ -5321,6 +5402,31 @@ function collectSelectedCalendarIds() {
   return Array.from(boxes).filter((b) => b.checked).map((b) => b.value);
 }
 
+const providerChooserModal = document.getElementById("provider-chooser-modal");
+
+function summarizerPayloadForChoice(provider, cfg) {
+  return {
+    provider,
+    openrouter: { apiKey: "", model: cfg?.openrouter?.model || "", baseUrl: cfg?.openrouter?.baseUrl || "" },
+    ollama: { baseUrl: cfg?.ollama?.baseUrl || "", model: cfg?.ollama?.model || "", contextTokens: cfg?.ollama?.contextTokens || "" },
+    openaiCompatible: { apiKey: "", model: cfg?.openaiCompatible?.model || "", baseUrl: cfg?.openaiCompatible?.baseUrl || "" },
+    localHf: { modelId: cfg?.localHf?.modelId || "" },
+  };
+}
+
+function openProviderChooser() {
+  providerChooserModal?.classList.remove("hidden");
+}
+
+document.querySelectorAll(".provider-choice").forEach((button) => button.addEventListener("click", async () => {
+  const cfg = await api.getSummarizer();
+  const provider = button.dataset.provider;
+  const saved = await api.setSummarizer(summarizerPayloadForChoice(provider, cfg));
+  if (!saved?.ok) return;
+  providerChooserModal.classList.add("hidden");
+  if (provider === "local-hf") openSettingsModal();
+}));
+
 async function openSettingsModal() {
   const cfg = await api.getSummarizer();
   const provider = cfg?.provider || "claude-code";
@@ -5357,6 +5463,8 @@ async function openSettingsModal() {
   settingsOaiKey.dataset.hasKey = cfg?.openaiCompatible?.hasKey ? "1" : "";
   settingsOaiKey.placeholder = cfg?.openaiCompatible?.hasKey ? "•••••••• (leave blank to keep)" : "sk-…";
   settingsOaiModel.value = cfg?.openaiCompatible?.model || "";
+  selectedLocalModelId = cfg?.localHf?.modelId || "";
+  renderLocalModels(await api.listLocalModels?.());
   const autoStopEl = document.getElementById("settings-autostop");
   if (autoStopEl && api.getAutoStop) autoStopEl.checked = await api.getAutoStop();
   settingsGlossary.value = (await api.getGlossary?.()) || "";
@@ -5416,6 +5524,11 @@ async function saveSettings() {
       return;
     }
   }
+  if (provider === "local-hf" && !selectedLocalModelId) {
+    settingsError.textContent = "Download and select a local model first.";
+    settingsError.classList.remove("hidden");
+    return;
+  }
 
   // Before the first write: the glossary is capped in main, and failing after
   // the provider config was already saved leaves the modal open on a half-saved
@@ -5444,6 +5557,7 @@ async function saveSettings() {
       model: settingsOaiModel.value.trim(),
       baseUrl: settingsOaiUrl.value.trim(),
     },
+    localHf: { modelId: selectedLocalModelId },
   };
   const res = await api.setSummarizer(payload);
   if (!res?.ok) {

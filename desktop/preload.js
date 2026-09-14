@@ -47,6 +47,15 @@ contextBridge.exposeInMainWorld('transcriber', {
     pickFolder:       () => ipcRenderer.invoke('settings:pickFolder'),
     getSummarizer:    ()     => ipcRenderer.invoke('settings:getSummarizer'),
     setSummarizer:    (cfg)  => ipcRenderer.invoke('settings:setSummarizer', cfg),
+    listLocalModels:   ()     => ipcRenderer.invoke('localModels:list'),
+    downloadLocalModel:(id)   => ipcRenderer.invoke('localModels:download', id),
+    cancelLocalModel:  (id)   => ipcRenderer.invoke('localModels:cancel', id),
+    removeLocalModel:  (id)   => ipcRenderer.invoke('localModels:remove', id),
+    onLocalModelsStatus: (cb) => {
+        const handler = (_e, state) => cb(state);
+        ipcRenderer.on('localModels:status', handler);
+        return () => ipcRenderer.removeListener('localModels:status', handler);
+    },
     getAppVersion:    ()     => ipcRenderer.invoke('app:version'),
     getAutoStop:      ()     => ipcRenderer.invoke('settings:getAutoStop'),
     setAutoStop:      (on)   => ipcRenderer.invoke('settings:setAutoStop', on),

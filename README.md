@@ -288,9 +288,10 @@ through the Live tab like any other call.
 
 ### Step 5. Configure the summarizer (optional)
 
-Transcription is always local. The summarizer is the one place a cloud service can be involved — and out of the box it is one: the default **Claude Code** provider sends text to Anthropic. The summarizer serves Summarize, Ask AI, follow-up drafts and **Enhance**, so with a cloud provider the transcript text of those runs leaves the Mac. Only **Ollama** keeps summarization on-device. Four providers, in **Settings → Summarizer**:
+Transcription is always local. The summarizer is the one place a cloud service can be involved — and out of the box it is one: the default **Claude Code** provider sends text to Anthropic. The summarizer serves Summarize, Ask AI, follow-up drafts and **Enhance**, so with a cloud provider the transcript text of those runs leaves the Mac. Only **Ollama** keeps summarization on-device. Five providers, in **Settings → Summarizer**:
 
 - **Claude Code** *(default)* — runs the `claude` CLI installed on your machine, but the CLI is a client, not a local model: it sends its prompts to Anthropic's API, so **transcript text leaves the Mac** and an active Claude plan or API credit is required. See [Claude Code docs](https://docs.anthropic.com/en/docs/claude-code/overview). If `claude` is not in `PATH`, the app will tell you so on the first run.
+- **Codex CLI** *(opt-in)* — runs the installed `codex` CLI, so **transcript text leaves the Mac** for OpenAI's cloud service. Install it and sign in with `codex login` first. Each call uses `--sandbox read-only`, `--ephemeral`, and ignored user configuration/rules. Codex does not currently offer Claude's tool-disable switch: this is read-only sandboxing, **not** a tool-free mode or a filesystem read boundary.
 - **Ollama** — fully local models, nothing leaves the Mac. Requires a running `ollama serve` at `http://localhost:11434` and a pulled model (default `llama3.1`). The context window is yours to raise, so a small local model does not silently truncate a long transcript.
 - **OpenRouter** — paste an API key from [openrouter.ai](https://openrouter.ai/), pick a model (default `anthropic/claude-3.5-sonnet`).
 - **OpenAI-compatible** — any base URL that speaks the OpenAI API, for self-hosted or corporate gateways.
@@ -482,7 +483,7 @@ unlimeety/
 - **Summarization talks to the cloud by default.** The default provider, Claude Code,
   shells out to the locally installed `claude` CLI — but that CLI is a client for
   Anthropic's API, not a local model, so transcript text leaves the machine over HTTPS
-  on a stock install. OpenRouter and any hosted OpenAI-compatible endpoint do the same,
+  on a stock install. The opt-in Codex CLI, OpenRouter and any hosted OpenAI-compatible endpoint do the same,
   and it is true of every feature sharing the provider, not just Summarize: **Enhance**,
   speaker naming, Ask AI and the follow-up draft all send transcript text the same way.
   Your own `Note:` lines are the exception — Enhance never sends them.
@@ -509,9 +510,14 @@ unlimeety/
   manual`, none of your own `CLAUDE.md`, hooks or plugins apply either; an older CLI still
   gets the persistence/MCP guarantees above, just not that last one. The transcript itself is
   wrapped in data markers with a not-instructions notice before it reaches any provider
-  (Claude Code, OpenRouter, Ollama, or an OpenAI-compatible endpoint) — but a transcript's own
+  (Claude Code, Codex CLI, OpenRouter, Ollama, or an OpenAI-compatible endpoint) — but a transcript's own
   `Source:`/`Model:` header still reaches whichever cloud provider you've configured (tracked
   for a future PR, not fixed here).
+- **Codex CLI runs constrained, not tool-free.** Every call uses a constant `codex exec`
+  command with `--sandbox read-only`, `--ephemeral`, `--ignore-user-config`, `--ignore-rules`,
+  and `--skip-git-repo-check`; prompt and transcript text go only over stdin. The app directs Codex
+  not to use tools, but the current CLI has no equivalent of Claude's `--tools=` switch. Read-only
+  prevents writes, not reads, and the CLI retains the minimum home-backed state needed for its login.
 
 ## License
 

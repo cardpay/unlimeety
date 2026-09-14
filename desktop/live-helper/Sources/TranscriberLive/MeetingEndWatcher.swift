@@ -9,13 +9,9 @@ import CoreAudio
 // in the opposite direction: when no such app holds the mic anymore, the
 // meeting is over.
 //
-// Crucial difference from MicActivityMonitor: that monitor keys off the whole
-// input device (kAudioDevicePropertyDeviceIsRunningSomewhere). That signal is
-// useless here, because the recording helper itself opens the mic (sources
-// include "mic"), so the device always reads "in use" and never flips. Instead
-// we track the **per-process** input state (kAudioProcessPropertyIsRunningInput)
-// and exclude our own PID — so our own capture doesn't mask the conferencing
-// app releasing the mic.
+// Like MicActivityMonitor, this tracks the **per-process** input state
+// (kAudioProcessPropertyIsRunningInput) and excludes our own PID — so our own
+// capture doesn't mask the conferencing app releasing the mic.
 //
 // Lifecycle: armed only if a conferencing app is already holding the mic within
 // the first few seconds of the session (i.e. this really is an online meeting).

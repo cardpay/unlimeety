@@ -11,9 +11,9 @@ import CoreAudio
 //   • Zoom / Teams / Meet / FaceTime / WhatsApp / Slack huddle → open the mic
 //     for input AND play the far end → mic is running.
 //
-// So we watch `kAudioDevicePropertyDeviceIsRunningSomewhere` on the default
-// **input** device. When it flips on we enumerate the audio process list
-// (macOS 14+) to find which app is holding the mic, for a nicer prompt label.
+// We enumerate Core Audio's process list (macOS 14+) and use each process's
+// `kAudioProcessPropertyIsRunningInput` state. This identifies the app holding
+// the mic without depending on the selected default input device.
 //
 // This is a HAL property query only — we never open the microphone — so it
 // needs no TCC microphone grant. Recording itself still uses the existing
@@ -29,13 +29,14 @@ import CoreAudio
 final class MicActivityMonitor {
     private let debounce: TimeInterval
     private let queue = DispatchQueue(label: "helper.micmonitor")
+    // ponytail: <=2s discovery latency; add per-process listeners if lower latency is needed.
+    private let pollInterval: TimeInterval = 2.0
 
-    private var inputDevice: AudioDeviceID = AudioDeviceID(kAudioObjectUnknown)
-    private var reportedActive = false
+    private var state = MicActivityState()
     private var pendingActivation: DispatchWorkItem?
     private var stopped = false
 
-    // Friendly names for the common conferencing apps; anything else falls back
+    // Friendly names for common apps; anything else falls back
     // to the bundle id (Electron can prettify further if it wants).
     static let knownApps: [String: String] = [
         "us.zoom.xos": "Zoom",
@@ -53,13 +54,8 @@ final class MicActivityMonitor {
         "com.brave.Browser": "Brave",
     ]
 
-    private let inputRunningAddr = AudioObjectPropertyAddress(
-        mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
-        mScope: kAudioObjectPropertyScopeGlobal,
-        mElement: kAudioObjectPropertyElementMain
-    )
-    private var defaultInputAddr = AudioObjectPropertyAddress(
-        mSelector: kAudioHardwarePropertyDefaultInputDevice,
+    private var processListAddr = AudioObjectPropertyAddress(
+        mSelector: kAudioHardwarePropertyProcessObjectList,
         mScope: kAudioObjectPropertyScopeGlobal,
         mElement: kAudioObjectPropertyElementMain
     )
@@ -71,18 +67,22 @@ final class MicActivityMonitor {
     // ─── Lifecycle ───────────────────────────────────────────────────────────
 
     func start() {
+        guard #available(macOS 14.0, *) else {
+            Helper.log("mic monitor: requires macOS 14+, not starting")
+            return
+        }
         queue.async { [weak self] in
             guard let self else { return }
-            self.attachToDefaultInput()
-            // Re-attach when the user switches default input device.
+            // A process-list update catches process creation/destruction; the
+            // poll catches input state changes on an existing process.
             AudioObjectAddPropertyListenerBlock(
                 AudioObjectID(kAudioObjectSystemObject),
-                &self.defaultInputAddr,
+                &self.processListAddr,
                 self.queue
             ) { [weak self] _, _ in
-                self?.handleDefaultInputChanged()
+                self?.evaluate()
             }
-            // Evaluate once at startup in case a call is already in progress.
+            self.schedulePoll()
             self.evaluate()
             Helper.log("mic monitor started (debounce=\(self.debounce)s)")
         }
@@ -94,111 +94,59 @@ final class MicActivityMonitor {
             self.stopped = true
             self.pendingActivation?.cancel()
             self.pendingActivation = nil
-            self.detachFromInput()
             AudioObjectRemovePropertyListenerBlock(
                 AudioObjectID(kAudioObjectSystemObject),
-                &self.defaultInputAddr,
+                &self.processListAddr,
                 self.queue
             ) { _, _ in }
             Helper.log("mic monitor stopped")
         }
     }
 
-    // ─── Device listener wiring ────────────────────────────────────────────────
+    // ─── Poll loop ───────────────────────────────────────────────────────────
 
-    private func attachToDefaultInput() {
-        let dev = Self.defaultInputDevice()
-        guard dev != AudioObjectID(kAudioObjectUnknown) else {
-            Helper.log("mic monitor: no default input device")
-            return
+    private func schedulePoll() {
+        queue.asyncAfter(deadline: .now() + pollInterval) { [weak self] in
+            guard let self, !self.stopped else { return }
+            self.evaluate()
+            self.schedulePoll()
         }
-        inputDevice = dev
-        var addr = inputRunningAddr
-        AudioObjectAddPropertyListenerBlock(dev, &addr, queue) { [weak self] _, _ in
-            self?.evaluate()
-        }
-    }
-
-    private func detachFromInput() {
-        guard inputDevice != AudioObjectID(kAudioObjectUnknown) else { return }
-        var addr = inputRunningAddr
-        AudioObjectRemovePropertyListenerBlock(inputDevice, &addr, queue) { _, _ in }
-        inputDevice = AudioObjectID(kAudioObjectUnknown)
-    }
-
-    private func handleDefaultInputChanged() {
-        guard !stopped else { return }
-        detachFromInput()
-        attachToDefaultInput()
-        evaluate()
     }
 
     // ─── State machine ─────────────────────────────────────────────────────────
 
     private func evaluate() {
         guard !stopped else { return }
-        let running = inputDevice != AudioObjectID(kAudioObjectUnknown)
-            && Self.deviceIsRunningSomewhere(inputDevice)
-
-        if running {
-            // Already reported or already waiting → nothing to do.
-            guard !reportedActive, pendingActivation == nil else { return }
+        let app = Self.activeInputApp()
+        switch state.observe(active: app != nil) {
+        case .schedule:
+            guard let app else { return }
+            Helper.log("mic monitor: activation pending for \(app.name)")
             let work = DispatchWorkItem { [weak self] in
                 guard let self else { return }
                 self.pendingActivation = nil
-                // Re-check after the debounce: the mic must still be held, by a
-                // real (non-self) process, before we bother the user.
-                guard self.inputDevice != AudioObjectID(kAudioObjectUnknown),
-                      Self.deviceIsRunningSomewhere(self.inputDevice),
-                      let app = Self.activeInputApp()
-                else { return }
-                self.reportedActive = true
-                Helper.emit([
-                    "type": "micActive",
-                    "app": app.name,
-                    "bundleId": app.bundleId,
-                    "pid": Int(app.pid),
-                ])
+                let app = Self.activeInputApp()
+                let transition = self.state.recheck(active: app != nil)
+                Helper.log("mic monitor: activation recheck for \(app?.name ?? "none") \(transition == .report ? "active" : "inactive")")
+                guard transition == .report, let app else { return }
+                Helper.emit(["type": "micActive", "app": app.name, "bundleId": app.bundleId, "pid": Int(app.pid)])
+                Helper.log("mic monitor: activation emitted for \(app.name)")
             }
             pendingActivation = work
             queue.asyncAfter(deadline: .now() + debounce, execute: work)
-        } else {
+        case .cancel:
             pendingActivation?.cancel()
             pendingActivation = nil
-            if reportedActive {
-                reportedActive = false
-                Helper.emit(["type": "micInactive"])
-            }
+            Helper.log("mic monitor: pending activation cancelled")
+        case .inactive:
+            Helper.emit(["type": "micInactive"])
+            Helper.log("mic monitor: activity cleared")
+        case nil, .report:
+            break
         }
     }
 
     // ─── Core Audio lookups ────────────────────────────────────────────────────
-
-    private static func defaultInputDevice() -> AudioDeviceID {
-        var dev = AudioDeviceID(kAudioObjectUnknown)
-        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
-        var addr = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultInputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &dev) == noErr else {
-            return AudioObjectID(kAudioObjectUnknown)
-        }
-        return dev
-    }
-
-    private static func deviceIsRunningSomewhere(_ device: AudioDeviceID) -> Bool {
-        var running: UInt32 = 0
-        var size = UInt32(MemoryLayout<UInt32>.size)
-        var addr = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        guard AudioObjectGetPropertyData(device, &addr, 0, nil, &size, &running) == noErr else { return false }
-        return running != 0
-    }
 
     // Enumerates the audio process list (macOS 14+) and returns the first
     // process — other than ourselves — that is currently running input.

@@ -9,8 +9,10 @@ WhisperKit/SpeakerKit helper, and a Chrome extension. `README.md` covers usage, 
 
 ## Policy
 
-- Land every change through a PR from a `feature/*` branch — never push to `main` directly, version
-  bumps included.
+- Merge completed `feature/*` branches locally into `beta` without a PR; `beta` may be pushed. Only
+  `beta` may open a PR to `main`; never push to `main` directly, version bumps included.
+- Do not build a pre-release, notarize, upload an artifact, create a tag, or publish a GitHub release
+  unless the user explicitly requests that release.
 - Do GitHub work through the `gh` CLI — PRs, releases, tag pushes — not plain git over SSH.
 - Never `git add` `desktop/build/icon.ico`, `desktop/build/icon.png`, `store-listing.md` or
   `store-listing.en.md` — they are deliberately kept out of git.
@@ -61,6 +63,13 @@ WhisperKit/SpeakerKit helper, and a Chrome extension. `README.md` covers usage, 
 
 <!-- /bmad:context -->
 
+## Integration and release policy override
+
+- This repository uses `feature/*` → local `beta` merge → `beta` push, without PRs into `beta`.
+  Only `beta` may open a PR into `main`; this overrides the managed context's older integration rule.
+- Do not build, notarize, upload, tag, or publish a pre-release unless the user explicitly requests
+  that specific release.
+
 ## Personal data
 
 Kept outside the `bmad:context` block on purpose — a context refresh must not drop it.
@@ -69,4 +78,6 @@ Kept outside the `bmad:context` block on purpose — a context refresh must not 
   repository — not into code, comments, tests, or `_bmad-output/` specs. Use synthetic names and
   `@example.com`. The history was rewritten once (2026-09-06) to strip such data; it cannot be
   rewritten cheaply a second time.
-- Before pushing: `git diff --cached | rg -i '@unlimit\.com'` — a hit means stop and rename.
+- Install the tracked personal-data guard with `scripts/install-git-hooks.sh`. It checks staged index
+  content and commit messages before a commit is created; do not bypass it or expand its denylist
+  without the user's approval.

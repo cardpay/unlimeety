@@ -283,8 +283,9 @@
   // it whenever the tab is opened — re-reads the calendar, fills in the current
   // meeting, and clears its own value once that meeting is over. It only ever
   // touches what it wrote itself: a title typed by hand, or picked from the
-  // popover, is left alone. Without this, a prefilled title outlived its meeting
-  // until the app restarted, so the next recording inherited it.
+  // popover, is left alone until reset() starts a new session. Previously, a
+  // prefilled title outlived its meeting until the app restarted, so the next
+  // recording inherited it.
   // `active` (optional) answers "is the form this field lives on still the one
   // on screen?" — a read spans an 8 s helper spawn, and pressing Start mid-read
   // must not let the clear below land on a session in progress, whose save path
@@ -312,15 +313,24 @@
       writes++;
       onPick({
         title,
-        // A title that arrives without attendees is main's auto-record prompt,
-        // which knows none. Keeping the ones already stashed would file the new
-        // meeting under the previous one's guest list — unless it IS the same
-        // meeting, where `undefined` leaves them in place.
+        // A title-only caller has no attendee data. Keeping the ones already
+        // stashed would file a different meeting under the previous one's guest
+        // list — unless it IS the same meeting, where `undefined` leaves them
+        // in place. Main's auto-record route supplies an explicit array, so it
+        // replaces the list even when the title is unchanged.
         participants: Array.isArray(pick.participants) ? pick.participants : (same ? undefined : []),
       });
     };
     return {
       put,
+      // Explicit fresh-session boundary: discard even direct/manual ownership
+      // and invalidate reads that began for the previous recording. Ordinary
+      // tab visits keep using refresh(), which preserves current-session edits.
+      reset: () => {
+        writes++;
+        auto = '';
+        onPick({ title: '', participants: [], clear: true });
+      },
       refresh: async () => {
         const seen = writes;
         const { ok, pick } = await readCurrent();

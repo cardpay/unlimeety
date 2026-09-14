@@ -20,7 +20,7 @@ import Foundation
 //   list available calendars (one-shot):
 //     {"cmd":"listCalendars"}
 //   watch for a call starting (mic held open by another app); long-lived:
-//     {"cmd":"monitorMic","debounceSec":8}
+//     {"cmd":"monitorMic","debounceSec":3}
 //     {"cmd":"stopMonitor"}
 //   common:
 //     {"cmd":"stop"}
@@ -173,7 +173,7 @@ final class CommandLoop {
 
             case "monitorMic":
                 let mon = try? JSONDecoder().decode(MonitorMicCommand.self, from: data)
-                handleMonitorMic(debounceSec: mon?.debounceSec ?? 8)
+                handleMonitorMic(debounceSec: mon?.debounceSec ?? 3)
 
             case "stopMonitor":
                 micMonitor?.stop()
