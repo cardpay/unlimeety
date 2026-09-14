@@ -24,6 +24,7 @@ actor RecordingSession {
     private var systemBuffer: [Float] = []
     private var drainTask: Task<Void, Never>?
     private var stopped = false
+    private var echoCanceller: AcousticEchoCanceller?
 
     private let sampleRate: Double = 16_000
     private let drainIntervalNs: UInt64 = 100_000_000  // 100 ms
@@ -32,6 +33,7 @@ actor RecordingSession {
         self.outputURL = outputURL
         self.useMic = useMic
         self.useSystem = useSystem
+        self.echoCanceller = useMic && useSystem ? AcousticEchoCanceller() : nil
     }
 
     func start() async throws {
@@ -172,11 +174,13 @@ actor RecordingSession {
         let n = min(micCount, systemCount)
         guard n > 0 else { return }
         var mixed = [Float](repeating: 0, count: n)
+        let micSamples = Array(micBuffer[0..<n])
+        let systemSamples = Array(systemBuffer[0..<n])
+        let cleanedMix = echoCanceller?.process(mic: micSamples, system: systemSamples)
         for i in 0..<n {
-            // Sum + soft clip to [-1, 1]. Real meeting audio rarely peaks
-            // both sources simultaneously, so a halving gain is unnecessary
-            // and would noticeably attenuate single-source content.
-            var v = micBuffer[i] + systemBuffer[i]
+            // Sum + soft clip. The shared canceller removes only the delayed
+            // mic copy of system audio before this sum.
+            var v = cleanedMix?[i] ?? (micBuffer[i] + systemBuffer[i])
             if v >  1 { v =  1 }
             if v < -1 { v = -1 }
             mixed[i] = v
