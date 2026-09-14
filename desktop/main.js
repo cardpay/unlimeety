@@ -3286,6 +3286,7 @@ async function runEnhanceJob(filePath, sender) {
     // still runs per prompt so a block only carries the terms that text
     // plausibly contains.
     const glossaryEntries = glossary.parse(readConfig().glossary || '');
+    const identities = enhance.identityRecords(glossaryEntries);
 
     // A renderer that reloads or goes away can no longer show the result, and the
     // run would otherwise hold the lock for hours and write the file under a
@@ -3325,9 +3326,10 @@ async function runEnhanceJob(filePath, sender) {
         // Its own heading: the proofreading imperative ("restore these
         // spellings") must not be the last thing a prompt says when the only
         // answer wanted is `Placeholder -> Name`.
-        const terms = glossary.render(
-            glossary.select(glossaryEntries, spokenBody), glossary.REFERENCE_HEADING);
-        const instruction = enhance.speakerInstruction({ terms });
+        const terms = glossary.render(glossary.select(
+            glossaryEntries.filter((entry) => !enhance.isIdentityGlossaryEntry(entry)), spokenBody),
+        glossary.REFERENCE_HEADING);
+        const instruction = enhance.speakerInstruction({ terms, identities });
         // `Meeting:`/`Participants:` are calendar-sourced and attacker-reachable
         // (a planted invite title/attendee), same as the transcript itself — they
         // move onto the data side with the rest of the evidence, labeled EVIDENCE,
@@ -3344,7 +3346,7 @@ async function runEnhanceJob(filePath, sender) {
             const res = await runSummarizerProvider(framed.content, framed.instruction, cfg);
             if (res?.ok && !enhanceCancelled) {
                 const named = enhance.parseSpeakerNames(res.summary, {
-                    labels: placeholders, body, participants, phonetic: PHONETIC_LETTERS,
+                    labels: placeholders, body, participants, phonetic: PHONETIC_LETTERS, identities,
                 });
                 if (named.size) {
                     blocks = enhance.renameSpeakers(blocks, named);
