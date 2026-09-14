@@ -145,8 +145,14 @@ test('summarize, follow-up and chat all frame the transcript before it reaches a
 
 test('speaker naming keeps Meeting:/Participants: out of the instruction and inside the EVIDENCE data block', () => {
     const src = sliceFunction('runEnhanceJob');
-    assert.match(src, /speakerInstruction\(\{\s*terms\s*\}\)/,
-        'speakerInstruction must be called with only terms — meetingTitle/participants no longer travel through it');
+    assert.match(src, /const identities = enhance\.identityRecords\(glossaryEntries\)/,
+        'email-backed glossary rows become naming identities before prompt construction');
+    assert.match(src, /glossaryEntries\.filter\(\(entry\) => !enhance\.isIdentityGlossaryEntry\(entry\)\)/,
+        'identity rows stay out of the body-selected domain-term list');
+    assert.match(src, /speakerInstruction\(\{\s*terms, identities\s*\}\)/,
+        'speakerInstruction receives identities with ordinary selected terms');
+    assert.match(src, /phonetic: PHONETIC_LETTERS, identities,/,
+        'the parser receives the same identity records it rendered into the prompt');
     assert.match(src, /meetingTitle \? `Meeting: \$\{meetingTitle\}` : ''/,
         'Meeting: must be built as part of the data content, not the instruction');
     assert.match(src, /participants\.length \? `Participants: \$\{participants\.join\(', '\)\}` : ''/,
