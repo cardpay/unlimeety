@@ -42,6 +42,7 @@ actor LiveSession {
     private let micRec: RecordSink?
     private let systemRec: RecordSink?
     private var drainTask: Task<Void, Never>?
+    private var echoCanceller: AcousticEchoCanceller?
     private let wavSampleRate: Double = 16_000
 
     struct FinalizedSegment {
@@ -59,10 +60,13 @@ actor LiveSession {
             // per-source so the captures can tee straight into them.
             self.micRec = config.sources.contains("mic") ? RecordSink() : nil
             self.systemRec = config.sources.contains("system") ? RecordSink() : nil
+            self.echoCanceller = config.sources.contains("mic") && config.sources.contains("system")
+                ? AcousticEchoCanceller() : nil
         } else {
             self.outputURL = nil
             self.micRec = nil
             self.systemRec = nil
+            self.echoCanceller = nil
         }
     }
 
@@ -375,11 +379,11 @@ actor LiveSession {
         let n = min(mic.count, system.count)
         guard n > 0 else { return }
         var mixed = [Float](repeating: 0, count: n)
+        let cleanedMix = echoCanceller?.process(mic: Array(mic[0..<n]), system: Array(system[0..<n]))
         for i in 0..<n {
-            // Sum + soft clip. Real meeting audio rarely peaks both sources
-            // simultaneously, so a halving gain is unnecessary and would
-            // attenuate single-source content.
-            var v = mic[i] + system[i]
+            // Sum + soft clip. The shared canceller removes only the delayed
+            // mic copy of system audio before this sum.
+            var v = cleanedMix?[i] ?? (mic[i] + system[i])
             if v >  1 { v =  1 }
             if v < -1 { v = -1 }
             mixed[i] = v

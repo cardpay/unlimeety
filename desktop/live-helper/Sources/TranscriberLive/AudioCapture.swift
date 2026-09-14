@@ -201,6 +201,151 @@ final class RecordSink: @unchecked Sendable {
     }
 }
 
+// Removes the part of the microphone signal that matches a delayed copy of
+// the digital system-audio reference. This runs on the session actor, not on
+// the realtime capture callbacks.
+final class AcousticEchoCanceller {
+    private let maxDelaySamples: Int
+    private let minDelaySamples: Int
+    private let tapCount: Int
+    private let estimateIntervalSamples: Int
+    private let estimateWindowSamples: Int
+    private let downsample: Int
+    private let minimumCorrelation: Double
+
+    private var referenceHistory: [Float]
+    private var historyWriteIndex = 0
+    private var coefficients: [Float]
+    private var recentMic: [Float] = []
+    private var recentSystem: [Float] = []
+    private var processedSamples = 0
+    private var lastEstimateAt = 0
+    private var delaySamples: Int?
+    private var active = false
+
+    init(sampleRate: Int = 16_000) {
+        self.maxDelaySamples = sampleRate * 3 / 10       // 300 ms
+        self.minDelaySamples = sampleRate / 100          // ignore <10 ms
+        self.tapCount = 64                                // 4 ms of room tail
+        self.estimateIntervalSamples = sampleRate         // once per second
+        self.estimateWindowSamples = sampleRate / 10      // 100 ms
+        self.downsample = 4
+        self.minimumCorrelation = 0.08
+        self.referenceHistory = Array(repeating: 0, count: maxDelaySamples + tapCount + 1)
+        self.coefficients = Array(repeating: 0, count: tapCount)
+    }
+
+    func process(mic: [Float], system: [Float]) -> [Float] {
+        let count = min(mic.count, system.count)
+        guard count > 0 else { return [] }
+
+        recentMic.append(contentsOf: mic[0..<count])
+        recentSystem.append(contentsOf: system[0..<count])
+        let historyLimit = maxDelaySamples + estimateWindowSamples + downsample
+        if recentMic.count > historyLimit {
+            recentMic.removeFirst(recentMic.count - historyLimit)
+            recentSystem.removeFirst(recentSystem.count - historyLimit)
+        }
+
+        processedSamples += count
+        if processedSamples - lastEstimateAt >= estimateIntervalSamples {
+            lastEstimateAt = processedSamples
+            estimateDelay()
+        }
+
+        var result = [Float](repeating: 0, count: count)
+        for i in 0..<count {
+            pushReference(system[i])
+            let micSample = mic[i]
+            guard active, let delaySamples else {
+                result[i] = clipped(micSample + system[i])
+                continue
+            }
+
+            var echo: Float = 0
+            var energy: Float = 1e-6
+            for tap in 0..<tapCount {
+                let reference = delayedReference(delaySamples + tap)
+                echo += coefficients[tap] * reference
+                energy += reference * reference
+            }
+
+            let error = micSample - echo
+            // NLMS adapts to the room's speaker-to-mic impulse response
+            // instead of assuming one exact gain.
+            let step = min(0.5, 0.35 / energy)
+            for tap in 0..<tapCount {
+                coefficients[tap] += step * error * delayedReference(delaySamples + tap)
+            }
+            result[i] = clipped(error + system[i])
+        }
+        return result
+    }
+
+    private func estimateDelay() {
+        guard recentMic.count >= estimateWindowSamples + maxDelaySamples / downsample else { return }
+
+        let micStart = recentMic.count - estimateWindowSamples
+        var bestDelay = delaySamples ?? 0
+        var bestCorrelation = 0.0
+        let maxCandidate = maxDelaySamples / downsample
+        let minCandidate = max(1, minDelaySamples / downsample)
+
+        // ponytail: bounded O(window × delay) scan once per second; use an FFT
+        // only if profiling shows this small post-capture workload matters.
+        for candidate in minCandidate...maxCandidate {
+            let lag = candidate * downsample
+            var cross: Double = 0
+            var micEnergy: Double = 0
+            var refEnergy: Double = 0
+            var samples = 0
+            var i = micStart
+            while i < recentMic.count {
+                let refIndex = i - lag
+                if refIndex >= 0 {
+                    let m = Double(recentMic[i])
+                    let refSample = Double(recentSystem[refIndex])
+                    cross += m * refSample
+                    micEnergy += m * m
+                    refEnergy += refSample * refSample
+                    samples += 1
+                }
+                i += downsample
+            }
+            guard samples > 0, micEnergy > 1e-8, refEnergy > 1e-8 else { continue }
+            let correlation = abs(cross) / (micEnergy * refEnergy).squareRoot()
+            if correlation > bestCorrelation {
+                bestCorrelation = correlation
+                bestDelay = lag
+            }
+        }
+
+        guard bestCorrelation >= minimumCorrelation else {
+            if delaySamples == nil { active = false }
+            return
+        }
+        if delaySamples != bestDelay {
+            coefficients = Array(repeating: 0, count: tapCount)
+            delaySamples = bestDelay
+        }
+        active = true
+    }
+
+    private func pushReference(_ sample: Float) {
+        referenceHistory[historyWriteIndex] = sample
+        historyWriteIndex = (historyWriteIndex + 1) % referenceHistory.count
+    }
+
+    private func delayedReference(_ lag: Int) -> Float {
+        let index = (historyWriteIndex - 1 - lag + referenceHistory.count) % referenceHistory.count
+        return referenceHistory[index]
+    }
+
+    private func clipped(_ value: Float) -> Float {
+        min(1, max(-1, value))
+    }
+}
+
 // Small shared helper that emits a real RMS value over stdout no more than
 // ~10 times per second per source. The renderer uses this to drive the
 // in-topbar level meter, so the user can see at a glance whether audio is
