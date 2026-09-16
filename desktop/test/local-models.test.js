@@ -271,11 +271,12 @@ test('fresh provider chooser persists a choice, opens Settings for local, and co
         'follow-up must use the same fresh-profile chooser as the other routes');
 });
 
-test('only Local Hugging Face is disabled in Settings and the first-use chooser', () => {
-    assert.match(INDEX, /name="settings-provider" value="local-hf" disabled/);
-    assert.match(INDEX, /class="provider-choice" data-provider="local-hf" disabled/);
-    assert.doesNotMatch(INDEX, /name="settings-provider" value="ollama" disabled/);
-    assert.doesNotMatch(INDEX, /class="provider-choice" data-provider="ollama" disabled/);
+test('every local summarizer is selectable in Settings and the first-use chooser', () => {
+    for (const provider of ['ollama', 'local-hf']) {
+        assert.match(INDEX, new RegExp(`name="settings-provider" value="${provider}" />`));
+        assert.match(INDEX, new RegExp(`class="provider-choice" data-provider="${provider}">`));
+    }
+    assert.doesNotMatch(INDEX, /Coming soon/, 'no summarizer may still advertise itself as unavailable');
 });
 
 test('provider cards disclose cloud, quality, speed, and local trade-offs', () => {
