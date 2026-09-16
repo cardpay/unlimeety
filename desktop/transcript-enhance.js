@@ -103,6 +103,7 @@ The participant list is taken from the calendar invitation, so it often holds em
 Rules you must not break:
 - Use only names that are actually spoken in the transcript or listed as participants. Never guess a name from a role, an accent or a topic.
 - An address alone never names anybody. A single initial fits dozens of given names, so n.zorina@example.com is evidence only once "Nadezhda" has been spoken in the transcript. If no part of a name was spoken, that placeholder is unknown: answer ?.
+- Configured identities are bound name-and-email records. When one fits, answer with its identity token, never its name or a combination of parts from different records. A token is valid only when at least one part of its configured name or non-email alias was spoken.
 - Write the name as its owner would introduce themselves: the plain dictionary form, not the form it is declined into when someone calls out to them.
 - Keep the name in the script of the transcript. Never transliterate it — a surname read off an address is written in the transcript's own script, not as the address spells it.
 - If a placeholder's name is not clearly established, answer ? for it. A wrong name is far worse than no name.
@@ -118,8 +119,33 @@ Rules you must not break:
 /// the one a small model obeys hardest. The call site now folds them into the
 /// EVIDENCE data block instead (alongside the placeholders and the transcript
 /// evidence), so this function only ever returns instruction-side text.
-function speakerInstruction({ terms = '' } = {}) {
-    return [SPEAKER_PROMPT, terms].filter(Boolean).join('\n\n');
+function isIdentityGlossaryEntry(entry) {
+    return (entry?.aliases || []).some((alias) => /^[^\s@]+@[^\s@]+$/.test(alias));
+}
+
+/// Email-backed glossary rows are people, not loose vocabulary. Their opaque
+/// tokens stop the model from assembling a name from fields on separate rows;
+/// the email itself stays out of the prompt because it cannot identify anyone.
+function identityRecords(entries = []) {
+    return entries.filter(isIdentityGlossaryEntry).map((entry, index) => ({
+        token: `identity-${index + 1}`,
+        name: entry.term,
+        aliases: entry.aliases.filter((alias) => !/^[^\s@]+@[^\s@]+$/.test(alias)),
+        email: entry.aliases.find((alias) => /^[^\s@]+@[^\s@]+$/.test(alias)),
+    }));
+}
+
+function renderIdentityRecords(identities) {
+    if (!identities.length) return '';
+    return [
+        'Configured identities — choose only the token for one matching record:',
+        ...identities.map(({ token, name, aliases }) =>
+            `- ${token}: ${name}${aliases.length ? ` (aliases: ${aliases.join(', ')})` : ''}`),
+    ].join('\n');
+}
+
+function speakerInstruction({ terms = '', identities = [] } = {}) {
+    return [SPEAKER_PROMPT, renderIdentityRecords(identities), terms].filter(Boolean).join('\n\n');
 }
 
 function speakerFromMarker(marker) {
@@ -461,20 +487,49 @@ function cleanName(s) {
         .trim();
 }
 
+function identityHasSpokenEvidence(identity, body) {
+    return [identity.name, ...identity.aliases]
+        .flatMap(nameParts)
+        .some((part) => part.length >= MIN_PART_CHARS && spokenIn(part, body));
+}
+
+/// A configured identity must arrive by token. Besides rejecting a model that
+/// merely repeats a configured name, reject a hybrid whose every part belongs
+/// to configured identities but no one identity owns them all.
+function identityTokenRequired(name, identities) {
+    const lower = name.toLowerCase();
+    if (identities.some((identity) => [identity.name, ...identity.aliases]
+        .some((candidate) => candidate.toLowerCase() === lower))) return true;
+    if (identities.some((identity) => [identity.name, ...identity.aliases]
+        .flatMap(nameParts).some((candidatePart) => nameParts(name)
+            .some((part) => spokenIn(candidatePart, part))))) return true;
+    const owners = nameParts(name).map((part) => identities.filter((identity) =>
+        [identity.name, ...identity.aliases].some((candidate) =>
+            nameParts(candidate).some((candidatePart) => spokenIn(candidatePart, part)))));
+    return owners.length > 1 && owners.every((matches) => matches.length)
+        && !owners.reduce((shared, matches) => shared.filter((identity) => matches.includes(identity))).length;
+}
+
 /// Model reply → a validated `label → name` map. Every rule that fails drops
 /// that one label and keeps its placeholder; nothing fails the whole pass.
-function parseSpeakerNames(reply, { labels = [], body = '', participants = [], phonetic = [] } = {}) {
+function parseSpeakerNames(reply, {
+    labels = [], body = '', participants = [], phonetic = [], identities = [],
+} = {}) {
     const wanted = new Map(labels.map((l) => [l.toLowerCase(), l]));
+    const identityByToken = new Map(identities.map((identity) => [identity.token.toLowerCase(), identity]));
     const map = new Map();
+    map.identities = new Map();
     const taken = new Set();
     const claimed = new Set();
     for (const line of stripCodeFence(String(reply || '')).split('\n')) {
         const m = REPLY_LINE.exec(line);
         if (!m) continue;
         const label = wanted.get(stripDecoration(m[1]).toLowerCase());
-        const name = cleanName(m[2]);
+        const answer = cleanName(m[2]);
         if (!label || map.has(label)) continue;
-        if (!name || name === '?' || /^(unknown|unclear|n\/?a)$/i.test(name)) continue;
+        if (!answer || answer === '?' || /^(unknown|unclear|n\/?a)$/i.test(answer)) continue;
+        const identity = identityByToken.get(answer.toLowerCase());
+        const name = identity ? identity.name : answer;
         if (name.length > MAX_NAME_CHARS) continue;
         if (name.split(/\s+/).length > MAX_NAME_WORDS) continue;
         if (!NAME_SHAPE.test(name)) continue;
@@ -482,16 +537,20 @@ function parseSpeakerNames(reply, { labels = [], body = '', participants = [], p
         // swapping one placeholder for another, must not be written in.
         if (isPlaceholderLabel(name, phonetic)) continue;
         if (taken.has(name.toLowerCase())) continue;   // two speakers, one name
+        if (identity && !identityHasSpokenEvidence(identity, body)) continue;
+        if (!identity && identityTokenRequired(name, identities)) continue;
         const attested = attestation(name, body, participants);
-        if (!attested.ok) continue;
+        if (!identity && !attested.ok) continue;
         // One participant is one person. Two labels whose names were both read
         // off the same address cannot both be right — the model was choosing
         // given names to fit one initial — so the second is dropped rather than
         // guessed between.
-        if (attested.entry && claimed.has(attested.entry)) continue;
+        const claim = identity ? identity.email.toLowerCase() : attested.entry;
+        if (claim && claimed.has(claim)) continue;
         map.set(label, name);
         taken.add(name.toLowerCase());
-        if (attested.entry) claimed.add(attested.entry);
+        if (identity) map.identities.set(label, identity);
+        if (claim) claimed.add(claim);
     }
     return map;
 }
@@ -548,6 +607,7 @@ function renameParticipantsLine(header, map, body = '') {
         const head = line.slice(0, line.indexOf(':') + 1);
         const entries = line.slice(line.indexOf(':') + 1)
             .split(',').map((s) => s.trim()).filter(Boolean);
+        const selectedIdentities = map.identities || new Map();
         // entry → the label whose name that entry belongs to.
         const bound = new Map();
         for (const [label, name] of map) {
@@ -565,9 +625,22 @@ function renameParticipantsLine(header, map, body = '') {
             if (label && !addressFor.has(label)) addressFor.set(label, entry);
         }
         const seen = new Set();
+        const identityForEmail = new Map();
+        for (const [label, identity] of selectedIdentities) {
+            const key = identity.email.toLowerCase();
+            if (!identityForEmail.has(key)) identityForEmail.set(key, label);
+        }
         const names = entries
             .map((entry) => {
-                if (map.has(entry)) return displaySpeakerAnnotated(map.get(entry), entry, addressFor.get(entry));
+                if (map.has(entry)) {
+                    const identity = selectedIdentities.get(entry);
+                    return displaySpeakerAnnotated(map.get(entry), entry, identity?.email || addressFor.get(entry));
+                }
+                const identityLabel = identityForEmail.get(entry.toLowerCase());
+                if (identityLabel) {
+                    const identity = selectedIdentities.get(identityLabel);
+                    return displaySpeakerAnnotated(map.get(identityLabel), identityLabel, identity.email);
+                }
                 const label = bound.get(entry);
                 return label ? displaySpeakerAnnotated(map.get(label), label, addressFor.get(label)) : entry;
             })
@@ -854,6 +927,8 @@ module.exports = {
     trimMiddle,
     participantsFromHeader,
     translit,
+    isIdentityGlossaryEntry,
+    identityRecords,
     parseSpeakerNames,
     renameSpeakers,
     renameParticipantsLine,

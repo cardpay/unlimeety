@@ -18,6 +18,8 @@ const {
     speakerInstruction,
     trimMiddle,
     translit,
+    isIdentityGlossaryEntry,
+    identityRecords,
     SPEAKER_PROMPT,
 } = require('../transcript-enhance');
 
@@ -51,6 +53,11 @@ const BODY = [
 ].join('\n');
 
 const blocks = parseBlocks(BODY);
+
+const IDENTITIES = identityRecords([
+    { term: 'Alex Morgan', aliases: ['Алексей', 'a.morgan@example.com'] },
+    { term: 'Blake Lee', aliases: ['Блейк', 'b.lee@example.com'] },
+]);
 
 // ─── marker surgery ─────────────────────────────────────────────────────────
 {
@@ -195,6 +202,45 @@ function turnBlock(i, chars) {
 
 // ─── the model's answer is not trusted ──────────────────────────────────────
 const opts = { labels: ['Gamma', 'Delta', 'Beta', 'Me'], body: BODY, participants: [], phonetic: PHONETIC };
+
+// ─── configured glossary identities are atomic ─────────────────────────────
+{
+    assert.strictEqual(isIdentityGlossaryEntry({ aliases: ['a.morgan@example.com'] }), true);
+    assert.strictEqual(isIdentityGlossaryEntry({ aliases: ['Алексей'] }), false);
+    assert.deepStrictEqual(IDENTITIES.map(({ token, name, aliases, email }) => ({ token, name, aliases, email })), [
+        { token: 'identity-1', name: 'Alex Morgan', aliases: ['Алексей'], email: 'a.morgan@example.com' },
+        { token: 'identity-2', name: 'Blake Lee', aliases: ['Блейк'], email: 'b.lee@example.com' },
+    ], 'email-backed glossary rows become opaque records while ordinary aliases remain evidence');
+
+    const known = {
+        labels: ['Beta'],
+        body: '[00:00] Gamma:\nАлексея, покажи пожалуйста экран.',
+        participants: ['a.morgan@example.com', 'Beta', 'b.lee@example.com'],
+        phonetic: PHONETIC,
+        identities: IDENTITIES,
+    };
+    const map = parseSpeakerNames('Beta -> identity-1', known);
+    assert.strictEqual(map.get('Beta'), 'Alex Morgan', 'the token resolves to the configured canonical spelling');
+    assert.strictEqual(renameParticipantsLine(
+        'Participants: a.morgan@example.com, Beta, b.lee@example.com\n', map, known.body),
+    'Participants: Alex Morgan (Beta) <a.morgan@example.com>, b.lee@example.com\n',
+    'the same configured email follows the canonical name into the header');
+
+    assert.strictEqual(parseSpeakerNames('Beta -> Alex Lee', known).size, 0,
+        'a hybrid assembled from different identity rows is rejected');
+    assert.strictEqual(parseSpeakerNames('Beta -> Алексея Lee', known).size, 0,
+        'an inflected configured alias cannot be combined with another identity');
+    assert.strictEqual(parseSpeakerNames('Beta -> Alex', known).size, 0,
+        'a configured canonical-name part must arrive by identity token');
+    assert.strictEqual(parseSpeakerNames('Beta -> identity-1', {
+        ...known, body: '[00:00] Gamma:\nДавайте начнём.' },
+    ).size, 0, 'an email-backed token without spoken name or alias evidence is rejected');
+
+    const unknown = parseSpeakerNames('Beta -> Chris Doe', {
+        ...known, body: '[00:00] Gamma:\nChris Doe will share the update.' },
+    );
+    assert.strictEqual(unknown.get('Beta'), 'Chris Doe', 'a spoken person outside configured identities keeps attestation');
+}
 
 {
     const map = parseSpeakerNames('Delta = Олег\nBeta = Марина', opts);
@@ -482,11 +528,12 @@ const emails = (...list) => ({
 
     const full = speakerInstruction({
         terms: 'Domain terms:\n- PayCore',
+        identities: IDENTITIES,
         meetingTitle: 'Status checks',
         participants: ['p.zorina@example.com'],
     });
-    assert.strictEqual(full, `${SPEAKER_PROMPT}\n\nDomain terms:\n- PayCore`,
-        'meetingTitle/participants are silently ignored — not read, not appended');
+    assert.strictEqual(full, `${SPEAKER_PROMPT}\n\nConfigured identities — choose only the token for one matching record:\n- identity-1: Alex Morgan (aliases: Алексей)\n- identity-2: Blake Lee (aliases: Блейк)\n\nDomain terms:\n- PayCore`,
+        'identity tokens are instruction-side data while meetingTitle/participants are silently ignored');
 
     // An empty terms block leaves no blank line or stray heading behind.
     assert.strictEqual(speakerInstruction({ terms: '' }), SPEAKER_PROMPT);
