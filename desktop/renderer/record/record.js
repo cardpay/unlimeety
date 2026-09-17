@@ -502,7 +502,6 @@
         else if (title) titleInput.value = title;
         if (Array.isArray(participants)) state.calendarParticipants = participants;
     }
-    window.calendarPicker?.attach({ button: $('record-cal-btn'), onPick: applyCalendarPick });
     // Re-read on every visit to this tab (live.js owns the switcher, so this is
     // a listener of our own): the field used to keep whatever the calendar said
     // the first time it was filled, so a meeting that ended hours ago was still
@@ -514,9 +513,16 @@
         // screen must not land once recording or transcribing is on screen.
         active: () => state.phase === 'idle',
     });
+    const selectCalendarPick = (pick) => {
+        if (calPrefill) calPrefill.select(pick);
+        else applyCalendarPick(pick);
+    };
+    window.calendarPicker?.attach({
+        button: $('record-cal-btn'), onPick: selectCalendarPick, allowNoCalendar: true,
+    });
     document.querySelector('#tab-switch .tab-btn[data-tab="record"]')
         ?.addEventListener('click', () => { if (state.phase === 'idle') calPrefill?.refresh(); });
-    window.recordTab = { applyCalendarPick, enterTranscribeSettings, closeTranscribeFlow };
+    window.recordTab = { applyCalendarPick: selectCalendarPick, enterTranscribeSettings, closeTranscribeFlow };
 
     startBtn.addEventListener('click', async () => {
         setupError.classList.add('hidden');
