@@ -141,7 +141,6 @@
         else if (title) titleInput.value = title;
         if (Array.isArray(participants)) state.calendarParticipants = participants;
     }
-    window.calendarPicker?.attach({ button: $('live-cal-btn'), onPick: applyCalendarPick });
     // Re-read on every visit to this tab: the field used to keep whatever the
     // calendar said the first time it was filled, so a meeting that ended hours
     // ago was still pre-selected.
@@ -152,7 +151,14 @@
         // while it was in flight, and stopAndSave still has to read this title.
         active: () => !setupSection.classList.contains('hidden'),
     });
-    window.liveTab = { applyCalendarPick };
+    const selectCalendarPick = (pick) => {
+        if (calPrefill) calPrefill.select(pick);
+        else applyCalendarPick(pick);
+    };
+    window.calendarPicker?.attach({
+        button: $('live-cal-btn'), onPick: selectCalendarPick, allowNoCalendar: true,
+    });
+    window.liveTab = { applyCalendarPick: selectCalendarPick };
 
     // ─── Model picker ────────────────────────────────────────────────────
     // Card grid mirrors the Record tab. One card is `.is-active` at all

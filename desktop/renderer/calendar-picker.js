@@ -190,13 +190,32 @@
     }
   }
 
-  function renderEvents(events, onPick) {
+  function renderEvents(events, onPick, allowNoCalendar) {
     popover.innerHTML = '';
+    const def = events.indexOf(currentEvent(events)); // -1 → no event is current
+    if (allowNoCalendar) {
+      const item = document.createElement('div');
+      item.className = 'cal-pop-item cal-pop-no-meeting' + (def === -1 ? ' cal-default' : '');
+      item.tabIndex = 0;
+      item.setAttribute('role', 'button');
+      item.textContent = 'No calendar meeting';
+      const choose = () => {
+        closePopover();
+        onPick({ title: '', participants: [], clear: true });
+      };
+      item.addEventListener('click', choose);
+      item.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        e.preventDefault();
+        choose();
+      });
+      popover.appendChild(item);
+    }
     if (!events.length) {
+      if (allowNoCalendar) return;
       showMessage('No calendar events around now.', false);
       return;
     }
-    const def = events.indexOf(currentEvent(events)); // -1 → nothing pre-selected
     events.forEach((ev, i) => {
       const item = document.createElement('div');
       item.className = 'cal-pop-item' + (i === def ? ' cal-default' : '');
@@ -217,7 +236,7 @@
     });
   }
 
-  async function openPopover(button, onPick) {
+  async function openPopover(button, onPick, allowNoCalendar) {
     // Toggle: a second click on the button closes it.
     if (popover) { closePopover(); return; }
     popover = document.createElement('div');
@@ -239,20 +258,20 @@
     if (popover !== mine) return; // closed/reopened while awaiting
 
     if (res && res.ok) {
-      renderEvents(res.events || [], onPick);
+      renderEvents(res.events || [], onPick, allowNoCalendar);
     } else {
       showMessage(res && res.error || 'Could not read the calendar.', res && res.reason === 'calendar-permission');
     }
   }
 
   // Public API: hide the button on unsupported platforms, otherwise wire it up.
-  async function attach({ button, onPick }) {
+  async function attach({ button, onPick, allowNoCalendar = false }) {
     if (!button) return;
     const ok = await platformReady;
     if (!ok) { button.style.display = 'none'; return; }
     button.addEventListener('click', (e) => {
       e.preventDefault();
-      openPopover(button, onPick);
+      openPopover(button, onPick, allowNoCalendar);
     });
   }
 
@@ -295,6 +314,7 @@
     let writes = 0; // bumped on every write, so an in-flight refresh can tell
                     // that someone (another refresh, or main's auto-record
                     // title) wrote while it was reading, and back off
+    let optedOut = false; // explicit non-calendar choice holds until a direct pick or reset
     const usable = () => !active || active();
     const ours = () => {
       const v = input.value.trim();
@@ -321,20 +341,31 @@
         participants: Array.isArray(pick.participants) ? pick.participants : (same ? undefined : []),
       });
     };
+    const select = (pick) => {
+      writes++;
+      auto = '';
+      optedOut = pick?.clear === true;
+      onPick(pick);
+    };
     return {
       put,
+      // Direct choices own the current setup session. In particular, an
+      // explicit non-calendar choice must invalidate an older read and stay
+      // clear until another direct event choice or a fresh-session reset.
+      select,
       // Explicit fresh-session boundary: discard even direct/manual ownership
       // and invalidate reads that began for the previous recording. Ordinary
       // tab visits keep using refresh(), which preserves current-session edits.
       reset: () => {
         writes++;
         auto = '';
+        optedOut = false;
         onPick({ title: '', participants: [], clear: true });
       },
       refresh: async () => {
         const seen = writes;
         const { ok, pick } = await readCurrent();
-        if (writes !== seen || !usable()) return;
+        if (writes !== seen || !usable() || optedOut) return;
         if (pick) { put(pick); return; }
         // `clear` rather than an empty title: the sinks must be able to tell
         // this apart from a nameless event's '' arriving on some other path.

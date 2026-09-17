@@ -21,6 +21,10 @@ const SRC = fs.readFileSync(
     path.join(__dirname, '..', 'renderer', 'calendar-picker.js'), 'utf-8');
 const LIVE_SRC = fs.readFileSync(
     path.join(__dirname, '..', 'renderer', 'live', 'live.js'), 'utf-8');
+const RECORD_SRC = fs.readFileSync(
+    path.join(__dirname, '..', 'renderer', 'record', 'record.js'), 'utf-8');
+const APP_SRC = fs.readFileSync(
+    path.join(__dirname, '..', 'renderer', 'app.js'), 'utf-8');
 
 const iso = (minutesFromNow) => new Date(Date.now() + minutesFromNow * 60000).toISOString();
 const ev = (title, fromMin, toMin, participants = []) =>
@@ -35,14 +39,26 @@ function load(events, asked = [], out = {}) {
     // Enough of an element to get through injectStyles() and renderEvents():
     // children are recorded, and assigning innerHTML wipes them the way the
     // real one does — that is how the picker clears "Loading…".
-    const el = () => ({
-        style: {}, className: '', textContent: '', children: [], _html: '',
-        set innerHTML(v) { this._html = v; this.children.length = 0; },
-        get innerHTML() { return this._html; },
-        appendChild(c) { this.children.push(c); return c; },
-        addEventListener() {}, removeEventListener() {},
-        querySelector: () => el(), remove() {}, contains: () => false,
-    });
+    const el = () => {
+        const listeners = {};
+        return {
+            style: {}, className: '', textContent: '', children: [], _html: '',
+            _listeners: listeners,
+            set innerHTML(v) { this._html = v; this.children.length = 0; },
+            get innerHTML() { return this._html; },
+            appendChild(c) { this.children.push(c); c.parentNode = this; return c; },
+            addEventListener(type, callback) { (listeners[type] ||= []).push(callback); },
+            removeEventListener() {}, setAttribute(name, value) { this[name] = String(value); },
+            querySelector: () => el(),
+            remove() {
+                const parent = this.parentNode;
+                if (!parent) return;
+                parent.children.splice(parent.children.indexOf(this), 1);
+                this.parentNode = null;
+            },
+            contains: () => false,
+        };
+    };
     const body = el();
     out.body = body;
     const sandbox = {
@@ -138,7 +154,16 @@ function loadLiveLifecycle(events = [], { calendarAvailable = true } = {}) {
         saveTranscript: async (payload) => { box.saved.push(payload); return box.saveResult; },
         onAutoStart: (callback) => { box.popup = callback; },
     };
-    box.window = { calendarPicker: calendarAvailable ? load(events) : undefined };
+    const picker = calendarAvailable ? load(events) : undefined;
+    box.calendarAttachments = [];
+    if (picker) {
+        const attach = picker.attach;
+        picker.attach = async (options) => {
+            box.calendarAttachments.push(options);
+            return attach(options);
+        };
+    }
+    box.window = { calendarPicker: picker };
     vm.runInNewContext([
         region('    function applyCalendarPick(', '    // ─── Model picker'),
         region("    tabButtons.forEach(btn => btn.addEventListener('click'", '    // Toolbar pill:'),
@@ -148,6 +173,53 @@ function loadLiveLifecycle(events = [], { calendarAvailable = true } = {}) {
     ].join('\n'), box, { filename: 'renderer/live/live.js lifecycle' });
     box.visit = () => liveButton.click();
     return box;
+}
+
+// Run Record's real picker registration, direct-choice owner, and idle-tab
+// refresh together. The recorder itself is outside this calendar-only region.
+function loadRecordCalendarLifecycle(events = []) {
+    const start = RECORD_SRC.indexOf('    function applyCalendarPick(');
+    const end = RECORD_SRC.indexOf('\n\n    startBtn.addEventListener', start);
+    assert(start >= 0 && end > start, 'Record calendar lifecycle region exists');
+    const tabListeners = {};
+    const tabButton = { addEventListener: (type, callback) => { tabListeners[type] = callback; } };
+    const pickerButton = { style: {}, addEventListener() {} };
+    const picker = load(events);
+    const attached = [];
+    const attach = picker.attach;
+    picker.attach = async (options) => {
+        attached.push(options);
+        return attach(options);
+    };
+    const box = {
+        titleInput: { value: '' }, state: { calendarParticipants: [], phase: 'idle' },
+        $: () => pickerButton,
+        document: { querySelector: () => tabButton },
+        enterTranscribeSettings() {}, closeTranscribeFlow() {},
+        window: { calendarPicker: picker },
+    };
+    vm.runInNewContext([
+        RECORD_SRC.slice(start, end),
+        'this.prefill = calPrefill;',
+    ].join('\n'), box, { filename: 'renderer/record/record.js calendar lifecycle' });
+    box.attachments = attached;
+    box.visit = () => tabListeners.click();
+    return box;
+}
+
+function newTranscriptCalendarRegistration() {
+    const start = APP_SRC.indexOf('// Pre-fill title + participants from the macOS calendar');
+    const end = APP_SRC.indexOf('\n\nnewModal.addEventListener', start);
+    assert(start >= 0 && end > start, 'New Transcript calendar registration exists');
+    const attached = [];
+    const box = {
+        newTitleInput: { value: '' }, newParticipantsInput: { value: '' },
+        document: { getElementById: () => ({}) },
+        window: { calendarPicker: { attach: (options) => attached.push(options) } },
+    };
+    vm.runInNewContext(APP_SRC.slice(start, end), box, { filename: 'renderer/app.js calendar registration' });
+    assert.strictEqual(attached.length, 1, 'New Transcript registers one calendar picker');
+    return attached[0];
 }
 
 const settle = () => new Promise(setImmediate);
@@ -384,6 +456,50 @@ async function completedSession(box, route = 'picker', title = 'Previous review'
         assert.deepEqual(Object.keys(box.state.speakerNames), []);
     }
 
+    // Both recording tabs opt into the row and route direct choices through
+    // their prefill owner; automatic writes keep using its onPick sink.
+    {
+        const liveBox = loadLiveLifecycle([ev('Available calendar event', -5, 20, ['calendar@example.com'])]);
+        assert.strictEqual(liveBox.calendarAttachments.length, 1, 'Live registers one calendar picker');
+        assert.strictEqual(liveBox.calendarAttachments[0].allowNoCalendar, true);
+        liveBox.window.liveTab.applyCalendarPick({
+            title: 'Calendar title', participants: ['calendar@example.com'],
+        });
+        liveBox.titleInput.value = 'Renamed calendar title';
+        await liveBox.startBtn.click();
+        await liveBox.stopBtn.click();
+        assert.strictEqual(liveBox.saved[0].title, 'Renamed calendar title');
+        assert.deepEqual([...liveBox.saved[0].calendarParticipants], ['calendar@example.com'],
+            'renaming a calendar title preserves its participants for the save path');
+        await liveBox.discardBtn.click();
+        liveBox.titleInput.value = 'Calendar title';
+        liveBox.state.calendarParticipants = ['calendar@example.com'];
+        liveBox.calendarAttachments[0].onPick({ title: '', participants: [], clear: true });
+        assert.strictEqual(liveBox.titleInput.value, '');
+        assert.deepEqual([...liveBox.state.calendarParticipants], []);
+        liveBox.visit();
+        await settle();
+        assert.strictEqual(liveBox.titleInput.value, '', 'a Live refresh cannot undo an explicit clear');
+        assert.deepEqual([...liveBox.state.calendarParticipants], []);
+
+        const recordBox = loadRecordCalendarLifecycle([ev('Available calendar event', -5, 20, ['calendar@example.com'])]);
+        assert.strictEqual(recordBox.attachments.length, 1, 'Record registers one calendar picker');
+        assert.strictEqual(recordBox.attachments[0].allowNoCalendar, true);
+        recordBox.titleInput.value = 'Calendar title';
+        recordBox.state.calendarParticipants = ['calendar@example.com'];
+        recordBox.attachments[0].onPick({ title: '', participants: [], clear: true });
+        assert.strictEqual(recordBox.titleInput.value, '');
+        assert.deepEqual([...recordBox.state.calendarParticipants], []);
+        recordBox.visit();
+        await settle();
+        assert.strictEqual(recordBox.titleInput.value, '', 'a Record refresh cannot undo an explicit clear');
+        assert.deepEqual([...recordBox.state.calendarParticipants], []);
+
+        const newTranscript = newTranscriptCalendarRegistration();
+        assert.strictEqual(Object.hasOwn(newTranscript, 'allowNoCalendar'), false,
+            'New Transcript keeps the default picker behavior');
+    }
+
     // (a) fills in the ongoing meeting, attendees included, and asks the helper
     //     for one hour back rather than its own two-hour default — past meetings
     //     are listed to be looked at, not that many of them
@@ -448,15 +564,21 @@ async function completedSession(box, route = 'picker', title = 'Previous review'
         () => { throw new Error('helper gone'); },
     ]) {
         const input = { value: '' };
-        const events = [ev('Retro', -10, 20)];
+        const state = { participants: [] };
+        const events = [ev('Retro', -10, 20, ['calendar@example.com'])];
         let broken = false;
         const p = load(() => (broken ? fail() : { ok: true, events }))
-            .autoPrefill({ input, onPick: (pick) => { input.value = pick.title; } });
+            .autoPrefill({ input, onPick: (pick) => {
+                input.value = pick.title;
+                if (Array.isArray(pick.participants)) state.participants = pick.participants;
+            } });
         await p.refresh();
         assert.strictEqual(input.value, 'Retro');
+        assert.deepEqual([...state.participants], ['calendar@example.com']);
         broken = true;
         await p.refresh();
         assert.strictEqual(input.value, 'Retro', 'an unreadable calendar must leave the field alone');
+        assert.deepEqual([...state.participants], ['calendar@example.com'], 'an unreadable calendar must emit no replacement pick');
     }
 
     // (f) a calendar title with padding. `auto` is compared against a trimmed
@@ -589,15 +711,59 @@ async function completedSession(box, route = 'picker', title = 'Previous review'
         assert.strictEqual(seen[0].clear, undefined);
     }
 
-    // (l) the popover itself: whichever event currentEvent() picks is the one
-    //     rendered as pre-selected, nothing is pre-selected when every meeting
-    //     is over, and an unreadable calendar shows its message instead of a
-    //     list. This is the `.cal-default` half of the bug, one indexOf away
-    //     from the pick above.
+    // (l) An explicit non-calendar choice owns the session. It invalidates a
+    // read already in flight and blocks later refreshes until a direct event
+    // choice or reset releases the opt-out.
+    {
+        const seen = [];
+        const input = { value: '' };
+        const events = [ev('Calendar suggestion', -10, 20, ['calendar@example.com'])];
+        let resolveOld;
+        let calls = 0;
+        const p = load(() => ++calls === 1
+            ? new Promise(resolve => { resolveOld = resolve; })
+            : { ok: true, events }).autoPrefill({
+            input,
+            onPick: (pick) => {
+                seen.push(pick);
+                if (pick.clear) input.value = '';
+                else if (pick.title) input.value = pick.title;
+            },
+        });
+        const late = p.refresh();
+        await settle();
+        p.select({ title: '', participants: [], clear: true });
+        resolveOld({ ok: true, events });
+        await late;
+        assert.strictEqual(seen.length, 1, 'a pre-clear read must not restore the event');
+        assert.strictEqual(seen[0].clear, true);
+        await p.refresh();
+        assert.strictEqual(seen.length, 1, 'the explicit opt-out survives a later refresh');
+
+        p.select({ title: 'Direct choice', participants: ['direct@example.com'] });
+        input.value = '';
+        await p.refresh();
+        assert.strictEqual(input.value, 'Calendar suggestion', 'a direct event choice releases the opt-out');
+
+        p.select({ title: 'Normal event', participants: [], clear: 'yes' });
+        input.value = '';
+        await p.refresh();
+        assert.strictEqual(input.value, 'Calendar suggestion', 'only clear: true opts out');
+
+        p.select({ title: '', participants: [], clear: true });
+        p.reset();
+        await p.refresh();
+        assert.strictEqual(input.value, 'Calendar suggestion', 'a fresh session releases the opt-out');
+    }
+
+    // (m) the popover itself: whichever event currentEvent() picks is the one
+    //     rendered as pre-selected. Opted-in callers also get the explicit
+    //     non-calendar action, which is the only default without a current
+    //     event and remains keyboard-operable.
     {
         // Drives attach() → the button's click → openPopover(), then lets the
         // list() microtasks settle.
-        const openWith = async (events) => {
+        const openWith = async (events, { allowNoCalendar, onPick = () => {} } = {}) => {
             const out = {};
             const picker = load(events, [], out);
             const clicks = [];
@@ -606,12 +772,18 @@ async function completedSession(box, route = 'picker', title = 'Previous review'
                 addEventListener: (type, h) => { if (type === 'click') clicks.push(h); },
                 contains: () => false,
             };
-            await picker.attach({ button, onPick() {} });
+            const options = { button, onPick };
+            if (allowNoCalendar !== undefined) options.allowNoCalendar = allowNoCalendar;
+            await picker.attach(options);
             assert.strictEqual(clicks.length, 1, 'attach() should have wired the button');
             clicks[0]({ preventDefault() {} });
             for (let i = 0; i < 5; i++) await new Promise(setImmediate);
             assert.strictEqual(out.body.children.length, 1, 'one popover');
-            return out.body.children[0];
+            const pop = out.body.children[0];
+            pop._body = out.body;
+            pop._clicks = clicks;
+            pop._attachment = options;
+            return pop;
         };
         const defaults = (pop) => pop.children
             .map((c, i) => [i, c.className])
@@ -628,10 +800,72 @@ async function completedSession(box, route = 'picker', title = 'Previous review'
             defaults(await openWith([ev('Standup', -50, -40), ev('Sync', -30, -20)])),
             [], 'nothing is pre-selected once every meeting has ended');
 
-        const msg = (await openWith(() => ({ ok: false, reason: 'calendar-permission', error: 'denied' })))
-            .children[0];
+        const emptyDefault = await openWith([]);
+        assert.strictEqual(emptyDefault.children[0].className, 'cal-pop-msg',
+            'omitting allowNoCalendar keeps the existing empty-calendar message');
+        assert.strictEqual(emptyDefault._attachment.allowNoCalendar, undefined,
+            'allowNoCalendar defaults false when callers omit it');
+
+        const picks = [];
+        const noEvent = await openWith([], { allowNoCalendar: true, onPick: (pick) => picks.push(pick) });
+        const none = noEvent.children[0];
+        assert.strictEqual(none.textContent, 'No calendar meeting');
+        assert.strictEqual(none.role, 'button');
+        assert.strictEqual(none.tabIndex, 0);
+        assert.deepEqual(defaults(noEvent), [0], 'the no-calendar row is the sole default without an event');
+        let prevented = false;
+        none._listeners.keydown[0]({ key: 'Enter', preventDefault: () => { prevented = true; } });
+        assert.strictEqual(prevented, true, 'keyboard activation prevents the browser default');
+        assert.strictEqual(picks.length, 1);
+        assert.strictEqual(picks[0].clear, true);
+        assert.deepEqual([...picks[0].participants], []);
+        assert.strictEqual(noEvent._body.children.length, 0, 'choosing no meeting closes the popover');
+        noEvent._clicks[0]({ preventDefault() {} });
+        for (let i = 0; i < 5; i++) await new Promise(setImmediate);
+        assert.strictEqual(noEvent._body.children.length, 1, 'the picker reopens after a clear choice');
+        const reopened = noEvent._body.children[0].children[0];
+        reopened._listeners.keydown[0]({ key: ' ', preventDefault() {} });
+        assert.strictEqual(picks.length, 2, 'Space activates the no-calendar row');
+        assert.strictEqual(noEvent._body.children.length, 0, 'Space closes the popover');
+        noEvent._clicks[0]({ preventDefault() {} });
+        for (let i = 0; i < 5; i++) await new Promise(setImmediate);
+        noEvent._body.children[0].children[0]._listeners.click[0]();
+        assert.strictEqual(picks.length, 3, 'click activates the no-calendar row');
+        assert.strictEqual(noEvent._body.children.length, 0, 'click closes the popover');
+
+        const duplicate = ev('Duplicate', -10, 20);
+        assert.deepEqual(
+            defaults(await openWith([duplicate, duplicate], { allowNoCalendar: true })),
+            [1], 'duplicate event references still make only the first event row default');
+
+        const direct = [];
+        const withEvent = await openWith(
+            [ev('Direct event', -10, 20, ['direct@example.com'])],
+            { allowNoCalendar: true, onPick: (pick) => direct.push(pick) },
+        );
+        withEvent.children[1]._listeners.click[0]();
+        assert.strictEqual(direct[0].title, 'Direct event');
+        assert.deepEqual([...direct[0].participants], ['direct@example.com']);
+        assert.strictEqual(direct[0].clear, undefined, 'ordinary events keep their existing payload');
+
+        const unchanged = { title: 'Typed title', participants: ['typed@example.com'] };
+        let rejectedPicks = 0;
+        const msg = (await openWith(
+            () => ({ ok: false, reason: 'calendar-permission', error: 'denied' }),
+            {
+                allowNoCalendar: true,
+                onPick: (pick) => {
+                    rejectedPicks++;
+                    unchanged.title = pick.title;
+                    unchanged.participants = pick.participants;
+                },
+            },
+        )).children[0];
         assert.strictEqual(msg.className, 'cal-pop-msg');
         assert.strictEqual(msg.textContent, 'denied');
+        assert.strictEqual(rejectedPicks, 0, 'a rejected calendar list emits no pick');
+        assert.strictEqual(unchanged.title, 'Typed title');
+        assert.deepEqual(unchanged.participants, ['typed@example.com']);
     }
 
     // ─── the two sinks ──────────────────────────────────────────────────────
