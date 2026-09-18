@@ -314,7 +314,16 @@
     let writes = 0; // bumped on every write, so an in-flight refresh can tell
                     // that someone (another refresh, or main's auto-record
                     // title) wrote while it was reading, and back off
-    let optedOut = false; // explicit non-calendar choice holds until a direct pick or reset
+    let lastSeen;   // current-event title from the last completed read; undefined until one lands
+    let pending = 0; // reads in flight
+    // Title of the meeting a direct choice (popover pick, smart-router pick,
+    // "No calendar meeting") was made against. The choice holds while the
+    // calendar still shows that meeting and is released once a different one
+    // is current — so the current meeting keeps flowing in, but a choice is
+    // never undone by a refresh of the same meeting. `null` = made before any
+    // read completed (or during one): the next read pins it.
+    let pinned;
+    let picked = ''; // the direct choice's title; lets the release below tell "still the pick" from "edited since"
     const usable = () => !active || active();
     const ours = () => {
       const v = input.value.trim();
@@ -343,15 +352,15 @@
     };
     const select = (pick) => {
       writes++;
-      auto = '';
-      optedOut = pick?.clear === true;
+      auto = ''; // a direct choice is the user's: main's auto-record title must not override it mid-session
+      picked = pick?.clear === true ? '' : String(pick?.title || '').trim();
+      pinned = (pending || lastSeen === undefined) ? null : lastSeen;
       onPick(pick);
     };
     return {
       put,
-      // Direct choices own the current setup session. In particular, an
-      // explicit non-calendar choice must invalidate an older read and stay
-      // clear until another direct event choice or a fresh-session reset.
+      // Direct choices own the field for as long as the calendar shows the
+      // meeting they were made against; see `pinned`.
       select,
       // Explicit fresh-session boundary: discard even direct/manual ownership
       // and invalidate reads that began for the previous recording. Ordinary
@@ -359,17 +368,32 @@
       reset: () => {
         writes++;
         auto = '';
-        optedOut = false;
+        pinned = undefined;
         onPick({ title: '', participants: [], clear: true });
       },
       refresh: async () => {
         const seen = writes;
+        pending++;
         const { ok, pick } = await readCurrent();
-        if (writes !== seen || !usable() || optedOut) return;
+        pending--;
+        if (!ok) return; // a failed read knows nothing; leave everything as is
+        const current = pick ? pick.title : '';
+        if (pinned === null) pinned = current; // choice made mid-read: pin it to what the calendar showed
+        lastSeen = current;
+        if (writes !== seen || !usable()) return;
+        // A direct choice holds until a *different* meeting is current. A gap
+        // with no meeting does not release it: a picked upcoming event must not
+        // be cleared just because the previous one ended.
+        if (pinned !== undefined) {
+          if (!pick || current === pinned) return;
+          pinned = undefined;
+          // Still holding the pick verbatim → let the calendar replace it; edited since → keep.
+          if (picked && input.value.trim() === picked) auto = picked;
+        }
         if (pick) { put(pick); return; }
         // `clear` rather than an empty title: the sinks must be able to tell
         // this apart from a nameless event's '' arriving on some other path.
-        if (ok && auto && ours()) { auto = ''; writes++; onPick({ title: '', participants: [], clear: true }); }
+        if (auto && ours()) { auto = ''; writes++; onPick({ title: '', participants: [], clear: true }); }
       },
     };
   }
