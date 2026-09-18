@@ -711,9 +711,13 @@ async function completedSession(box, route = 'picker', title = 'Previous review'
         assert.strictEqual(seen[0].clear, undefined);
     }
 
-    // (l) An explicit non-calendar choice owns the session. It invalidates a
-    // read already in flight and blocks later refreshes until a direct event
-    // choice or reset releases the opt-out.
+    // (l) A direct choice — "No calendar meeting" or a picked event — holds
+    //     while the calendar still shows the meeting it was made against, even
+    //     across a read already in flight. Once a *different* meeting is
+    //     current the calendar takes the field back; a title edited by hand
+    //     after the pick survives that, and a gap with no meeting releases
+    //     nothing. This is what keeps the current meeting flowing in after the
+    //     user has touched the popover once — the regression of 2026-09-17.
     {
         const seen = [];
         const input = { value: '' };
@@ -738,22 +742,35 @@ async function completedSession(box, route = 'picker', title = 'Previous review'
         assert.strictEqual(seen.length, 1, 'a pre-clear read must not restore the event');
         assert.strictEqual(seen[0].clear, true);
         await p.refresh();
-        assert.strictEqual(seen.length, 1, 'the explicit opt-out survives a later refresh');
+        assert.strictEqual(seen.length, 1, 'the explicit opt-out survives a refresh of the same meeting');
 
+        events.length = 0;
+        await p.refresh();
+        assert.strictEqual(input.value, '', 'a gap with no meeting releases nothing');
+        events.push(ev('Next meeting', -1, 30, ['next@example.com']));
+        await p.refresh();
+        assert.strictEqual(input.value, 'Next meeting', 'a different current meeting ends the opt-out');
+        assert.deepEqual(seen.at(-1).participants, ['next@example.com']);
+
+        // A picked event behaves the same: held while its meeting is on, replaced
+        // once the calendar moves on — unless edited by hand in between.
         p.select({ title: 'Direct choice', participants: ['direct@example.com'] });
-        input.value = '';
         await p.refresh();
-        assert.strictEqual(input.value, 'Calendar suggestion', 'a direct event choice releases the opt-out');
+        assert.strictEqual(input.value, 'Direct choice', 'a direct pick survives a refresh of the same meeting');
+        events[0] = ev('Later meeting', -1, 30);
+        await p.refresh();
+        assert.strictEqual(input.value, 'Later meeting', 'a direct pick is replaced once a different meeting is current');
 
-        p.select({ title: 'Normal event', participants: [], clear: 'yes' });
-        input.value = '';
+        p.select({ title: 'Direct choice', participants: [] });
+        input.value = 'Direct choice, renamed';
+        events[0] = ev('Yet another', -1, 30);
         await p.refresh();
-        assert.strictEqual(input.value, 'Calendar suggestion', 'only clear: true opts out');
+        assert.strictEqual(input.value, 'Direct choice, renamed', 'a hand-edited pick is left alone');
 
         p.select({ title: '', participants: [], clear: true });
         p.reset();
         await p.refresh();
-        assert.strictEqual(input.value, 'Calendar suggestion', 'a fresh session releases the opt-out');
+        assert.strictEqual(input.value, 'Yet another', 'a fresh session releases the opt-out');
     }
 
     // (m) the popover itself: whichever event currentEvent() picks is the one
