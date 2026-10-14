@@ -1659,68 +1659,38 @@ ipcMain.handle('settings:setSummarizer', async (e, summarizer) => {
 
 // ─── IPC: Summarization ───────────────────────────────────────────────────────
 
-function findClaude() {
-    const isWin = process.platform === 'win32';
-    const extraPaths = isWin
-        ? [
-            path.join(process.env.APPDATA || '', 'npm'),
-            path.join(process.env.LOCALAPPDATA || '', 'Programs', 'claude'),
-          ]
-        : ['/usr/local/bin', '/opt/homebrew/bin', path.join(os.homedir(), '.local', 'bin')];
+// A packaged GUI app gets launchd's bare PATH, not the one the user's shell rc
+// files build, so `which claude` would miss ~/.local/bin or Homebrew. Ask the
+// login shell once; fall back to our own PATH if it is slow or fails.
+// ponytail: failure is cached too, restart the app after fixing a slow rc file.
+let userPathPromise;
+function userPath() {
+    userPathPromise ??= new Promise((resolve) => {
+        const own = process.env.PATH || '';
+        if (process.platform === 'win32') { resolve(own); return; }
+        const mark = '__UNLIMEETY_PATH__';
+        execFile(process.env.SHELL || '/bin/zsh', ['-ilc', `printf '${mark}%s${mark}' "$PATH"`],
+            { timeout: 5000 }, (err, stdout) => {
+                const m = !err && stdout.match(new RegExp(`${mark}(.*)${mark}`, 's'));
+                resolve([m && m[1], own].filter(Boolean).join(path.delimiter));
+            });
+    });
+    return userPathPromise;
+}
 
-    const env = {
-        ...process.env,
-        PATH: [process.env.PATH, ...extraPaths].filter(Boolean).join(path.delimiter),
-    };
-
-    const whichCmd = isWin ? 'where' : 'which';
-    const claudeExe = isWin ? 'claude.cmd' : 'claude';
-
+// Locate a CLI on the user's PATH only — no per-install-location guesses.
+async function findCli(name) {
+    const PATH = await userPath();
     return new Promise((resolve) => {
-        execFile(whichCmd, ['claude'], { env }, (err, stdout) => {
-            if (!err && stdout.trim()) {
-                resolve(stdout.trim().split('\n')[0].trim());
-                return;
-            }
-            // Fallback: check common locations directly
-            const candidates = extraPaths.map(p => path.join(p, claudeExe));
-            resolve(candidates.find(p => fs.existsSync(p)) || null);
-        });
+        execFile(process.platform === 'win32' ? 'where' : 'which', [name],
+            { env: { ...process.env, PATH } }, (err, stdout) => {
+                resolve(!err && stdout.trim() ? stdout.trim().split('\n')[0].trim() : null);
+            });
     });
 }
 
-function findCodex() {
-    const isWin = process.platform === 'win32';
-    const extraPaths = isWin
-        ? [
-            path.join(process.env.APPDATA || '', 'npm'),
-            path.join(process.env.LOCALAPPDATA || '', 'Programs', 'codex'),
-          ]
-        : ['/usr/local/bin', '/opt/homebrew/bin', path.join(os.homedir(), '.local', 'bin')];
-    const env = {
-        ...process.env,
-        PATH: [process.env.PATH, ...extraPaths].filter(Boolean).join(path.delimiter),
-    };
-    const whichCmd = isWin ? 'where' : 'which';
-    const codexExe = isWin ? 'codex.cmd' : 'codex';
-    const appCandidates = process.platform === 'darwin'
-        ? [
-            path.join('/Applications', 'ChatGPT.app', 'Contents', 'Resources', 'codex'),
-            path.join(os.homedir(), 'Applications', 'ChatGPT.app', 'Contents', 'Resources', 'codex'),
-          ]
-        : [];
-
-    return new Promise((resolve) => {
-        execFile(whichCmd, ['codex'], { env }, (err, stdout) => {
-            if (!err && stdout.trim()) {
-                resolve(stdout.trim().split('\n')[0].trim());
-                return;
-            }
-            const candidates = [...extraPaths.map(p => path.join(p, codexExe)), ...appCandidates];
-            resolve(candidates.find(isExecutableFile) || null);
-        });
-    });
-}
+const findClaude = () => findCli('claude');
+const findCodex = () => findCli('codex');
 
 function isExecutableFile(candidate) {
     try {
@@ -1797,14 +1767,7 @@ async function runClaudeCode(content, promptInstruction, onAbort) {
         };
     }
 
-    const isWin = process.platform === 'win32';
-    const extraPaths = isWin
-        ? [
-            path.join(process.env.APPDATA || '', 'npm'),
-            path.join(process.env.LOCALAPPDATA || '', 'Programs', 'claude'),
-          ]
-        : ['/usr/local/bin', '/opt/homebrew/bin', path.join(os.homedir(), '.local', 'bin')];
-    const extendedPath = [process.env.PATH, ...extraPaths].filter(Boolean).join(path.delimiter);
+    const extendedPath = await userPath();
 
     if (claudeIsolationSupported) {
         const startedAt = Date.now();
@@ -1941,14 +1904,7 @@ async function runCodexCli(content, promptInstruction, onAbort) {
         };
     }
 
-    const isWin = process.platform === 'win32';
-    const extraPaths = isWin
-        ? [
-            path.join(process.env.APPDATA || '', 'npm'),
-            path.join(process.env.LOCALAPPDATA || '', 'Programs', 'codex'),
-          ]
-        : ['/usr/local/bin', '/opt/homebrew/bin', path.join(os.homedir(), '.local', 'bin')];
-    const extendedPath = [process.env.PATH, ...extraPaths].filter(Boolean).join(path.delimiter);
+    const extendedPath = await userPath();
     let cwd;
     try {
         cwd = fs.mkdtempSync(path.join(app.getPath('userData'), 'codex-summary-'));
