@@ -3025,3 +3025,13 @@ body.mode-record #btn-ask-ai {
 .chat-messages ::selection {
     background: var(--accent-dim);
 }
+
+.settings-updates { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border); }
+.settings-updates h3 { margin: 0 0 8px; font-size: 14px; }
+#updates-status { overflow-wrap: anywhere; font-size: 12px; line-height: 1.5; }
+#updates-progress { width: 100%; margin-bottom: 10px; }
+.updates-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.updates-indicator { color: var(--accent); font-size: 12px; }
+
+/* Remains accessible while editing regions are reserved for an update. */
+.updates-activity { position: fixed; z-index: 10000; left: 50%; top: 48px; transform: translateX(-50%); max-width: min(640px, 90vw); padding: 14px 20px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-elevated, #24242a); color: var(--text, #eee); box-shadow: 0 4px 20px #0005; }

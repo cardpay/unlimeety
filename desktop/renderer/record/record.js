@@ -513,6 +513,7 @@
         // screen must not land once recording or transcribing is on screen.
         active: () => state.phase === 'idle',
     });
+    window.recordUpdateTitleDraft = () => calPrefill ? calPrefill.hasDraft() : !!titleInput.value.trim();
     const selectCalendarPick = (pick) => {
         if (calPrefill) calPrefill.select(pick);
         else applyCalendarPick(pick);
@@ -894,6 +895,7 @@
                 // against the calendar whatever came of this recording — a stop
                 // too short to queue (autoTranscribeArgs → null) ends a session
                 // just the same.
+                calPrefill?.reset();
                 calPrefill?.refresh();
                 // Calendar attendees belong to the session that just ended, queued
                 // or not — a stop too short to queue is still "the session ended".

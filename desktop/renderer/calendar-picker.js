@@ -358,6 +358,7 @@
       onPick(pick);
     };
     return {
+      hasDraft: () => !!input.value.trim() && !ours(),
       put,
       // Direct choices own the field for as long as the calendar shows the
       // meeting they were made against; see `pinned`.

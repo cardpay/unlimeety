@@ -17,6 +17,9 @@
     // one popover but not the other, and the `.tv-note` styling would stop
     // matching what the writer produces.
     const NOTE_LABEL = 'Note';
+    const draftInputs = new Set();
+    let pendingAdds = 0;
+    let readinessToken = null;
 
     // Same coercion as main.js's formatHms: a hand-edited sidecar must not
     // render "NaN:NaN". Notes taken before the audio clock started carry a
@@ -76,13 +79,19 @@
     //     including this one (see watch), so a local refresh here would be a
     //     second round-trip and a second DOM rebuild racing the first.
     function attachInput({ input, container, emptyEl, placeholder, rejectedMessage }) {
+        draftInputs.add(input);
         input.addEventListener('keydown', async (e) => {
+            if (readinessToken) return;
             if (e.isComposing || e.keyCode === 229) return;
             if (e.key !== 'Enter') return;
             const text = input.value.trim();
             if (!text) return;
             input.value = '';
-            const res = await window.notesApi?.add(text);
+            pendingAdds++;
+            let res;
+            try { res = await window.notesApi?.add(text); }
+            catch (error) { res = { ok: false }; }
+            finally { pendingAdds--; }
             if (!res?.ok) {
                 if (input.value === '') input.value = text;
                 input.placeholder = rejectedMessage;
@@ -104,5 +113,22 @@
             || (() => {});
     }
 
-    window.notesList = { NOTE_LABEL, formatHms, render, refresh, watch, attachInput };
+    function updateReadinessError() {
+        return pendingAdds || [...draftInputs].some((input) => input.value.trim())
+            ? 'Save the note draft in each window, then click Install again.' : null;
+    }
+    if (window.updateReadiness && !window.updateApi) {
+        window.updateReadiness.onPrepare((token) => {
+            readinessToken = token;
+            const error = updateReadinessError();
+            document.body.inert = true;
+            window.updateReadiness.ready({ token, ok: !error, error });
+        });
+        window.updateReadiness.onRelease((token) => {
+            if (readinessToken !== token) return;
+            readinessToken = null;
+            document.body.inert = false;
+        });
+    }
+    window.notesList = { updateReadinessError, NOTE_LABEL, formatHms, render, refresh, watch, attachInput };
 })();

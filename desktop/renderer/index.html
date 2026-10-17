@@ -12,6 +12,7 @@
   <link rel="stylesheet" href="theme-light.css" />
 </head>
 <body>
+  <aside id="updates-activity" class="updates-activity hidden" role="status" aria-live="polite" aria-atomic="true"></aside>
   <!-- Toolbar -->
   <header id="toolbar">
     <div id="toolbar-left">
@@ -76,6 +77,7 @@
         </div>
       </div>
 
+      <span id="updates-indicator" class="updates-indicator hidden" aria-label="An update is available" title="Update available">●</span>
       <button class="btn btn-ghost btn-icon" id="btn-settings" title="Settings">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="12" cy="12" r="3"/>
@@ -1301,6 +1303,18 @@
 
         <div id="settings-error" class="modal-error-text hidden" style="margin-top:10px"></div>
 
+        <section id="settings-updates" class="settings-updates" aria-labelledby="updates-heading">
+          <h3 id="updates-heading">App updates</h3>
+          <div id="updates-version" class="settings-radio-sub"></div>
+          <p id="updates-status" role="status" aria-live="polite">Loading update status…</p>
+          <progress id="updates-progress" class="hidden" max="100" value="0" aria-label="Update download progress"></progress>
+          <div class="updates-actions">
+            <button type="button" class="btn btn-ghost" id="updates-check">Check for updates</button>
+            <button type="button" class="btn btn-primary hidden" id="updates-download">Download update</button>
+            <button type="button" class="btn btn-primary hidden" id="updates-install">Install and restart</button>
+            <button type="button" class="btn btn-ghost hidden" id="updates-later">Later</button>
+          </div>
+        </section>
         <div id="settings-version" class="settings-radio-sub" style="margin-top:18px; text-align:center"></div>
       </div>
       <div class="modal-footer">
@@ -1441,6 +1455,7 @@
   <script src="speaker-rename.js"></script>
   <script src="find-in-note.js"></script>
   <script src="app.js"></script>
+  <script src="updates.js"></script>
   <script src="live/live.js"></script>
   <script src="record/record.js"></script>
   <script src="calendar-smart.js"></script>

@@ -54,3 +54,10 @@ contextBridge.exposeInMainWorld('themeApi', {
         return () => ipcRenderer.removeListener('theme:changed', handler);
     },
 });
+
+// Companion windows can acknowledge their own readiness, never start updates.
+contextBridge.exposeInMainWorld('updateReadiness', {
+    onPrepare: (cb) => ipcRenderer.on('updates:prepare', (_event, token) => cb(token)),
+    onRelease: (cb) => ipcRenderer.on('updates:release', (_event, token) => cb(token)),
+    ready: (value) => ipcRenderer.send('updates:ready', value),
+});

@@ -11,12 +11,13 @@
         "dev": "electron . --dev",
         "build:helper": "cd live-helper && swift build -c release && codesign --force --sign \"Developer ID Application\" --options runtime --entitlements ../build/entitlements.mac.inherit.plist --timestamp .build/release/unlimeety-live",
         "build:runner": "node local-llm/fetch-runner.mjs && codesign --force --sign \"Developer ID Application\" --options runtime --entitlements build/entitlements.mac.inherit.plist --timestamp local-llm/bin/*",
-        "build:mac": "npm run build:runner && npm run build:helper && electron-builder --mac --arm64",
-        "build:mac:arm64": "npm run build:runner && npm run build:helper && electron-builder --mac --arm64",
+        "build:mac": "npm run build:runner && npm run build:helper && electron-builder --mac --arm64 --publish never",
+        "build:mac:arm64": "npm run build:runner && npm run build:helper && electron-builder --mac --arm64 --publish never",
         "notarize:dmg": "codesign --force --sign \"Developer ID Application\" --timestamp dist/Unlimeety-arm64.dmg && xcrun notarytool submit dist/Unlimeety-arm64.dmg --keychain-profile \"$APPLE_KEYCHAIN_PROFILE\" --wait && xcrun stapler staple dist/Unlimeety-arm64.dmg",
         "build:win": "electron-builder --win",
         "build:linux": "electron-builder --linux",
-        "build:all": "npm run build:runner && npm run build:helper && electron-builder --mac --arm64 --win --linux"
+        "build:all": "npm run build:runner && npm run build:helper && electron-builder --mac --arm64 --win --linux",
+        "verify:update": "node scripts/verify-update-release.mjs"
     },
     "build": {
         "appId": "com.transcriber.desktop",
@@ -36,16 +37,27 @@
             "local-model-manifest.js",
             "local-model-download.js",
             "renderer/**",
-            "build/**"
+            "build/**",
+            "update-service.js",
+            "update-provider.js",
+            "update-mac.js",
+            "update-readiness.js",
+            "update-bounds.js"
         ],
         "mac": {
             "category": "public.app-category.productivity",
             "target": [
                 {
                     "target": "dmg"
+                },
+                {
+                    "target": "zip",
+                    "arch": [
+                        "arm64"
+                    ]
                 }
             ],
-            "artifactName": "${productName}-${arch}.${ext}",
+            "artifactName": "${productName}-${version}-${arch}.${ext}",
             "extendInfo": {
                 "NSMicrophoneUsageDescription": "Unlimeety uses the microphone for live transcription.",
                 "NSAudioCaptureUsageDescription": "Unlimeety captures system audio for live transcription.",
@@ -100,6 +112,15 @@
             "onlyLoadAppFromAsar": true,
             "enableEmbeddedAsarIntegrityValidation": true,
             "enableCookieEncryption": true
+        },
+        "publish": {
+            "provider": "generic",
+            "url": "https://github.com/cardpay/unlimeety/releases/latest/download/"
+        },
+        "generateUpdatesFilesForAllChannels": false,
+        "detectUpdateChannel": true,
+        "dmg": {
+            "artifactName": "${productName}-${arch}.${ext}"
         }
     },
     "keywords": [],
@@ -107,9 +128,14 @@
     "license": "MIT",
     "devDependencies": {
         "electron": "^44.2.0",
-        "electron-builder": "^26.8.1"
+        "electron-builder": "26.15.3"
     },
     "dependencies": {
-        "docx": "^9.7.1"
+        "docx": "^9.7.1",
+        "electron-updater": "6.8.9",
+        "js-yaml": "4.1.1",
+        "semver": "7.7.3",
+        "yauzl": "3.2.0",
+        "builder-util-runtime": "9.7.0"
     }
 }
