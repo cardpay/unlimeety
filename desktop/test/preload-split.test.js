@@ -83,8 +83,8 @@ function sliceIpcHandlerFn(channel) {
 
 // ─── preload-panel.js: narrow surface ───────────────────────────────────────
 
-test('preload-panel.js exposes exactly notesApi, promptApi, themeApi — nothing else', () => {
-    assert.deepStrictEqual(bridgeNames(PRELOAD_PANEL).sort(), ['notesApi', 'promptApi', 'themeApi']);
+test('preload-panel.js exposes notes/prompt/theme plus acknowledgement-only update readiness', () => {
+    assert.deepStrictEqual(bridgeNames(PRELOAD_PANEL).sort(), ['notesApi', 'promptApi', 'themeApi', 'updateReadiness']);
 });
 
 test('preload-panel.js parses as a CommonJS script', () => {

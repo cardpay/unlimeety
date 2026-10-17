@@ -224,3 +224,23 @@ contextBridge.exposeInMainWorld('notesApi', {
     reopen:       ()          => ipcRenderer.invoke('notes:reopen'),
     setCollapsed: (collapsed) => ipcRenderer.send('notes:setCollapsed', collapsed),
 });
+
+// Main-window-only actions. Neither URLs nor paths cross this bridge.
+contextBridge.exposeInMainWorld('updateApi', {
+    status: () => ipcRenderer.invoke('updates:status'),
+    check: () => ipcRenderer.invoke('updates:check'),
+    download: () => ipcRenderer.invoke('updates:download'),
+    install: () => ipcRenderer.invoke('updates:install'),
+    onStatus: (cb) => {
+        const handler = (_event, value) => cb(value);
+        ipcRenderer.on('updates:status', handler);
+        return () => ipcRenderer.removeListener('updates:status', handler);
+    },
+});
+
+// Companion windows can acknowledge their own readiness, never start updates.
+contextBridge.exposeInMainWorld('updateReadiness', {
+    onPrepare: (cb) => ipcRenderer.on('updates:prepare', (_event, token) => cb(token)),
+    onRelease: (cb) => ipcRenderer.on('updates:release', (_event, token) => cb(token)),
+    ready: (value) => ipcRenderer.send('updates:ready', value),
+});

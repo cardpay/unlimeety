@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, Tray, nativeImage, screen, dialog, ipcMain, shell, systemPreferences, clipboard, safeStorage, nativeTheme } = require('electron');
+const { app, BrowserWindow, Menu, Tray, nativeImage, screen, dialog, ipcMain, shell, systemPreferences, clipboard, safeStorage, nativeTheme, powerMonitor } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -11,6 +11,32 @@ const { createJobQueue } = require('./job-queue');
 const { LOCAL_MODEL_MANIFEST, modelById, displayModel } = require('./local-model-manifest');
 const { downloadVerifiedArtifact } = require('./local-model-download');
 
+// Track entire IPC lifetimes, including permission prompts and final writes.
+// Updates reserve before any await and reject new work until readiness ends.
+let updateGate = null;
+let updateService = null;
+let updatePendingWork = 0;
+const updateFailedNoteWrites = new Map();
+const updateSafeReads = new Set(['app:version', 'record:list', 'transcripts:list', 'queue:list', 'notes:list', 'record:platformOK', 'live:platformOK']);
+const registerIpcHandler = ipcMain.handle.bind(ipcMain);
+ipcMain.handle = (channel, handler) => registerIpcHandler(channel, (event, ...args) => {
+    if (channel.startsWith('updates:')) return handler(event, ...args);
+    if (updateGate?.isReserved() && channel !== 'file:save' && !updateSafeReads.has(channel)) {
+        return { ok: false, error: 'Update installation is preparing. Try again after it finishes.' };
+    }
+    updatePendingWork++;
+    let result;
+    try { result = handler(event, ...args); }
+    catch (error) { updatePendingWork--; throw error; }
+    if (result && typeof result.then === 'function') return result.finally(() => { updatePendingWork--; });
+    updatePendingWork--;
+    return result;
+});
+app.on('before-quit', (event) => {
+    if (updateGate?.isCommitted() && !updateGate.canRestart()) { event.preventDefault(); return; }
+    updateGate?.abort('Quit requested before update readiness completed.');
+});
+
 const TRANSCRIPTS_FOLDER = path.join(os.homedir(), 'Downloads', 'Meet_Transcripts');
 const RECORDINGS_FOLDER = path.join(os.homedir(), 'Downloads', 'Meet_Recordings');
 
@@ -21,6 +47,11 @@ const RECORDINGS_FOLDER = path.join(os.homedir(), 'Downloads', 'Meet_Recordings'
 // wires its broadcast to the renderer. See job-queue.js for the scheduling
 // rules and spec-universal-job-queue.md for the design.
 const queue = createJobQueue();
+const submitQueuedJob = queue.submit.bind(queue);
+queue.submit = (...args) => {
+    if (updateGate?.isReserved()) throw new Error('Update installation is preparing; new jobs are blocked.');
+    return submitQueuedJob(...args);
+};
 queue.onChange((jobs) => {
     if (!mainWindow || mainWindow.isDestroyed()) return;
     mainWindow.webContents.send('queue:changed', jobs);
@@ -156,7 +187,7 @@ let isDirty = false;
 // than relying on preload wiring alone. mainWindow can be null very early/
 // late in the app lifecycle, so this fails closed rather than open.
 function fromMain(e) {
-    return !!mainWindow && e.sender === mainWindow.webContents;
+    return !!mainWindow && e.sender === mainWindow.webContents && (!e.senderFrame || e.senderFrame === e.sender.mainFrame);
 }
 
 let pendingFilePath = null; // file queued before window ready
@@ -339,6 +370,7 @@ function noteSessionFlushed(slot) {
 }
 
 app.on('before-quit', (e) => {
+    if (updateGate?.isCommitted() && !updateGate.canRestart()) { e.preventDefault(); return; }
     if (quitting) return;                                    // already flushed
     // A second before-quit during an in-flight flush must be deferred
     // unconditionally: recomputing "pending" from proc handles here would miss
@@ -420,6 +452,7 @@ process.on('uncaughtException', handleFatalError);
 process.on('unhandledRejection', handleFatalError);
 
 function createWindow() {
+    if (updateGate?.isReserved()) return;
     mainWindow = new BrowserWindow({
         width: 1200,
         height: 800,
@@ -484,6 +517,7 @@ function createWindow() {
     // Quit, and the transcript is lost. Hide the window instead; the tray item
     // and the Dock icon bring it back, and every stop path keeps working.
     mainWindow.on('close', (e) => {
+        if (updateGate?.isCommitted() && !updateGate.canRestart()) { e.preventDefault(); return; }
         if (quitting) return;
         if (!live.proc && !recorder.proc) return;
         e.preventDefault();
@@ -511,6 +545,7 @@ function updateTitle() {
 // a failed write left unsaved), so main-side state waits for the file:accepted
 // ack rather than assuming the open happened.
 function openFileFromPath(filePath) {
+    if (updateGate?.isReserved()) { pendingFilePath = filePath; return; }
     if (!filePath || !mainWindow) return;
     try {
         const content = fs.readFileSync(filePath, 'utf-8');
@@ -3837,6 +3872,7 @@ ipcMain.handle('calendar:setSelected', (_e, ids) => {
 });
 
 ipcMain.handle('live:start', async (_e, opts) => {
+    if (!fromMain(_e)) return { ok: false, error: 'Forbidden' };
     if (process.platform !== 'darwin') {
         return { ok: false, error: 'Live transcription is macOS-only.' };
     }
@@ -4402,6 +4438,7 @@ function spawnHelperWithJsonStdout(onEvent) {
 ipcMain.handle('record:platformOK', () => process.platform === 'darwin');
 
 ipcMain.handle('record:start', async (_e, opts) => {
+    if (!fromMain(_e)) return { ok: false, error: 'Forbidden' };
     if (process.platform !== 'darwin') {
         return { ok: false, error: 'Recording is macOS-only.' };
     }
@@ -4598,8 +4635,12 @@ function flushNotesSidecar(slot) {
     if (!slot.outputPath || !slot.notes.length) return;
     try {
         const notes = resolveNotes(slot.notes, slot.notesStartedAt);
-        writeFileAtomic(notesSidecarPath(slot.outputPath), JSON.stringify(notes));
-    } catch { /* best-effort — notes are an enhancement, never block stop/quit */ }
+        const target = notesSidecarPath(slot.outputPath);
+        const content = JSON.stringify(notes);
+        updateFailedNoteWrites.set(target, content);
+        writeFileAtomic(target, content);
+        updateFailedNoteWrites.delete(target);
+    } catch { /* ordinary stop/quit stay best-effort; updates retry before readiness */ }
 }
 
 function readNotesSidecar(wavPath) {
@@ -5330,6 +5371,7 @@ const NOTES_W = 300, NOTES_H = 380;
 const NOTES_COLLAPSED_H = 54;
 
 function showNotesWindow() {
+    if (updateGate?.isReserved()) return;
     if (notesWindow && !notesWindow.isDestroyed()) return;
     const wa = screen.getPrimaryDisplay().workArea;
     const W = NOTES_W, H = NOTES_H;
@@ -5558,6 +5600,7 @@ function closePromptWindow() {
 // start a session manually. Title is pre-filled from a calendar event
 // happening right now, when there is one.
 async function triggerAutoRecord() {
+    if (updateGate?.isReserved()) return;
     closePromptWindow();
     // Restore the Dock icon in case the floating prompt dropped the app to
     // accessory mode; harmless if it didn't. Activation is wanted here anyway.
@@ -5568,7 +5611,7 @@ async function triggerAutoRecord() {
     mainWindow.focus();
 
     const calendarEvent = await currentCalendarTitle();
-    const send = () => mainWindow.webContents.send('live:autoStart', calendarEvent);
+    const send = () => { if (!updateGate?.isReserved()) mainWindow.webContents.send('live:autoStart', calendarEvent); };
     if (mainWindow.webContents.isLoading()) {
         mainWindow.webContents.once('did-finish-load', send);
     } else {
@@ -5719,6 +5762,7 @@ ipcMain.on('prompt:hide', () => closePromptWindow());
 // process alive to catch calls. macOS-only for now (the monitor is too).
 
 function showMainWindow() {
+    if (updateGate?.isReserved() && (!mainWindow || mainWindow.isDestroyed())) return;
     if (process.platform === 'darwin') app.setActivationPolicy('regular');
     if (!mainWindow || mainWindow.isDestroyed()) createWindow();
     else {
@@ -5776,6 +5820,58 @@ function refreshTrayMenu() {
     ]));
 }
 
+// ─── In-app updates ──────────────────────────────────────────────────────────
+function updateBusyReason() {
+    // Preserve failed note sidecar snapshots even after their helper exits and
+    // outputPath is cleared. A later explicit install retries the exact write.
+    for (const [target, content] of updateFailedNoteWrites) {
+        try {
+            if (!canWritePath(target)) throw new Error('Notes path is unavailable.');
+            writeFileAtomic(target, content); updateFailedNoteWrites.delete(target);
+        } catch { return 'Meeting notes could not be saved. Free disk space or restore write access, then click Install again.'; }
+    }
+    if (quitFlushing || quitting) return 'The app is shutting down. Try again after restarting.';
+    if (updatePendingWork) return 'An operation is starting, saving or downloading. Wait for it to finish, then click Install again.';
+    if (live.proc || live.outputPath || recorder.proc || recorder.outputPath || transcriber.proc) return 'Finish and save the active meeting before installing, then click Install again.';
+    if (queue.list().some((job) => job.status === 'queued' || job.status === 'running')) return 'Wait for queued and running jobs to finish, then click Install again.';
+    if (LOCAL_MODEL_DOWNLOADS.size) return 'Wait for model downloads to finish, then click Install again.';
+    if (isDirty) return 'Save transcript edits before installing, then click Install again.';
+    return null;
+}
+function startUpdates() {
+    const { createUpdateService } = require('./update-service');
+    const { discoverUpdate } = require('./update-provider');
+    const { createMacAdapter } = require('./update-mac');
+    const { createUpdateReadiness } = require('./update-readiness');
+    updateGate = createUpdateReadiness({ busy: updateBusyReason, participants: () => [mainWindow, notesWindow]
+        .filter((window) => window && !window.isDestroyed()).map((window) => window.webContents),
+        onRelease: () => {
+            if (pendingFilePath && !quitting && updateService?.snapshot().phase !== 'installing') {
+                const next = pendingFilePath; pendingFilePath = null; openFileFromPath(next);
+            }
+        },
+    });
+    updateService = createUpdateService({ version: app.getVersion(), statePath: path.join(app.getPath('userData'), 'update-schedule.json'),
+        discover: discoverUpdate, readiness: updateGate,
+        adapter: createMacAdapter({ app, cacheDir: path.join(app.getPath('userData'), 'update-validation') }),
+        onStatus: (status) => {
+            try { if (mainWindow && !mainWindow.isDestroyed() && !mainWindow.webContents.isDestroyed()) mainWindow.webContents.send('updates:status', status); } catch { /* native commitment survives renderer loss */ }
+        },
+    });
+    updateService.start();
+    powerMonitor.on('resume', () => updateService.wake());
+    app.once('will-quit', () => updateService.stop());
+    app.once('quit', () => updateService.shutdown());
+}
+ipcMain.handle('updates:status', (event) => fromMain(event) ? updateService?.snapshot() : { error: 'Forbidden' });
+ipcMain.handle('updates:check', (event) => fromMain(event) ? updateService?.check() : { error: 'Forbidden' });
+ipcMain.handle('updates:download', (event) => fromMain(event) ? updateService?.download() : { error: 'Forbidden' });
+ipcMain.handle('updates:install', (event) => fromMain(event) ? updateService?.install() : { error: 'Forbidden' });
+ipcMain.on('updates:ready', (event, value) => {
+    if (event.senderFrame !== event.sender.mainFrame) return;
+    updateGate?.acknowledge(event.sender, value);
+});
+
 // ─── App lifecycle ────────────────────────────────────────────────────────────
 
 app.whenReady().then(() => {
@@ -5786,6 +5882,7 @@ app.whenReady().then(() => {
     buildMenu();
     createWindow();
     buildTray();
+    startUpdates();
     if (autoDetectEnabled()) startCallMonitor();
 
     // A window hidden by the close guard still counts as a window, so re-show

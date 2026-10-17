@@ -17,7 +17,7 @@
 
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -30,7 +30,7 @@ requireNode22('check:layout');
 
 const DESKTOP = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = debugPort();
-const EXPECTED_ROWS = 23;
+const EXPECTED_ROWS = 32;
 const EPS = 1.5; // sub-pixel layout slack
 
 const results = [];
@@ -274,6 +274,63 @@ async function run(evaluate, cdp) {
             + `/ popover ${fmt(moved.pop)}`];
     });
 
+    // Exercise the actual production renderer with fixture status events. No
+    // update action reaches main, and visibility remains owned by updates.js.
+    const updateSource = await readFile(path.join(DESKTOP, 'renderer', 'updates.js'), 'utf8');
+    await evaluate(`
+        window.__lcUpdates = {};
+        const fixtureApi = {
+            status: async () => ({ version: '2.0.0', channel: 'stable', phase: 'idle' }),
+            onStatus: (callback) => { window.__lcUpdates.status = callback; },
+        };
+        const fixtureReadiness = {
+            onPrepare: (callback) => { window.__lcUpdates.prepare = callback; },
+            onRelease: (callback) => { window.__lcUpdates.release = callback; }, ready() {},
+        };
+        ((window) => { ${updateSource} })({ updateApi: fixtureApi, updateReadiness: fixtureReadiness,
+            notesList: window.notesList, prepareEditorForUpdate: window.prepareEditorForUpdate,
+            liveUpdateTitleDraft: window.liveUpdateTitleDraft, recordUpdateTitleDraft: window.recordUpdateTitleDraft });
+        return true;`);
+    for (const [width, height] of [[1200, 800], [800, 600]]) {
+        for (const phase of ['available', 'downloading', 'downloaded', 'error']) {
+            await row(`update ${phase} controls visible in Settings at ${width}x${height}`, async () => {
+                await cdp.send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
+                const result = await evaluate(`
+                    const phase = ${JSON.stringify(phase)};
+                    __lcUpdates.status({ version: '2.0.0', channel: 'stable', phase, availableVersion: '2.0.1',
+                        downloadedVersion: phase === 'downloaded' ? '2.0.1' : null, progress: 42,
+                        error: phase === 'error' ? 'Synthetic interrupted download. Retry.' : null });
+                    const modal = document.getElementById('settings-modal'); modal.classList.remove('hidden');
+                    const section = document.getElementById('settings-updates'); section.scrollIntoView({ block: 'end' });
+                    const scroller = modal.querySelector('.modal-body');
+                    const box = scroller.getBoundingClientRect().toJSON();
+                    const controls = [...section.querySelectorAll('button')].filter((button) => !button.classList.contains('hidden'))
+                        .map((button) => ({ id: button.id, ...button.getBoundingClientRect().toJSON() }));
+                    const accessible = !!section.getAttribute('aria-labelledby') && document.getElementById('updates-status').getAttribute('role') === 'status';
+                    modal.classList.add('hidden');
+                    return { controls, box, accessible, width: innerWidth, height: innerHeight };`);
+                const expected = phase === 'downloading' ? ['updates-check'] : phase === 'downloaded'
+                    ? ['updates-check', 'updates-install', 'updates-later'] : ['updates-check', 'updates-download', 'updates-later'];
+                const names = result.controls.map((rect) => rect.id);
+                return [result.accessible && JSON.stringify(names) === JSON.stringify(expected)
+                    && result.controls.every((rect) => rendered(rect) && inViewport(rect, result.width, result.height)
+                        && rect.top >= result.box.top - EPS && rect.bottom <= result.box.bottom + EPS), JSON.stringify(result)];
+            });
+        }
+    }
+    await row('update activity status stays visible and accessible while editing is reserved', async () => {
+        const result = await evaluate(`
+            await __lcUpdates.prepare('layout-token');
+            __lcUpdates.status({ version: '2.0.0', channel: 'stable', phase: 'installing' });
+            const activity = document.getElementById('updates-activity');
+            const result = { rect: activity.getBoundingClientRect().toJSON(), inert: !!activity.closest('[inert]'),
+                role: activity.getAttribute('role'), live: activity.getAttribute('aria-live'), width: innerWidth, height: innerHeight };
+            __lcUpdates.release('layout-token'); return result;`);
+        return [rendered(result.rect) && inViewport(result.rect, result.width, result.height)
+            && !result.inert && result.role === 'status' && result.live === 'polite', JSON.stringify(result)];
+    });
+    await cdp.send('Emulation.setDeviceMetricsOverride', { width: 800, height: 600, deviceScaleFactor: 1, mobile: false });
+
     // No room below: button parked at the bottom of the scroll box.
     await row('popover, no room below — flips above, fully inside the viewport', async () => {
         await evaluate(`__lc.setup('live', { details: true });`);
@@ -433,6 +490,10 @@ let child;
 try {
     child = spawn(electron, [
         DESKTOP,
+        // Keep animation-frame geometry checks live when another app gains focus.
+        '--disable-renderer-backgrounding',
+        '--disable-background-timer-throttling',
+        '--disable-backgrounding-occluded-windows',
         `--remote-debugging-port=${PORT}`,
         `--user-data-dir=${userData}`,
     ], { stdio: ['ignore', 'ignore', 'inherit'] });
