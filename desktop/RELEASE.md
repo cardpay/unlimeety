@@ -112,13 +112,13 @@ to people. Both must be green.
 ```bash
 cd unlimeety/desktop
 npm test              # node --test, Electron-free, under a second
-npm run check:layout  # drives a real Electron over CDP; expect "23/23 rows passed"
+npm run check:layout  # drives a real Electron over CDP; expect "32/32 rows passed"
 ```
 
 `check:layout` needs a display and Node >= 22. It is the only guard on the Record and Live start
 screens and the "From calendar" popover, none of which `npm test` can see.
 
-### Step 3. Build the DMG
+### Step 3. Build the DMG and update ZIP
 
 ```bash
 cd unlimeety/desktop
@@ -134,10 +134,9 @@ The build:
 3. Packages the Electron `.app`, signs it, and embeds both helpers.
 3. Submits the `.app` to Apple's notary service via `notarytool submit --wait` and staples the ticket onto it.
 
-Output: `desktop/dist/Unlimeety-arm64.dmg` (plus the unpacked `desktop/dist/mac-arm64/Unlimeety.app`).
+Output: the existing version-free `desktop/dist/Unlimeety-arm64.dmg`, a versioned arm64 update ZIP, `latest-mac.yml` (stable) or `beta-mac.yml` (beta), and the unpacked application. The signed/notarized application is shared by both DMG and ZIP targets. `--publish never` keeps builds local. The generic publish configuration only generates metadata and packaged `app-update.yml` with its updater cache name; uploads remain an explicit `gh` step.
 
-What goes inside is whitelisted by `build.files` in `package.json`: `main.js`, `preload.js`, the four
-pure modules (`summary-frontmatter`, `glossary`, `transcript-enhance`, `job-queue`), `renderer/**` and
+What goes inside is whitelisted by `build.files` in `package.json`: `main.js`, `preload.js`, the pure modules and all five `update-*.js` runtime modules, `renderer/**` and
 `build/**`, plus the Swift helper as an `extraFiles` entry. `scripts/` and `test/` are not shipped —
 a new top-level source file that nobody adds to that list is simply missing at runtime.
 
@@ -209,9 +208,16 @@ cd unlimeety
 gh release create vX.Y.Z \
   --repo cardpay/unlimeety \
   --target main \
+  --draft \
   --title "Unlimeety X.Y.Z" \
   --notes "Release notes here." \
-  desktop/dist/Unlimeety-arm64.dmg
+  desktop/dist/Unlimeety-arm64.dmg \
+  desktop/dist/Unlimeety-X.Y.Z-arm64.zip \
+  desktop/dist/latest-mac.yml
+
+# Inspect and verify every asset while the release is still a draft.
+# Publish only after the verification steps below pass.
+gh release edit vX.Y.Z --repo cardpay/unlimeety --draft=false --latest
 ```
 
 That's it — the README link (`releases/latest/download/Unlimeety-arm64.dmg`) now points at the new build automatically, because the asset name is version-free.
@@ -268,11 +274,16 @@ zip -r -X desktop/dist/unlimeety-extension-beta.zip extenstion \
 gh release create v1.5.6-beta \
   --repo cardpay/unlimeety \
   --target beta \
-  --prerelease \
+  --draft --prerelease \
   --title "Unlimeety 1.5.6-beta" \
   --notes "What to test." \
   desktop/dist/Unlimeety-arm64-beta.dmg \
-  desktop/dist/unlimeety-extension-beta.zip
+  desktop/dist/unlimeety-extension-beta.zip \
+  desktop/dist/Unlimeety-1.5.6-beta-arm64.zip \
+  desktop/dist/beta-mac.yml
+
+# Complete the offline and uploaded-asset checks before making it discoverable.
+gh release edit v1.5.6-beta --repo cardpay/unlimeety --draft=false --prerelease --latest=false
 ```
 
 Then prove the stable link did not move — this is the one check that catches a forgotten `--prerelease`:
@@ -302,3 +313,67 @@ The extension has no build step — it is loaded unpacked, so the zip is the who
 | `/releases/latest/download/...` returns 404 | The uploaded asset name doesn't match the URL — most likely `artifactName` in `package.json` grew a `${version}` back. | It must stay `${productName}-${arch}.${ext}`. |
 
 For anything not in this table, the build log from `electron-builder` is verbose and usually points right at the failing tool — read it before assuming the cert is broken.
+
+
+## In-app update asset gate
+
+Existing updater-free installations need one manual installation of an updater-enabled signed
+build. Uploading manifests cannot change an already installed binary. Stable only selects stable;
+beta only selects `beta` semantic prereleases. Drafts are ignored. A missing manifest or ZIP makes
+the newest release incomplete rather than promoting another channel.
+
+Before either draft is published, run from `desktop/` with its exact version and channel:
+
+```bash
+npm run verify:update -- --version X.Y.Z --channel stable --dir dist
+# For a beta use its exact version and --channel beta instead.
+```
+
+The offline verifier checks the channel manifest, payload filename/size/SHA-512, archive paths,
+bundle identifier/version and actual arm64 Mach-O executable. Also run Step 5's native signature,
+Gatekeeper and notarization checks against the packaged app. Verify `Contents/Resources/app-update.yml`
+exists, contains `updaterCacheDirName`, and contains no credentials. Do not hand-edit the ZIP after
+its manifest hash is generated. Stable DMG names and download links stay unchanged.
+
+After uploading to the draft, use `gh release view TAG --repo cardpay/unlimeety --json isDraft,isPrerelease,tagName,assets`
+to confirm the exact tag, channel flag and complete asset list. Download the draft assets with
+`gh release download TAG --repo cardpay/unlimeety --dir /tmp/update-release-check` into a fresh
+folder and rerun the offline verifier there with the same exact version/channel. Compare these
+results before the `gh release edit --draft=false` command. No asset may be replaced after publication;
+prepare a new release if corrections are required.
+
+The runtime pins `electron-updater@6.8.9`. Its custom provider is bound to our semantic candidate;
+the adapter avoids its generic GitHub channel selection and staging UUID. Downloads use restricted
+HTTPS redirects and full SHA-512 checks, never deltas. Downloaded cache entries are revalidated,
+including the extracted bundle's designated requirement and Team ID, before explicit installation.
+Native Squirrel publisher verification remains enabled. `autoInstallOnAppQuit=false` is essential:
+normal quit after download must never call native `checkForUpdates` or stage an update. Installation
+requires an exclusive readiness reservation and successful acknowledgements from every editing window;
+a preparation timeout, lost renderer, draft, failed save, active session or job requires another explicit click.
+Preparation and network requests have total cancellation deadlines, including redirects and streaming.
+The manifest's optional `minimumSystemVersion` is a Darwin kernel version, while the bundle's
+`LSMinimumSystemVersion` is a macOS product version; both are checked before staging.
+A verified downloaded candidate is persisted locally and revalidated on restart without downloading
+or staging. A changed, corrupt, incompatible or differently signed cache requires another download.
+Once native Squirrel staging begins, its watchdog only reports delay: it cannot cancel that native
+operation. A terminal native failure releases the reservation. After native readiness and a restart request,
+the exclusive reservation remains until confirmed process shutdown, even if a renderer exits
+or Quit is requested. Returning from the restart API does not release it. A native failure requires an explicit download action to recreate the serving
+proxy before installation can be retried. Normal quit remains available before native commitment.
+
+Release-dependent validation is still pending and requires separate authorization for the necessary
+signed builds and releases. For **both stable and beta**, install a signed old updater-enabled build,
+make a signed newer same-channel version and an opposite-channel release available, and demonstrate:
+
+- The selected version/channel and signed publisher are correct; normal quit after download does
+  not stage or replace the app, and Later does not restart it.
+- Explicit installation relaunches into the selected version, clears old update prompts, and
+  preserves settings, recordings, transcripts, notes, summaries and downloaded model caches.
+- Startup/permission, stopping/saving and queued-job races block staging. Failed saves, renderer
+  loss and readiness timeout never stage. Sleep/resume produces one jittered overdue check.
+- Wrong signatures/version/architecture, corrupt or interrupted downloads, low disk space,
+  mounted/translocated/read-only locations, native errors and failed replacement leave a usable
+  previous installation and allow recovery without a deferred surprise restart.
+
+Unit tests and the offline verifier do not establish native replacement, notarization acceptance,
+restart or user-data preservation. Keep these demonstrations pending until actually performed.

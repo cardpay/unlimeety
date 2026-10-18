@@ -65,11 +65,11 @@ function makeTriggerAutoRecord(calendarEvent, { loading = false } = {}) {
         },
     };
     const triggerAutoRecord = new Function(
-        'closePromptWindow', 'process', 'app', 'mainWindow', 'createWindow', 'currentCalendarTitle',
+        'closePromptWindow', 'process', 'app', 'mainWindow', 'createWindow', 'currentCalendarTitle', 'updateGate',
         `${triggerSrc}\nreturn triggerAutoRecord;`,
     )(
         () => {}, { platform: 'darwin' }, { setActivationPolicy() {} }, mainWindow, () => {},
-        async () => calendarEvent,
+        async () => calendarEvent, null,
     );
     return {
         triggerAutoRecord,

@@ -86,6 +86,7 @@
         // true after a successful save — the next click on the Live tab resets
         // back to the setup screen instead of showing the finished transcript.
         finished: false,
+        saveFailed: false,
         // true while stopAndSave is in flight. The helper's own `exited` event
         // arrives mid-stop (main forwards it before live:stop's promise
         // resolves), and without this flag the crash path below would fire a
@@ -141,7 +142,6 @@
         else if (title) titleInput.value = title;
         if (Array.isArray(participants)) state.calendarParticipants = participants;
     }
-    window.calendarPicker?.attach({ button: $('live-cal-btn'), onPick: applyCalendarPick });
     // Re-read on every visit to this tab: the field used to keep whatever the
     // calendar said the first time it was filled, so a meeting that ended hours
     // ago was still pre-selected.
@@ -152,7 +152,15 @@
         // while it was in flight, and stopAndSave still has to read this title.
         active: () => !setupSection.classList.contains('hidden'),
     });
-    window.liveTab = { applyCalendarPick };
+    window.liveUpdateTitleDraft = () => calPrefill ? calPrefill.hasDraft() : !!titleInput.value.trim();
+    const selectCalendarPick = (pick) => {
+        if (calPrefill) calPrefill.select(pick);
+        else applyCalendarPick(pick);
+    };
+    window.calendarPicker?.attach({
+        button: $('live-cal-btn'), onPick: selectCalendarPick, allowNoCalendar: true,
+    });
+    window.liveTab = { applyCalendarPick: selectCalendarPick };
 
     // ─── Model picker ────────────────────────────────────────────────────
     // Card grid mirrors the Record tab. One card is `.is-active` at all
@@ -504,6 +512,7 @@
 
         const title = titleInput.value.trim() || defaultTitle();
 
+        state.saveFailed = true;
         const result = await live.saveTranscript({
             title,
             language: state.currentLanguage,
@@ -523,6 +532,7 @@
             discardBtn.classList.remove('hidden');
             discardBtn.textContent = 'New recording';
             state.finished = true;
+            state.saveFailed = false;
             // Mirror the Record tab: jump to the Transcripts tab and open the
             // freshly saved transcript (app.js listens for this event).
             document.dispatchEvent(new CustomEvent('transcript:created', {
@@ -929,6 +939,7 @@
 
     function resetRecordingUI() {
         state.finished = false;
+        state.saveFailed = false;
         state.crashed = null;
         state.stopping = false;
         state.finalizedSegments = [];
@@ -1120,6 +1131,8 @@
         const pad = (n) => String(n).padStart(2, '0');
         return h > 0 ? `${pad(h)}:${pad(m)}:${pad(r)}` : `${pad(m)}:${pad(r)}`;
     }
+
+    window.liveUpdateBusy = () => state.running || state.stopping || state.saveFailed || (!state.finished && (state.finalizedSegments.length > 0 || !!state.crashed));
 
     function defaultTitle() {
         const d = new Date();

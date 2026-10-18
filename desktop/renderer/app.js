@@ -5611,3 +5611,21 @@ btnLibrary.classList.add("active");
 btnSave.disabled = true;
 btnSaveAs.disabled = true;
 btnExport.disabled = true;
+
+// Update readiness never offers discard and never treats a scheduled autosave
+// as proof that the current buffer reached disk.
+window.prepareEditorForUpdate = async () => {
+  if (document.getElementById('rail-edit-area')) {
+    throw new Error('Save or close the summary edit, then click Install again.');
+  }
+  if (document.querySelector('.rename-popup')) {
+    throw new Error('Finish or cancel the rename, then click Install again.');
+  }
+  if (state.isDirty || editor.value !== state.savedContent) {
+    throw new Error('Save transcript edits, then click Install again.');
+  }
+  if (!(await autosave()) || state.isDirty || editor.value !== state.savedContent) {
+    throw new Error('The transcript could not be saved. Installation was cancelled.');
+  }
+  if (window.liveUpdateBusy?.()) throw new Error('Finish and save the Live session, then click Install again.');
+};

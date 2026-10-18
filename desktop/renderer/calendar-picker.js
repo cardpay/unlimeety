@@ -190,13 +190,32 @@
     }
   }
 
-  function renderEvents(events, onPick) {
+  function renderEvents(events, onPick, allowNoCalendar) {
     popover.innerHTML = '';
+    const def = events.indexOf(currentEvent(events)); // -1 → no event is current
+    if (allowNoCalendar) {
+      const item = document.createElement('div');
+      item.className = 'cal-pop-item cal-pop-no-meeting' + (def === -1 ? ' cal-default' : '');
+      item.tabIndex = 0;
+      item.setAttribute('role', 'button');
+      item.textContent = 'No calendar meeting';
+      const choose = () => {
+        closePopover();
+        onPick({ title: '', participants: [], clear: true });
+      };
+      item.addEventListener('click', choose);
+      item.addEventListener('keydown', (e) => {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        e.preventDefault();
+        choose();
+      });
+      popover.appendChild(item);
+    }
     if (!events.length) {
+      if (allowNoCalendar) return;
       showMessage('No calendar events around now.', false);
       return;
     }
-    const def = events.indexOf(currentEvent(events)); // -1 → nothing pre-selected
     events.forEach((ev, i) => {
       const item = document.createElement('div');
       item.className = 'cal-pop-item' + (i === def ? ' cal-default' : '');
@@ -217,7 +236,7 @@
     });
   }
 
-  async function openPopover(button, onPick) {
+  async function openPopover(button, onPick, allowNoCalendar) {
     // Toggle: a second click on the button closes it.
     if (popover) { closePopover(); return; }
     popover = document.createElement('div');
@@ -239,20 +258,20 @@
     if (popover !== mine) return; // closed/reopened while awaiting
 
     if (res && res.ok) {
-      renderEvents(res.events || [], onPick);
+      renderEvents(res.events || [], onPick, allowNoCalendar);
     } else {
       showMessage(res && res.error || 'Could not read the calendar.', res && res.reason === 'calendar-permission');
     }
   }
 
   // Public API: hide the button on unsupported platforms, otherwise wire it up.
-  async function attach({ button, onPick }) {
+  async function attach({ button, onPick, allowNoCalendar = false }) {
     if (!button) return;
     const ok = await platformReady;
     if (!ok) { button.style.display = 'none'; return; }
     button.addEventListener('click', (e) => {
       e.preventDefault();
-      openPopover(button, onPick);
+      openPopover(button, onPick, allowNoCalendar);
     });
   }
 
@@ -295,6 +314,16 @@
     let writes = 0; // bumped on every write, so an in-flight refresh can tell
                     // that someone (another refresh, or main's auto-record
                     // title) wrote while it was reading, and back off
+    let lastSeen;   // current-event title from the last completed read; undefined until one lands
+    let pending = 0; // reads in flight
+    // Title of the meeting a direct choice (popover pick, smart-router pick,
+    // "No calendar meeting") was made against. The choice holds while the
+    // calendar still shows that meeting and is released once a different one
+    // is current — so the current meeting keeps flowing in, but a choice is
+    // never undone by a refresh of the same meeting. `null` = made before any
+    // read completed (or during one): the next read pins it.
+    let pinned;
+    let picked = ''; // the direct choice's title; lets the release below tell "still the pick" from "edited since"
     const usable = () => !active || active();
     const ours = () => {
       const v = input.value.trim();
@@ -321,24 +350,51 @@
         participants: Array.isArray(pick.participants) ? pick.participants : (same ? undefined : []),
       });
     };
+    const select = (pick) => {
+      writes++;
+      auto = ''; // a direct choice is the user's: main's auto-record title must not override it mid-session
+      picked = pick?.clear === true ? '' : String(pick?.title || '').trim();
+      pinned = (pending || lastSeen === undefined) ? null : lastSeen;
+      onPick(pick);
+    };
     return {
+      hasDraft: () => !!input.value.trim() && !ours(),
       put,
+      // Direct choices own the field for as long as the calendar shows the
+      // meeting they were made against; see `pinned`.
+      select,
       // Explicit fresh-session boundary: discard even direct/manual ownership
       // and invalidate reads that began for the previous recording. Ordinary
       // tab visits keep using refresh(), which preserves current-session edits.
       reset: () => {
         writes++;
         auto = '';
+        pinned = undefined;
         onPick({ title: '', participants: [], clear: true });
       },
       refresh: async () => {
         const seen = writes;
+        pending++;
         const { ok, pick } = await readCurrent();
+        pending--;
+        if (!ok) return; // a failed read knows nothing; leave everything as is
+        const current = pick ? pick.title : '';
+        if (pinned === null) pinned = current; // choice made mid-read: pin it to what the calendar showed
+        lastSeen = current;
         if (writes !== seen || !usable()) return;
+        // A direct choice holds until a *different* meeting is current. A gap
+        // with no meeting does not release it: a picked upcoming event must not
+        // be cleared just because the previous one ended.
+        if (pinned !== undefined) {
+          if (!pick || current === pinned) return;
+          pinned = undefined;
+          // Still holding the pick verbatim → let the calendar replace it; edited since → keep.
+          if (picked && input.value.trim() === picked) auto = picked;
+        }
         if (pick) { put(pick); return; }
         // `clear` rather than an empty title: the sinks must be able to tell
         // this apart from a nameless event's '' arriving on some other path.
-        if (ok && auto && ours()) { auto = ''; writes++; onPick({ title: '', participants: [], clear: true }); }
+        if (auto && ours()) { auto = ''; writes++; onPick({ title: '', participants: [], clear: true }); }
       },
     };
   }
