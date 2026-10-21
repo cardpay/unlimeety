@@ -1,5 +1,6 @@
-const { app, BrowserWindow, Menu, Tray, nativeImage, screen, dialog, ipcMain, shell, systemPreferences, clipboard, safeStorage, nativeTheme, powerMonitor } = require('electron');
+const { app, BrowserWindow, Menu, Tray, nativeImage, screen, dialog, ipcMain, shell, systemPreferences, clipboard, safeStorage, nativeTheme, powerMonitor, session } = require('electron');
 const path = require('path');
+const { pathToFileURL } = require('url');
 const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
@@ -763,8 +764,7 @@ ipcMain.handle('file:saveAs', async (e, content) => {
 // ─── IPC: Export to PDF / DOCX ────────────────────────────────────────────────
 
 // Render a standalone HTML document to a PDF buffer via an offscreen window.
-// The renderer hands us a fully self-contained HTML string (its own light
-// print CSS), so this window only ever loads our own static markup.
+// Renderer-supplied HTML is untrusted; exports need no scripts or subresources.
 async function generatePdf(html) {
     // Unpredictable name + 'wx' (fail-on-exists): a plain fs.writeFileSync at a
     // predictable pid-based name follows a symlink planted ahead of time at
@@ -779,14 +779,14 @@ async function generatePdf(html) {
     } finally {
         fs.closeSync(fd);
     }
+    const pdfSession = session.fromPartition(`pdf-export-${crypto.randomBytes(16).toString('hex')}`, { cache: false });
+    const tmpURL = pathToFileURL(tmpPath).href;
+    pdfSession.webRequest.onBeforeRequest((details, callback) => callback({ cancel: details.url !== tmpURL }));
     const win = new BrowserWindow({
         show: false,
-        webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true },
+        webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true, javascript: false, session: pdfSession },
     });
-    // The HTML is our own markup, but its body embeds transcript/summary text
-    // we don't fully control (a summary can contain model-rendered markdown).
-    // Neither a new window nor an in-page navigation should ever be possible
-    // out of this offscreen page.
+    // Also prevent untrusted markup from opening windows or navigating away.
     win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     win.webContents.on('will-navigate', (event) => event.preventDefault());
     try {
