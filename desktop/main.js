@@ -3681,6 +3681,8 @@ const AUDIO_EXTS = new Set(['.wav', '.mp3', '.m4a', '.mp4', '.aac', '.aif', '.ai
 // oddly-typed value can't make a later path.join escape the model cache
 // directory.
 const WHISPER_MODEL_RE = /^openai_whisper-[A-Za-z0-9._-]+$/;
+// Immutable HF snapshot; keep in sync with ModelLoader.revision (guarded by tests).
+const WHISPER_MODEL_REVISION = '0f63a7800b00dd0226abd051b906c246e1907482';
 
 function liveSendToRenderer(event) {
     if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -5262,6 +5264,7 @@ ipcMain.handle('record:transcribe', (_e, opts) => {
 ipcMain.handle('record:getInstalledModels', () => {
     const base = path.join(
         app.getPath('userData'), 'models', 'whisperkit',
+        'revisions', WHISPER_MODEL_REVISION,
         'models', 'argmaxinc', 'whisperkit-coreml'
     );
     const known = [
@@ -5272,7 +5275,15 @@ ipcMain.handle('record:getInstalledModels', () => {
         'openai_whisper-base',
         'openai_whisper-tiny',
     ];
-    return known.filter(m => fs.existsSync(path.join(base, m, 'AudioEncoder.mlmodelc')));
+    return known.filter(m => {
+        try {
+            return fs.readFileSync(path.join(base, m, '.snapshot-revision'), 'utf8') === WHISPER_MODEL_REVISION
+                && ['AudioEncoder.mlmodelc', 'MelSpectrogram.mlmodelc', 'TextDecoder.mlmodelc']
+                    .every(dir => fs.statSync(path.join(base, m, dir)).isDirectory())
+                && ['config.json', 'generation_config.json']
+                    .every(file => fs.statSync(path.join(base, m, file)).isFile());
+        } catch { return false; }
+    });
 });
 
 // Remove a WhisperKit model directory from disk. Renderer surfaces this
@@ -5288,6 +5299,7 @@ ipcMain.handle('record:deleteModel', async (e, modelName) => {
         }
         const dir = path.join(
             app.getPath('userData'), 'models', 'whisperkit',
+            'revisions', WHISPER_MODEL_REVISION,
             'models', 'argmaxinc', 'whisperkit-coreml',
             modelName
         );

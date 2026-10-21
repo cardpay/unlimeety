@@ -22,6 +22,7 @@
 
 const assert = require('assert');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const vm = require('vm');
 const { test } = require('node:test');
@@ -216,7 +217,7 @@ test('settings:setGlossary: a mismatched sender is denied and writes nothing; th
 
 // A third channel, on the record:* (not transcripts:*) side.
 test('record:deleteModel: a mismatched sender is denied and never touches the filesystem; the real main window sender proceeds', async () => {
-    const src = [sliceFunction('fromMain'), sliceConstVar('WHISPER_MODEL_RE'), sliceFunction('describeFsError')].join('\n')
+    const src = [sliceFunction('fromMain'), sliceConstVar('WHISPER_MODEL_RE'), sliceConstVar('WHISPER_MODEL_REVISION'), sliceFunction('describeFsError')].join('\n')
         + `\nreturn ${sliceIpcHandlerFn('record:deleteModel')};`;
     const factory = new Function('mainWindow', 'app', 'path', 'fs', src);
     const removed = [];
@@ -235,6 +236,33 @@ test('record:deleteModel: a mismatched sender is denied and never touches the fi
     const allowed = await handler({ sender: mainWindow.webContents }, 'openai_whisper-tiny');
     assert.deepStrictEqual(allowed, { ok: true, removed: true });
     assert.strictEqual(removed.length, 1, 'the allowed call must actually remove the model dir');
+    assert.ok(removed[0].includes('/whisperkit/revisions/'), 'deletion must target the pinned cache');
+});
+
+test('record:getInstalledModels only advertises complete snapshots at the pinned revision', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pinned-models-'));
+    try {
+        const revision = new Function(`${sliceConstVar('WHISPER_MODEL_REVISION')}\nreturn WHISPER_MODEL_REVISION;`)();
+        const src = `${sliceConstVar('WHISPER_MODEL_REVISION')}\nreturn ${sliceIpcHandlerFn('record:getInstalledModels')};`;
+        const handler = new Function('app', 'path', 'fs', src)({ getPath: () => root }, path, fs);
+        const base = path.join(root, 'models', 'whisperkit');
+        const folder = path.join(base, 'revisions', revision, 'models', 'argmaxinc', 'whisperkit-coreml', 'openai_whisper-base');
+        const legacy = path.join(base, 'models', 'argmaxinc', 'whisperkit-coreml', 'openai_whisper-tiny', 'AudioEncoder.mlmodelc');
+        fs.mkdirSync(legacy, { recursive: true });
+        for (const dir of ['AudioEncoder.mlmodelc', 'MelSpectrogram.mlmodelc', 'TextDecoder.mlmodelc']) {
+            fs.mkdirSync(path.join(folder, dir), { recursive: true });
+        }
+        for (const file of ['config.json', 'generation_config.json']) fs.writeFileSync(path.join(folder, file), '{}');
+        assert.deepStrictEqual(handler(), [], 'legacy and unfinished caches must not be advertised');
+        fs.writeFileSync(path.join(folder, '.snapshot-revision'), 'main');
+        assert.deepStrictEqual(handler(), [], 'a different revision must not be advertised');
+        fs.writeFileSync(path.join(folder, '.snapshot-revision'), revision);
+        assert.deepStrictEqual(handler(), ['openai_whisper-base']);
+        fs.rmSync(path.join(folder, 'TextDecoder.mlmodelc'), { recursive: true });
+        assert.deepStrictEqual(handler(), [], 'missing model components must hide the variant');
+    } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+    }
 });
 
 test('a representative read-only transcripts/record channel is left unguarded (defense-in-depth only, not the sole barrier)', () => {
