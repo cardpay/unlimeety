@@ -80,6 +80,7 @@ contextBridge.exposeInMainWorld('transcriber', {
     createTranscript: (payload) => ipcRenderer.invoke('transcripts:create', payload),
     renameTranscript: (filePath, newTitle) => ipcRenderer.invoke('transcripts:rename', filePath, newTitle),
     getAudioPath: (filePath) => ipcRenderer.invoke('transcripts:getAudioPath', filePath),
+    getWaveform: (filePath) => ipcRenderer.invoke('audio:waveform', filePath),
     // Submits a job and returns { ok, jobId } — progress and the final result
     // (including updated content, for the in-editor reload) arrive via
     // queueApi.onChanged. Cancel goes through queueApi.cancel(jobId) now.

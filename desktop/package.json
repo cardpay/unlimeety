@@ -27,6 +27,7 @@
         },
         "files": [
             "main.js",
+            "audio-waveform.js",
             "preload.js",
             "preload-panel.js",
             "summary-frontmatter.js",

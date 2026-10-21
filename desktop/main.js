@@ -10,6 +10,7 @@ const enhance = require('./transcript-enhance');
 const { createJobQueue } = require('./job-queue');
 const { LOCAL_MODEL_MANIFEST, modelById, displayModel } = require('./local-model-manifest');
 const { downloadVerifiedArtifact } = require('./local-model-download');
+const { readWaveform } = require('./audio-waveform');
 
 // Track entire IPC lifetimes, including permission prompts and final writes.
 // Updates reserve before any await and reject new work until readiness ends.
@@ -2713,9 +2714,8 @@ function cachedHasSpokenTurns(filePath, mtime, raw) {
     }
 }
 
-// Above this, a full read (plus decoding/parsing it) risks the same OOM the
-// waveform decoder guards against, just to describe one library row — the
-// row can still carry real hasAudio/audioPaths (mergeMeetings' de-dup depends
+// Above this, a full read (plus parsing it) risks OOM just to describe one
+// library row. It can still carry real hasAudio/audioPaths (mergeMeetings' de-dup depends
 // on them), which need only the filename, not the body.
 const TRANSCRIPT_LIST_MAX_READ_BYTES = 20 * 1024 * 1024;
 
@@ -2979,6 +2979,15 @@ ipcMain.handle('transcripts:getAudioPath', (_e, filePath) => {
     if (!canReadPath(filePath)) return null;
     const paths = findRelatedAudioPaths(filePath);
     return paths[0] || null;
+});
+
+ipcMain.handle('audio:waveform', async (e, filePath) => {
+    if (!fromMain(e) || !canReadPath(filePath)) return null;
+    try {
+        return await readWaveform(filePath);
+    } catch {
+        return null; // Missing, truncated or unsupported audio keeps the neutral bars.
+    }
 });
 
 ipcMain.handle('transcripts:delete', async (e, filePath) => {
