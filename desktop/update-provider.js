@@ -4,7 +4,7 @@ const https = require('node:https');
 const semver = require('semver');
 const yaml = require('js-yaml');
 const os = require('node:os');
-const { budget, checkAbort } = require('./update-bounds');
+const { budget, checkAbort, clampRetryDeadline } = require('./update-bounds');
 
 const REPOSITORY = 'cardpay/unlimeety';
 const RELEASES = `https://api.github.com/repos/${REPOSITORY}/releases`;
@@ -29,8 +29,8 @@ function retryDeadline(headers, now = Date.now()) {
     const retry = headers['retry-after'];
     const delay = retry && /^\d+$/.test(String(retry)) ? now + Number(retry) * 1000 : Date.parse(retry);
     const reset = Number(headers['x-ratelimit-reset']) * 1000;
-    return Math.max(Number.isFinite(delay) ? delay : 0,
-        headers['x-ratelimit-remaining'] === '0' && Number.isFinite(reset) ? reset : 0);
+    return clampRetryDeadline(Math.max(Number.isFinite(delay) ? delay : 0,
+        headers['x-ratelimit-remaining'] === '0' && Number.isFinite(reset) ? reset : 0), now);
 }
 // Discovery and payload downloads share the same redirect policy. Never forward
 // credentials, and bound time, redirects and response sizes before parsing.
@@ -47,7 +47,7 @@ function requestBuffer(url, { request = https.get, maxBytes = MAX_METADATA_BYTES
         signal.addEventListener('abort', abort, { once: true });
         req = request(url, { headers: { 'User-Agent': 'desktop-update-client', Accept: 'application/vnd.github+json' } }, (res) => {
             response = res; res.on('error', reject);
-            observedDeadline = Math.max(observedDeadline, retryDeadline(res.headers, now()));
+            observedDeadline = clampRetryDeadline(Math.max(observedDeadline, retryDeadline(res.headers, now())), now());
             if (signal.aborted) { abort(); return; }
             if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
                 res.destroy();
@@ -72,7 +72,7 @@ function requestBuffer(url, { request = https.get, maxBytes = MAX_METADATA_BYTES
             res.on('end', () => resolve({ body: Buffer.concat(chunks), blockedUntil }));
         });
         req.on('error', reject);
-    }).then((result) => ({ ...result, blockedUntil: Math.max(observedDeadline, result.blockedUntil || 0) })).catch((error) => { error.blockedUntil = Math.max(observedDeadline, error.blockedUntil || 0); throw error; }).finally(() => { if (abort) signal.removeEventListener('abort', abort); scope?.close(); });
+    }).then((result) => ({ ...result, blockedUntil: clampRetryDeadline(Math.max(observedDeadline, result.blockedUntil || 0), now()) })).catch((error) => { error.blockedUntil = clampRetryDeadline(Math.max(observedDeadline, error.blockedUntil || 0), now()); throw error; }).finally(() => { if (abort) signal.removeEventListener('abort', abort); scope?.close(); });
 }
 function manifestCandidate(release, version, channel, manifest, { kernelVersion = os.release() } = {}) {
     const minimum = manifest?.minimumSystemVersion;
@@ -107,13 +107,13 @@ async function discoverUpdate(installed, { fetch = requestBuffer, timeoutMs = 12
             error.blockedUntil = blockedUntil; throw error;
         }
         const response = await fetch(url, { signal: scope.signal });
-        blockedUntil = Math.max(blockedUntil, response.blockedUntil || 0);
+        blockedUntil = clampRetryDeadline(Math.max(blockedUntil, response.blockedUntil || 0), now());
         return response;
     }
     try {
         for (let page = 1; page <= MAX_PAGES; page++) {
             const response = await get(`${RELEASES}?per_page=100&page=${page}`);
-            blockedUntil = Math.max(blockedUntil, response.blockedUntil || 0);
+            blockedUntil = clampRetryDeadline(Math.max(blockedUntil, response.blockedUntil || 0), now());
             const releases = JSON.parse(response.body.toString('utf8'));
             if (!Array.isArray(releases)) throw new Error('Invalid update release list.');
             for (const release of releases) {
@@ -133,9 +133,9 @@ async function discoverUpdate(installed, { fetch = requestBuffer, timeoutMs = 12
         const expectedURL = `https://github.com/${REPOSITORY}/releases/download/${release.tag_name}/${name}`;
         if (!asset || asset.browser_download_url !== expectedURL) throw new Error(`Update ${version} is incomplete: ${name} is unavailable. Try again after its release assets are published.`);
         const response = await get(expectedURL);
-        blockedUntil = Math.max(blockedUntil, response.blockedUntil || 0);
+        blockedUntil = clampRetryDeadline(Math.max(blockedUntil, response.blockedUntil || 0), now());
         return { candidate: manifestCandidate(release, version, channel, yaml.load(response.body.toString('utf8')), { kernelVersion }), blockedUntil };
-    } catch (error) { error.blockedUntil = Math.max(blockedUntil, error.blockedUntil || 0); throw error; }
+    } catch (error) { error.blockedUntil = clampRetryDeadline(Math.max(blockedUntil, error.blockedUntil || 0), now()); throw error; }
     finally { scope.close(); }
 }
 

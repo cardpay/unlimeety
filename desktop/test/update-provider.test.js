@@ -71,6 +71,51 @@ test('rate limit headers produce absolute retry deadlines', () => {
     assert.equal(retryDeadline({ 'retry-after': '60' }, 1000), 61000);
     assert.equal(retryDeadline({ 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '200' }, 1000), 200000);
 });
+test('server retry headers cannot suppress updates for more than 24 hours', () => {
+    const now = Date.parse('2026-01-01T00:00:00Z');
+    const limit = now + 24 * 3600000;
+    for (const headers of [
+        { 'retry-after': '4000000000' },
+        { 'retry-after': 'Fri, 01 Jan 2100 00:00:00 GMT' },
+        { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '4000000000' },
+        { 'retry-after': '60', 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '4000000000' },
+    ]) assert.equal(retryDeadline(headers, now), limit);
+    assert.equal(retryDeadline({}, now), 0);
+});
+test('oversized retry headers stay bounded on success, redirects and HTTP errors', async () => {
+    const { requestBuffer } = require('../update-provider');
+    const { EventEmitter } = require('node:events'); const { Readable } = require('node:stream');
+    const now = Date.parse('2026-01-01T00:00:00Z');
+    for (const status of [200, 302, 429]) {
+        let calls = 0;
+        const request = (_url, _options, callback) => {
+            const req = new EventEmitter(); req.destroy = () => {};
+            queueMicrotask(() => {
+                const res = new Readable({ read() {} });
+                res.statusCode = ++calls === 1 ? status : 200;
+                res.headers = calls === 1 ? { 'retry-after': '4000000000' } : {};
+                if (res.statusCode === 302) res.headers.location = 'https://release-assets.githubusercontent.com/metadata';
+                callback(res);
+                if (res.statusCode === 200) { res.push('[]'); res.push(null); }
+            });
+            return req;
+        };
+        const pending = requestBuffer('https://api.github.com/repos/cardpay/unlimeety/releases', { request, now: () => now });
+        if (status === 429) await assert.rejects(pending, (error) => error.blockedUntil === now + 24 * 3600000);
+        else assert.equal((await pending).blockedUntil, now + 24 * 3600000);
+    }
+});
+test('discovery caps accumulated retry deadlines from responses and failures', async () => {
+    const now = Date.parse('2026-01-01T00:00:00Z');
+    for (const fails of [false, true]) {
+        const result = await discoverUpdate('2.0.0', { now: () => now, fetch: async () => {
+            const blockedUntil = now + 4000000000 * 1000;
+            if (fails) { const error = new Error('limited'); error.blockedUntil = blockedUntil; throw error; }
+            return { body: Buffer.from('[]'), blockedUntil };
+        } }).catch((error) => { assert.equal(fails, true); return error; });
+        assert.equal(result.blockedUntil, now + 24 * 3600000);
+    }
+});
 test('custom provider is bound to its exact candidate and supplies pinned Provider runtime options', async () => {
     const executor = {};
     class Provider { constructor(options) { this.options = options; } }

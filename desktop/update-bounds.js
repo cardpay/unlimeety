@@ -1,5 +1,10 @@
 'use strict';
 
+// Server hints must never freeze updates beyond one day, including after restart.
+function clampRetryDeadline(deadline, now = Date.now()) {
+    return Number.isFinite(deadline) && deadline !== 0 ? Math.min(deadline, now + 24 * 3600000) : 0;
+}
+
 // One cancellation budget follows redirects, streaming, hashing and subprocesses.
 // Callers own the scope; nested operations must use the same signal.
 function budget(timeoutMs, parent) {
@@ -27,4 +32,4 @@ function abortable(promise, signal) {
     });
     return Promise.race([promise, cancelled]).finally(() => signal.removeEventListener('abort', abort));
 }
-module.exports = { budget, checkAbort, abortable };
+module.exports = { budget, checkAbort, abortable, clampRetryDeadline };
