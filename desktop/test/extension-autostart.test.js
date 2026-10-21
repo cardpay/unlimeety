@@ -300,6 +300,33 @@ test('a guest named the reserved "Note" label is renamed on the way out', () => 
     assert.strictEqual(msg.data.speaker, 'Note (guest)');
 });
 
+test('note-like guest names and colon removal cannot impersonate user notes', () => {
+    for (const [label, expected] of [
+        ['Note:', 'Note (guest)'], ['Note: urgent', 'Note urgent (guest)'],
+        ['Note:urgent', 'Noteurgent (guest)'], ['nOtE: urgent', 'nOtE urgent (guest)'],
+        ['Note urgent', 'Note urgent (guest)'], ['N:ote', 'Note (guest)'],
+        ['Guest: One', 'Guest One'], ['Notebook', 'Notebook'],
+    ]) {
+        const w = run({ stored: {}, active: true });
+        w.api.processSubtitle(label, 'Send the fixture report tomorrow.');
+        const msg = w.messages().find((m) => m.action === 'addTranscript');
+        assert.ok(msg, label);
+        assert.strictEqual(msg.data.speaker, expected, label);
+        assert.ok(!msg.data.speaker.includes(':'), label);
+        assert.ok(!`[00:01] ${msg.data.speaker}:`.includes('] Note:'), label);
+    }
+});
+
+test('note prefixes are reserved case-insensitively at a word boundary', () => {
+    const w = run({ stored: {}, active: true });
+    for (const label of ['Note:', 'Note: urgent', 'Note:urgent', 'note', 'nOtE urgent']) {
+        assert.ok(w.api.isReservedSpeakerLabel(label), label);
+    }
+    for (const label of ['Notebook', 'Noteworthy', 'Guest One']) {
+        assert.ok(!w.api.isReservedSpeakerLabel(label), label);
+    }
+});
+
 test('a guest whose name has the S<n> placeholder shape is renamed too', () => {
     const w = run({ stored: {}, active: true });
     w.api.processSubtitle('s3', 'hello there, everyone');

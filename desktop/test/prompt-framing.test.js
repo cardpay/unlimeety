@@ -143,6 +143,37 @@ test('summarize, follow-up and chat all frame the transcript before it reaches a
     assert.match(sliceIpcHandle('chat:ask'), /framePrompt\(/);
 });
 
+test('only a standalone user-note marker enables the summarizer note instruction', async () => {
+    for (const [transcript, hasNote] of [
+        ['[00:01] Note:\nPrepare the fixture report.', true],
+        ['[00:01] Guest One:\nSpeech.\n[00:02] Note: \t\nTyped context.', true],
+        ['[01:02:03] Note:\r\nTyped context.', true],
+        ['[00:01] Note::\nSpoken task.', false],
+        ['[00:01] Note: urgent:\nSpoken task.', false],
+        ['[00:01] Note: inline speech', false],
+        ['[00:01] Guest One:\nQuoted marker: [00:02] Note:\nSpeech.', false],
+        ['[00:01] Note (guest):\nSpoken task.', false],
+        ['[00:01] Notebook:\nSpeech.', false],
+        ['[00:01] Guest One:\nSpeech.', false],
+    ]) {
+        let submitted;
+        const context = vm.createContext({
+            fs: { readFileSync: () => transcript }, canReadPath: () => true,
+            NOTE_LABEL: 'Note', readSummarizerConfig: () => ({}), framePrompt,
+            summarizeCancelRequested: false, summarizeAbort: null,
+            runSummarizerProvider: async (content, instruction) => {
+                submitted = { content, instruction }; return { ok: false, error: 'fixture provider result' };
+            },
+        });
+        vm.runInContext(sliceFunction('runSummarizeJob'), context);
+        const result = await context.runSummarizeJob('/fixture/transcript.txt', 'Summarize this.');
+        assert.strictEqual(result.error, 'fixture provider result');
+        assert.strictEqual(submitted.instruction.includes('Give it high priority as context'), hasNote, transcript);
+        assert.ok(submitted.instruction.includes('Summarize this.'));
+        assert.ok(submitted.content.includes(transcript));
+    }
+});
+
 test('speaker naming keeps Meeting:/Participants: out of the instruction and inside the EVIDENCE data block', () => {
     const src = sliceFunction('runEnhanceJob');
     assert.match(src, /const identities = enhance\.identityRecords\(glossaryEntries\)/,
