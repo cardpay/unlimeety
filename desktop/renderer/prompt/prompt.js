@@ -1,4 +1,5 @@
-// Frameless prompt window shown by main.js. Two modes:
+// Frameless prompt window shown by main.js. Three modes:
+//   • 'reminder' — hourly capture reminder; stop now or keep recording.
 //   • 'call'     — the mic monitor reports a call starting → offer to record.
 //   • 'autostop' — a mic+system recording's meeting ended → counting down to
 //                  auto-stop. Three ways out: "Stop now" (stop immediately),
@@ -56,8 +57,27 @@ function renderAutoStop(seconds) {
     }, 1000);
 }
 
+function renderReminder(elapsedMs) {
+    if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+    const totalMinutes = Math.max(1, Math.floor((Number(elapsedMs) || 0) / 60000));
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    const duration = hours ? `${hours}h${minutes ? ` ${minutes}m` : ''}` : `${minutes}m`;
+    titleEl.textContent = `Recording has been running for ${duration}`;
+    subtitle.textContent = 'Would you like to stop recording?';
+    recordBtn.style.display = 'none';
+    dismissBtn.style.display = 'none';
+    stopBtn.style.display = '';
+    keepBtn.style.display = '';
+    keepBtn.textContent = 'Not now';
+    closeBtn.style.display = 'none';
+    textEl.classList.remove('with-close');
+}
+
 window.promptApi.onData((data) => {
-    if (data && data.mode === 'autostop') renderAutoStop(data.seconds);
+    keepBtn.textContent = 'Keep recording';
+    if (data && data.mode === 'reminder') renderReminder(data.elapsedMs);
+    else if (data && data.mode === 'autostop') renderAutoStop(data.seconds);
     else renderCall(data && data.app);
 });
 

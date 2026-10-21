@@ -3688,7 +3688,10 @@ function liveHandleEvent(event) {
     // Re-anchor notes' elapsed-time origin to when audio capture actually
     // starts, not when live:start was called — model load can take tens of
     // seconds and would otherwise throw off every note timestamp.
-    if (event.type === 'recording') live.notesStartedAt = Date.now();
+    if (event.type === 'recording') {
+        live.notesStartedAt = Date.now();
+        startRecordingReminder('live');
+    }
 
     if (event.type === 'segment' && event.final === true) {
         live.segments.push(event);
@@ -3974,6 +3977,7 @@ ipcMain.handle('live:start', async (_e, opts) => {
             // "code null" a crash leaves behind.
             liveSendToRenderer({ type: 'exited', code, signal });
             live.proc = null;
+            cancelRecordingReminder('live');
             cancelAutoStop('live');
             closeNotesWindow();
         });
@@ -3981,6 +3985,7 @@ ipcMain.handle('live:start', async (_e, opts) => {
         proc.on('error', (err) => {
             liveSendToRenderer({ type: 'error', message: `helper spawn error: ${err.message}` });
             live.proc = null;
+            cancelRecordingReminder('live');
             // Node emits 'error' (not 'exit') when the helper fails to spawn at
             // all, so without this the always-on-top notes panel would outlive
             // the session it belongs to, with nothing left to accept its notes.
@@ -3992,6 +3997,7 @@ ipcMain.handle('live:start', async (_e, opts) => {
         return { ok: true, config: payload };
     } catch (err) {
         live.proc = null;
+        cancelRecordingReminder('live');
         live.outputPath = null;
         live.model = null;
         return { ok: false, error: describeFsError(err) };
@@ -4000,6 +4006,7 @@ ipcMain.handle('live:start', async (_e, opts) => {
 
 ipcMain.handle('live:stop', async () => {
     if (!live.proc) return { ok: false, error: 'No live session running.' };
+    cancelRecordingReminder('live');
     try {
         live.proc.stdin.write(JSON.stringify({ cmd: 'stop' }) + '\n');
     } catch { /* may already be closed */ }
@@ -4284,6 +4291,7 @@ app.on('before-quit', () => {
     if (live.proc) {
         try { live.proc.kill('SIGTERM'); } catch {}
         live.proc = null;
+        cancelRecordingReminder('live');
     }
 });
 
@@ -4362,7 +4370,10 @@ function recordHandleEvent(event) {
     if (event && event.type === 'meetingResumed') { cancelAutoStop('record'); return; }
     // Re-anchor notes' elapsed-time origin to when audio capture actually
     // starts, not when record:start was called (mirrors liveHandleEvent).
-    if (event && event.type === 'recording') recorder.notesStartedAt = Date.now();
+    if (event && event.type === 'recording') {
+        recorder.notesStartedAt = Date.now();
+        startRecordingReminder('record');
+    }
     recordSendToRenderer(event);
 }
 
@@ -4487,6 +4498,7 @@ ipcMain.handle('record:start', async (_e, opts) => {
         flushNotesSidecar(recorder);
         recordSendToRenderer({ type: 'recorderExited', code });
         recorder.proc = null;
+        cancelRecordingReminder('record');
         recorder.outputPath = null;
         mainWindow?.webContents.send('record:listChanged');
         cancelAutoStop('record');
@@ -4494,6 +4506,7 @@ ipcMain.handle('record:start', async (_e, opts) => {
     recorder.proc.on('error', (err) => {
         recordSendToRenderer({ type: 'error', message: `helper spawn error: ${err.message}` });
         recorder.proc = null;
+        cancelRecordingReminder('record');
         recorder.outputPath = null;
         mainWindow?.webContents.send('record:listChanged');
     });
@@ -4511,6 +4524,7 @@ ipcMain.handle('record:start', async (_e, opts) => {
 
 ipcMain.handle('record:stop', async () => {
     if (!recorder.proc) return { ok: false, error: 'No recording in progress.' };
+    cancelRecordingReminder('record');
     flushNotesSidecar(recorder);
     try { recorder.proc.stdin.write(JSON.stringify({ cmd: 'stop' }) + '\n'); } catch { /* may already be closed */ }
 
@@ -4529,6 +4543,7 @@ ipcMain.handle('record:stop', async () => {
     // in record:start runs before this await resolves (it's the same 'exit'
     // event) and already nulled both fields and sent record:listChanged.
     recorder.proc = null;
+    cancelRecordingReminder('record');
     recorder.outputPath = null;
     noteSessionFlushed('record');
     return { ok: true };
@@ -5587,6 +5602,7 @@ function closePromptWindow() {
         try { promptWindow.close(); } catch {}
     }
     promptWindow = null;
+    recordingReminderSlot = null;
     // Re-assert 'regular' so the Dock icon survives the prompt on every teardown
     // path (record / dismiss / keep recording / auto-stop timeout). This restores
     // only the Dock icon, NOT focus — the prompt was shown with showInactive(), so
@@ -5675,7 +5691,7 @@ async function currentCalendarTitle() {
 // still looking at, while its countdown keeps running unseen. Call-detect
 // teardown therefore stops at a running countdown.
 function closeCallPrompt() {
-    if (autoStopTimer) return;
+    if (autoStopTimer || recordingReminderSlot) return;
     closePromptWindow();
 }
 
@@ -5687,6 +5703,36 @@ ipcMain.on('prompt:dismiss', () => {
     // never brought the app forward — there is no activation to undo and the
     // main window stays where it was.
 });
+
+// Hourly reminders belong to actual capture, independently of call detection
+// and meeting-end auto-stop. Each concurrent session keeps its own clock.
+const RECORDING_REMINDER_MS = 60 * 60 * 1000;
+const recordingReminderTimers = new Map();
+let recordingReminderSlot = null;
+
+function startRecordingReminder(slot) {
+    cancelRecordingReminder(slot);
+    const session = slot === 'live' ? live : recorder;
+    const proc = session.proc;
+    if (!proc) return;
+    const startedAt = Date.now();
+    const timer = setInterval(() => {
+        if (session.proc !== proc) { cancelRecordingReminder(slot); return; }
+        // The meeting-end countdown has priority; an unanswered reminder also
+        // stays on screen rather than being replaced every hour.
+        if (autoStopTimer || promptWindow) return;
+        showPromptWindow({ mode: 'reminder', elapsedMs: Date.now() - startedAt });
+        recordingReminderSlot = slot;
+    }, RECORDING_REMINDER_MS);
+    recordingReminderTimers.set(slot, timer);
+}
+
+function cancelRecordingReminder(slot) {
+    const timer = recordingReminderTimers.get(slot);
+    if (timer) clearInterval(timer);
+    recordingReminderTimers.delete(slot);
+    if (recordingReminderSlot === slot) closePromptWindow();
+}
 
 // ─── Auto-stop when the meeting ends (mic+system recordings) ─────────────────
 // The helper emits `meetingEnded` when the conferencing app released the mic.
@@ -5737,12 +5783,15 @@ function triggerAutoStop(slots) {
     if (slots.includes('record') && recorder.proc) recordSendToRenderer({ type: 'autoStop' });
 }
 
-ipcMain.on('prompt:keepRecording', () => cancelAutoStop());
+ipcMain.on('prompt:keepRecording', () => {
+    if (recordingReminderSlot) closePromptWindow();
+    else cancelAutoStop();
+});
 
 // "Stop now" — the same stop+save the countdown would have done, just
 // immediately, and to the same single session.
 ipcMain.on('prompt:stopNow', () => {
-    const slot = autoStopSlot;
+    const slot = autoStopSlot || recordingReminderSlot;
     if (autoStopTimer) { clearTimeout(autoStopTimer); autoStopTimer = null; }
     autoStopSlot = null;
     closePromptWindow();
