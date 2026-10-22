@@ -127,4 +127,20 @@ test('Settings makes the weaker Codex isolation an explicit opt-in', () => {
     assert.match(RENDERER, /result\.provider === "codex-cli"/);
 });
 
+test('Codex discloses credential exfiltration in Settings and before first choice', () => {
+    const warning = SETTINGS_HTML.match(/id="settings-codex-warning"[\s\S]*?<\/span>/)?.[0];
+    const choice = SETTINGS_HTML.match(/data-provider="codex-cli"[\s\S]*?<\/button>/)?.[0];
+    for (const text of [warning, choice]) {
+        assert.ok(text);
+        assert.match(text, /read.{0,40}files/i);
+        assert.match(text, /credentials/);
+        assert.match(text, /OpenAI/);
+        assert.match(text, /saved summary/);
+        assert.match(text, /accept this risk/);
+    }
+    assert.match(RENDERER, /getElementById\("settings-codex-warning"\)\.classList\.toggle\("hidden", provider !== "codex-cli"\)/);
+    assert.match(MAIN, /provider: 'claude-code', \/\/ legacy fallback/);
+    assert.doesNotMatch(SETTINGS_HTML, /value="codex-cli"[^>]*\bchecked/);
+});
+
 console.log('codex-args: all checks passed');

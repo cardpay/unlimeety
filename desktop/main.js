@@ -1628,17 +1628,33 @@ ipcMain.handle('settings:setAutoStop', (e, on) => {
     return { ok: true };
 });
 
-// Trims, strips a trailing slash, then either accepts an http(s) URL, falls
-// back to `dflt` when nothing was given, or rejects — a scheme a provider
-// SDK/fetch would happily hit (ftp:, file:, a bare host with no scheme at all)
-// must not silently become the outbound request's target.
+// Public provider endpoints require TLS. Plain HTTP is only for literal
+// loopback/private addresses and localhost, never a hostname that might resolve
+// elsewhere. Apply this again at the request boundary for legacy saved URLs.
 function normalizeBaseUrl(raw, dflt) {
-    const trimmed = String(raw || '').trim().replace(/\/+$/, '');
-    if (!trimmed) {
-        return dflt ? { ok: true, value: dflt } : { ok: false, error: 'Base URL must start with http:// or https://' };
-    }
+    const trimmed = (String(raw || '').trim() || String(dflt || '').trim()).replace(/\/+$/, '');
     if (!/^https?:\/\/\S+$/i.test(trimmed)) {
         return { ok: false, error: 'Base URL must start with http:// or https://' };
+    }
+    let url;
+    try { url = new URL(trimmed); } catch {
+        return { ok: false, error: 'Base URL must be a valid HTTP or HTTPS URL' };
+    }
+    if (url.username || url.password || url.search || url.hash) {
+        return { ok: false, error: 'Base URL must not contain credentials, a query, or a fragment' };
+    }
+    if (url.protocol === 'http:') {
+        const host = url.hostname;
+        const octets = host.split('.').map(Number);
+        const privateV4 = /^\d+\.\d+\.\d+\.\d+$/.test(host) && (
+            octets[0] === 10 ||
+            (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) ||
+            (octets[0] === 192 && octets[1] === 168)
+        );
+        const privateV6 = /^\[f[cd][0-9a-f]{2}:/i.test(host);
+        if (host !== 'localhost' && host !== '127.0.0.1' && host !== '[::1]' && !privateV4 && !privateV6) {
+            return { ok: false, error: 'Use HTTPS for public endpoints. HTTP is allowed only for localhost, 127.0.0.1, ::1, or private IP addresses.' };
+        }
     }
     return { ok: true, value: trimmed };
 }
@@ -2013,13 +2029,17 @@ function spawnCodex(codexPath, content, promptInstruction, extendedPath, cwd, on
 }
 
 async function fetchWithTimeout(url, options, timeoutMs, onAbort) {
+    const checked = normalizeBaseUrl(url);
+    if (!checked.ok) throw new Error(checked.error);
     const controller = new AbortController();
     // Built synchronously, unlike claude-code's child process — there is no gap
     // for a cancel to land before this handle exists.
     if (onAbort) onAbort({ abort: () => controller.abort() });
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-        return await fetch(url, { ...options, signal: controller.signal });
+        // Reject redirects so a validated endpoint cannot downgrade to HTTP or
+        // forward the transcript to a different destination.
+        return await fetch(checked.value, { ...options, redirect: 'error', signal: controller.signal });
     } finally {
         clearTimeout(timer);
     }

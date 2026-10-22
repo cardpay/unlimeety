@@ -5158,6 +5158,7 @@ function updateSettingsSections() {
   settingsSectionOllama.classList.toggle("hidden", provider !== "ollama");
   settingsSectionOpenAI.classList.toggle("hidden", provider !== "openai-compatible");
   settingsSectionLocalHf.classList.toggle("hidden", provider !== "local-hf");
+  document.getElementById("settings-codex-warning").classList.toggle("hidden", provider !== "codex-cli");
 }
 
 function localModelSize(bytes) {
