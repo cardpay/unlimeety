@@ -322,6 +322,17 @@ test('WHISPER_MODEL_RE gates every renderer-supplied model-name entry point', ()
         `expected WHISPER_MODEL_RE.test( at live:start/live:downloadModel/runRecordTranscribeJob/record:deleteModel (>=4), got ${count}`);
 });
 
+test('WhisperKit discovery, download and cache management share an immutable revision', () => {
+    const loader = fs.readFileSync(path.join(__dirname, '..', 'live-helper', 'Sources', 'TranscriberLive', 'ModelLoader.swift'), 'utf8');
+    const revision = /const WHISPER_MODEL_REVISION = '([0-9a-f]{40})';/.exec(MAIN)?.[1];
+    assert.ok(revision, 'the model pin must be a full commit SHA');
+    assert.ok(loader.includes(`static let revision = "${revision}"`), 'helper and Electron pins must match');
+    assert.match(loader, /hub\.getFilenames\(from: repository, revision: revision, matching: matching\)/);
+    assert.match(loader, /hub\.snapshot\(from: repository, revision: revision, matching: matching\)/);
+    assert.ok(loader.includes('let matching = ["\\(name)/*"]'), 'match only the exact variant folder');
+    assert.doesNotMatch(loader, /WhisperKit\.download\(/, 'the convenience API silently uses main');
+});
+
 test('transcripts:getAudioPath refuses a path outside the managed folders before calling findRelatedAudioPaths', () => {
     const start = MAIN.indexOf(`ipcMain.handle('transcripts:getAudioPath'`);
     const handler = sliceBraces(MAIN, start, 'transcripts:getAudioPath handler');

@@ -829,15 +829,10 @@ if (!PLAYER_OK) console.warn("[player] audio player DOM not found, feature disab
 
 const SPEEDS = [1, 1.5, 2, 0.75];
 const WAVEFORM_BARS = 80;
-// A multi-hour recording decoded whole into an ArrayBuffer (buildWaveform's
-// only path) can OOM the renderer just to draw 80 bars. Above this, skip the
-// decode — playerShowPath's placeholder waveform (already drawn before
-// buildWaveform runs) stays up, same as any other decode failure.
-const WAVEFORM_MAX_BYTES = 300 * 1024 * 1024;
 let speedIdx = 0;
 let waveformBars = [];        // current bar DOM nodes
 let waveformPlayedIdx = -1;   // last index marked played, for cheap diff
-let waveformToken = 0;        // race-protect decoder against rapid track switches
+let waveformToken = 0;       // ignore samples returned for a previous track
 
 function fmtTime(sec) {
   if (!isFinite(sec)) return "0:00";
@@ -861,14 +856,12 @@ function renderWaveform(peaks) {
 }
 
 function renderPlaceholderWaveform() {
-  // While decoding, show flat-ish bars so the player doesn't look empty.
-  const peaks = new Array(WAVEFORM_BARS).fill(0.25);
-  renderWaveform(peaks);
+  renderWaveform(new Array(WAVEFORM_BARS).fill(0.25));
 }
 
 function updateWaveformProgress(pct) {
   if (!waveformBars.length) return;
-  const targetIdx = Math.floor(pct * waveformBars.length);
+  const targetIdx = Math.min(waveformBars.length - 1, Math.floor(pct * waveformBars.length));
   if (targetIdx === waveformPlayedIdx) return;
   // Diff: only toggle bars whose state changed.
   if (targetIdx > waveformPlayedIdx) {
@@ -881,41 +874,6 @@ function updateWaveformProgress(pct) {
     }
   }
   waveformPlayedIdx = targetIdx;
-}
-
-async function buildWaveform(audioPath, numBars) {
-  const res = await fetch(`file://${encodeURI(audioPath)}`);
-  // ponytail: relies on Chromium's file:// fetch setting Content-Length; if
-  // it's ever missing or non-numeric, Number(null) is NaN and this check
-  // just never fires (the same as before this cap existed) — degrade, don't
-  // block, on a header this code cannot control. Upgrade to a streamed/
-  // chunked read with its own byte counter if that ever proves unreliable.
-  const len = Number(res.headers.get("content-length"));
-  if (len > WAVEFORM_MAX_BYTES) {
-    throw new Error(`audio file too large to decode for a waveform (${len} bytes)`);
-  }
-  const buf = await res.arrayBuffer();
-  const ctx = new (window.AudioContext || window.webkitAudioContext)();
-  try {
-    const audio = await ctx.decodeAudioData(buf);
-    const data = audio.getChannelData(0);
-    const bucket = Math.floor(data.length / numBars);
-    const peaks = new Array(numBars);
-    for (let i = 0; i < numBars; i++) {
-      let max = 0;
-      const start = i * bucket;
-      const end = start + bucket;
-      for (let j = start; j < end; j++) {
-        const v = Math.abs(data[j]);
-        if (v > max) max = v;
-      }
-      peaks[i] = max;
-    }
-    const peak = Math.max(...peaks, 0.01);
-    return peaks.map(p => p / peak);
-  } finally {
-    ctx.close();
-  }
 }
 
 function playerUpdateTime() {
@@ -939,6 +897,7 @@ async function playerShow(filePath) {
 // transcript to resolve the audio from and nothing to await.
 function playerShowPath(audioPath) {
   if (!PLAYER_OK) return;
+  const myToken = ++waveformToken;
   if (!audioPath) { audioPlayer.classList.add("hidden"); return; }
   audioEl.src = `file://${encodeURI(audioPath)}`;
   audioEl.load();
@@ -946,23 +905,20 @@ function playerShowPath(audioPath) {
   renderPlaceholderWaveform();
   apTime.textContent = "0:00 / 0:00";
   audioPlayer.classList.remove("hidden");
-
-  const myToken = ++waveformToken;
-  buildWaveform(audioPath, WAVEFORM_BARS).then(peaks => {
-    if (myToken !== waveformToken) return; // stale — another track loaded since
+  api.getWaveform(audioPath).then(peaks => {
+    if (myToken !== waveformToken || !Array.isArray(peaks) || peaks.length !== WAVEFORM_BARS) return;
     renderWaveform(peaks);
-  }).catch(err => {
-    console.warn("[player] waveform decode failed:", err);
-  });
+    playerUpdateTime();
+  }).catch(err => console.warn("[player] waveform sampling failed:", err));
 }
 
 function playerHide() {
   if (!PLAYER_OK) return;
+  waveformToken++;
   audioEl.pause();
   audioEl.src = "";
   playerSetPlaying(false);
   audioPlayer.classList.add("hidden");
-  waveformToken++; // invalidate any in-flight decode
 }
 
 if (PLAYER_OK) {
@@ -5202,6 +5158,7 @@ function updateSettingsSections() {
   settingsSectionOllama.classList.toggle("hidden", provider !== "ollama");
   settingsSectionOpenAI.classList.toggle("hidden", provider !== "openai-compatible");
   settingsSectionLocalHf.classList.toggle("hidden", provider !== "local-hf");
+  document.getElementById("settings-codex-warning").classList.toggle("hidden", provider !== "codex-cli");
 }
 
 function localModelSize(bytes) {

@@ -268,17 +268,23 @@
     color: var(--text-primary);
 }
 .record-waveform {
-    display: flex;
-    align-items: center;
-    gap: 3px;
-    width: 420px;
-    height: 56px;
+    width: 440px;
+    max-width: 100%;
+    height: 250px;
+    flex-shrink: 0;
 }
-.record-waveform-bar {
-    width: 3px;
-    border-radius: 1.5px;
-    background: linear-gradient(to bottom, rgba(239, 68, 68, 0.3), var(--rec) 50%, rgba(239, 68, 68, 0.3));
-    opacity: 0.85;
+.record-waveform svg {
+    display: block;
+    width: 100%;
+    height: 100%;
+}
+.record-waveform path {
+    fill: none;
+    stroke: var(--rec);
+    stroke-width: 2.5px;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    vector-effect: non-scaling-stroke;
 }
 /* Language for the transcription that fires on Stop & save. The buttons
    themselves are the shared `.ts-seg` pills, so only the row around them is

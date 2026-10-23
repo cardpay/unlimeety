@@ -30,7 +30,7 @@ requireNode22('check:layout');
 
 const DESKTOP = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PORT = debugPort();
-const EXPECTED_ROWS = 32;
+const EXPECTED_ROWS = 34;
 const EPS = 1.5; // sub-pixel layout slack
 
 const results = [];
@@ -272,6 +272,34 @@ async function run(evaluate, cdp) {
         return [ok && closed,
             `scrolled ${Math.round(moved.scrolled)}px; button ${fmt(moved.btn)} `
             + `/ popover ${fmt(moved.pop)}`];
+    });
+
+    await size(800, 600);
+    await row('Codex selection shows the file disclosure next to its radio at 800x600', async () => {
+        const result = await evaluate(`
+            await openSettingsModal();
+            document.querySelector('input[name="settings-provider"][value="codex-cli"]').click();
+            const warning = document.getElementById('settings-codex-warning');
+            const box = document.querySelector('#settings-modal .modal-body').getBoundingClientRect();
+            const rect = warning.getBoundingClientRect();
+            const visible = rect.width > 0 && rect.height > 0 && rect.top >= box.top && rect.bottom <= box.bottom;
+            const text = warning.textContent;
+            document.querySelector('input[name="settings-provider"][value="claude-code"]').click();
+            const hiddenAfterSwitch = warning.getBoundingClientRect().height === 0;
+            document.getElementById('settings-modal').classList.add('hidden');
+            return { visible, hiddenAfterSwitch, text };`);
+        return [result.visible && result.hiddenAfterSwitch && result.text.includes('credentials') && result.text.includes('OpenAI'), JSON.stringify(result)];
+    });
+    await row('first-use Codex choice discloses the risk before selection at 800x600', async () => {
+        const result = await evaluate(`
+            openProviderChooser();
+            const button = document.querySelector('.provider-choice[data-provider="codex-cli"]');
+            const rect = button.getBoundingClientRect();
+            const text = button.textContent;
+            const visible = rect.width > 0 && rect.height > 0 && rect.top >= 0 && rect.bottom <= innerHeight;
+            document.getElementById('provider-chooser-modal').classList.add('hidden');
+            return { visible, text };`);
+        return [result.visible && result.text.includes('credentials') && result.text.includes('OpenAI') && result.text.includes('saved summary'), JSON.stringify(result)];
     });
 
     // Exercise the actual production renderer with fixture status events. No

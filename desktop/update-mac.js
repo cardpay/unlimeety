@@ -5,7 +5,7 @@ const path = require('node:path');
 const https = require('node:https');
 const os = require('node:os');
 const semver = require('semver');
-const { budget, checkAbort, abortable } = require('./update-bounds');
+const { budget, checkAbort, abortable, clampRetryDeadline } = require('./update-bounds');
 const crypto = require('node:crypto');
 const { promisify } = require('node:util');
 const { execFile } = require('node:child_process');
@@ -155,7 +155,7 @@ function secureDownload(url, destination, candidate, progress, { request = https
         catch (error) { reject(error); return; }
         req = request(url, { headers: { 'User-Agent': 'desktop-update-client', Accept: 'application/octet-stream' } }, (res) => {
             response = res; res.on('error', reject);
-            observedDeadline = Math.max(observedDeadline, retryDeadline(res.headers));
+            observedDeadline = clampRetryDeadline(Math.max(observedDeadline, retryDeadline(res.headers)));
             if (signal.aborted) { abort(); reject(signal.reason); return; }
             if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
                 res.destroy();
@@ -176,8 +176,8 @@ function secureDownload(url, destination, candidate, progress, { request = https
             }).then(resolve, reject);
         });
         req.on('error', reject);
-    }).then((result) => ({ ...result, blockedUntil: Math.max(observedDeadline, result?.blockedUntil || 0) })).catch(async (error) => {
-        error.blockedUntil = Math.max(observedDeadline, error.blockedUntil || 0);
+    }).then((result) => ({ ...result, blockedUntil: clampRetryDeadline(Math.max(observedDeadline, result?.blockedUntil || 0)) })).catch(async (error) => {
+        error.blockedUntil = clampRetryDeadline(Math.max(observedDeadline, error.blockedUntil || 0));
         if (output && !output.closed) await new Promise((resolve) => output.once('close', resolve));
         if (created) { try { fs.unlinkSync(destination); } catch {} }
         throw error;
@@ -204,7 +204,7 @@ function createMacAdapter({ app, cacheDir, Updater, Provider, run = runFile, dow
                 if (activeOperation === operation && !operation?.signal.aborted) updater.emit('download-progress', { percent });
             }, { signal: operation?.signal });
             checkAbort(operation?.signal);
-            if (operation) operation.blockedUntil = Math.max(operation.blockedUntil || 0, result?.blockedUntil || 0);
+            if (operation) operation.blockedUntil = clampRetryDeadline(Math.max(operation.blockedUntil || 0, result?.blockedUntil || 0));
         };
         // Pinned MacUpdater does not reject its proxy promise on listen errors.
         // Turn these into ordinary download/preparation failures before staging.
@@ -325,7 +325,7 @@ function createMacAdapter({ app, cacheDir, Updater, Provider, run = runFile, dow
                 return { blockedUntil: operation.blockedUntil };
             } catch (error) {
                 downloadedFile = null; proxyReady = false;
-                error.blockedUntil = Math.max(operation.blockedUntil, error.blockedUntil || 0);
+                error.blockedUntil = clampRetryDeadline(Math.max(operation.blockedUntil, error.blockedUntil || 0));
                 // Native staging has not started. A late pinned completion must
                 // encounter this cancelled operation before creating a proxy.
                 if (!scope.signal.aborted) scope.abort(error);

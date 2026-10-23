@@ -85,6 +85,22 @@ DMGs are published through stable GitHub Release URLs on [github.com/cardpay/unl
 
 ## Cutting a release
 
+### Step 0. Refresh security patches
+
+Before every release cut, refresh Electron within its existing major version and
+review the dependency audit from `desktop/`:
+
+```bash
+npm update electron
+npm ls electron js-yaml yauzl
+npm audit --omit=dev
+```
+
+Check the [Electron release notes](https://releases.electronjs.org/) for the
+resolved version. Raise the `package.json` Electron minimum to that version,
+keep its major unchanged, and commit both manifests with the release preparation.
+Run all checks below against the refreshed lockfile before building.
+
 ### Step 1. Bump version
 
 In `desktop/package.json` change `"version"` to the new value, e.g. `1.0.1`. `desktop/package-lock.json` carries the same version in two places — `npm version` keeps them in step, editing by hand does not.
@@ -112,7 +128,7 @@ to people. Both must be green.
 ```bash
 cd unlimeety/desktop
 npm test              # node --test, Electron-free, under a second
-npm run check:layout  # drives a real Electron over CDP; expect "32/32 rows passed"
+npm run check:layout  # drives a real Electron over CDP; expect "34/34 rows passed"
 ```
 
 `check:layout` needs a display and Node >= 22. It is the only guard on the Record and Live start
@@ -173,6 +189,17 @@ codesign --verify --verbose dist/mac-arm64/Unlimeety.app/Contents/MacOS/lib*.dyl
 
 # 3. Entitlements (mic + screen capture) are intact
 codesign --display --entitlements - dist/mac-arm64/Unlimeety.app
+
+# 3b. Native processes have their own minimal entitlements
+codesign --display --entitlements - dist/mac-arm64/Unlimeety.app/Contents/MacOS/unlimeety-live
+codesign --display --entitlements - dist/mac-arm64/Unlimeety.app/Contents/MacOS/llama-runner
+for lib in dist/mac-arm64/Unlimeety.app/Contents/MacOS/lib*.dylib; do
+  codesign --display --entitlements - "$lib"
+done
+# Expect: live helper has only personal-information.calendars;
+# runner and dylibs have an empty dictionary, without JIT or unsigned memory.
+# build/sign-mac.cjs preserves these profiles during nested signing.
+# Chromium helpers keep entitlementsInherit.
 
 # 4. Gatekeeper accepts it
 spctl --assess --type execute --verbose dist/mac-arm64/Unlimeety.app

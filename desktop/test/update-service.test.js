@@ -62,6 +62,44 @@ test('rate limits persist and manual checks honor the deadline', async () => {
     h.service.start(); await h.service.check(); await h.service.check(); assert.equal(count, 1);
     await h.advance(10 * HOUR); assert.equal(count, 1); assert.equal(h.service.scheduleState().blockedUntil, 100000000 + 12 * HOUR);
 });
+test('oversized persisted suppression is repaired and automatic checks resume after 24 hours', async () => {
+    const h = harness({ load: () => ({ blockedUntil: 100000000 + 4000000000 * 1000 }) });
+    const limit = h.now() + 24 * HOUR;
+    assert.equal(h.service.scheduleState().blockedUntil, limit);
+    h.service.start(); assert.equal(h.writes.at(-1).blockedUntil, limit);
+    await h.service.check(); assert.equal(h.calls.length, 0);
+    const saved = h.writes.at(-1); h.service.stop();
+    const restarted = harness({ load: () => saved }); restarted.service.start();
+    await restarted.advance(24 * HOUR - 1); assert.equal(restarted.calls.length, 0);
+    await restarted.advance(1); assert.equal(restarted.calls.length, 1);
+});
+test('check and download outcomes cap persisted suppression without extending it on retries', async () => {
+    for (const operation of ['check', 'download']) for (const fails of [false, true]) {
+        let checks = 0, downloads = 0;
+        const candidate = { version: '2.0.1' };
+        const outcome = () => {
+            const blockedUntil = 100000000 + 4000000000 * 1000;
+            if (fails) { const error = new Error('limited'); error.blockedUntil = blockedUntil; throw error; }
+            return { candidate, blockedUntil };
+        };
+        const h = harness({
+            discover: async () => { checks++; return operation === 'check' && checks === 1 ? outcome() : { candidate }; },
+            adapter: { download: async () => { downloads++; return downloads === 1 ? outcome() : {}; } },
+        });
+        await h.service.check();
+        if (operation === 'download') await h.service.download();
+        const limit = h.now() + 24 * HOUR;
+        assert.equal(h.service.scheduleState().blockedUntil, limit);
+        assert.equal(h.writes.at(-1).blockedUntil, limit);
+        h.jump(12 * HOUR);
+        await h.service.check(); await h.service.download();
+        assert.equal(checks, 1); assert.equal(downloads, operation === 'download' ? 1 : 0);
+        assert.equal(h.service.scheduleState().blockedUntil, limit);
+        h.jump(12 * HOUR);
+        await h.service.check(); await h.service.download();
+        assert.equal(checks, 2); assert.equal(downloads, operation === 'download' ? 2 : 1);
+    }
+});
 test('backward clock changes reset bounded horizon; stopped scheduler performs no work', async () => {
     const h = harness(); h.service.start(); h.jump(-24 * HOUR); h.service.wake();
     assert.equal(h.service.scheduleState().nextDue - h.now(), 8 * HOUR);

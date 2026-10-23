@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { channelOf } = require('./update-provider');
-const { budget, checkAbort } = require('./update-bounds');
+const { budget, checkAbort, clampRetryDeadline } = require('./update-bounds');
 const HOUR = 3600000;
 const MAX_TIMER = 60000; // Re-evaluate wall time so clock changes cannot strand a timer.
 function atomicState(file, state) {
@@ -24,7 +24,7 @@ function createUpdateService({ version, statePath, discover, adapter, readiness,
     let saved = load();
     if (!saved || typeof saved !== 'object') saved = {};
     let due = (Number.isFinite(saved.nextDue) && saved.nextDue > 0 ? saved.nextDue : 0) || clock.now() + interval();
-    let blockedUntil = (Number.isFinite(saved.blockedUntil) && saved.blockedUntil > 0 ? saved.blockedUntil : 0);
+    let blockedUntil = clampRetryDeadline(saved.blockedUntil, clock.now());
     let recoveryDue = (Number.isFinite(saved.recoveryDue) && saved.recoveryDue > 0 ? saved.recoveryDue : 0);
     let timer, stopped = true, enabled = false, persistenceFailed = false, committedReservation = null, checking, downloading, installing = false;
     let candidate = null;
@@ -53,7 +53,7 @@ function createUpdateService({ version, statePath, discover, adapter, readiness,
         if (now < previousWall) {
             const shift = previousWall - now;
             // Retry deadlines track remaining duration across backwards jumps.
-            if (blockedUntil) blockedUntil = Math.max(now, blockedUntil - shift);
+            if (blockedUntil) blockedUntil = clampRetryDeadline(Math.max(now, blockedUntil - shift), now);
             if (recoveryDue) recoveryDue = Math.max(now, recoveryDue - shift);
             due -= shift;
             write();
@@ -84,7 +84,7 @@ function createUpdateService({ version, statePath, discover, adapter, readiness,
             emit({ phase: 'checking', error: null, retryAt: null });
             try {
                 const result = await discover(version);
-                blockedUntil = Math.max(blockedUntil, result.blockedUntil || 0);
+                blockedUntil = clampRetryDeadline(Math.max(blockedUntil, result.blockedUntil || 0), clock.now());
                 // Preserve a downloaded candidate on a repeat check.
                 if (status.downloadedVersion && candidate && result.candidate && ['version', 'channel', 'url', 'sha512', 'size', 'minimumSystemVersion'].every((key) => result.candidate[key] === candidate[key])) emit({ phase: 'downloaded' });
                 else {
@@ -93,7 +93,7 @@ function createUpdateService({ version, statePath, discover, adapter, readiness,
                     emit({ phase: candidate ? 'available' : 'current', availableVersion: candidate?.version || null, downloadedVersion: null, progress: null });
                 }
             } catch (error) {
-                blockedUntil = Math.max(blockedUntil, error.blockedUntil || 0);
+                blockedUntil = clampRetryDeadline(Math.max(blockedUntil, error.blockedUntil || 0), clock.now());
                 if (!status.downloadedVersion) { candidate = null; emit({ availableVersion: null }); }
                 emit({ phase: 'error', error: error.message, retryAt: blockedUntil > clock.now() ? blockedUntil : null });
             } finally {
@@ -113,10 +113,10 @@ function createUpdateService({ version, statePath, discover, adapter, readiness,
             emit({ phase: 'downloading', error: null, progress: 0 });
             try {
                 const result = await adapter.download(candidate, (percent) => emit({ progress: Math.max(0, Math.min(100, percent)) }));
-                blockedUntil = Math.max(blockedUntil, result?.blockedUntil || 0);
+                blockedUntil = clampRetryDeadline(Math.max(blockedUntil, result?.blockedUntil || 0), clock.now());
                 cache = adapter.cacheRecord?.() || null; write();
                 emit({ phase: 'downloaded', downloadedVersion: candidate.version, progress: 100 });
-            } catch (error) { blockedUntil = Math.max(blockedUntil, error.blockedUntil || 0); write(); emit({ phase: 'error', downloadedVersion: null, error: error.message, retryAt: blockedUntil > clock.now() ? blockedUntil : null }); }
+            } catch (error) { blockedUntil = clampRetryDeadline(Math.max(blockedUntil, error.blockedUntil || 0), clock.now()); write(); emit({ phase: 'error', downloadedVersion: null, error: error.message, retryAt: blockedUntil > clock.now() ? blockedUntil : null }); }
             finally { downloading = null; schedule(true); }
             return { ...status };
         })();

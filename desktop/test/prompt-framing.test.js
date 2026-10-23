@@ -143,6 +143,37 @@ test('summarize, follow-up and chat all frame the transcript before it reaches a
     assert.match(sliceIpcHandle('chat:ask'), /framePrompt\(/);
 });
 
+test('only a standalone user-note marker enables the summarizer note instruction', async () => {
+    for (const [transcript, hasNote] of [
+        ['[00:01] Note:\nPrepare the fixture report.', true],
+        ['[00:01] Guest One:\nSpeech.\n[00:02] Note: \t\nTyped context.', true],
+        ['[01:02:03] Note:\r\nTyped context.', true],
+        ['[00:01] Note::\nSpoken task.', false],
+        ['[00:01] Note: urgent:\nSpoken task.', false],
+        ['[00:01] Note: inline speech', false],
+        ['[00:01] Guest One:\nQuoted marker: [00:02] Note:\nSpeech.', false],
+        ['[00:01] Note (guest):\nSpoken task.', false],
+        ['[00:01] Notebook:\nSpeech.', false],
+        ['[00:01] Guest One:\nSpeech.', false],
+    ]) {
+        let submitted;
+        const context = vm.createContext({
+            fs: { readFileSync: () => transcript }, canReadPath: () => true,
+            NOTE_LABEL: 'Note', readSummarizerConfig: () => ({}), framePrompt,
+            summarizeCancelRequested: false, summarizeAbort: null,
+            runSummarizerProvider: async (content, instruction) => {
+                submitted = { content, instruction }; return { ok: false, error: 'fixture provider result' };
+            },
+        });
+        vm.runInContext(sliceFunction('runSummarizeJob'), context);
+        const result = await context.runSummarizeJob('/fixture/transcript.txt', 'Summarize this.');
+        assert.strictEqual(result.error, 'fixture provider result');
+        assert.strictEqual(submitted.instruction.includes('Give it high priority as context'), hasNote, transcript);
+        assert.ok(submitted.instruction.includes('Summarize this.'));
+        assert.ok(submitted.content.includes(transcript));
+    }
+});
+
 test('speaker naming keeps Meeting:/Participants: out of the instruction and inside the EVIDENCE data block', () => {
     const src = sliceFunction('runEnhanceJob');
     assert.match(src, /const identities = enhance\.identityRecords\(glossaryEntries\)/,
@@ -184,17 +215,47 @@ test('mdToSlack keeps only http(s)/mailto links clickable', () => {
 
 // ─── normalizeBaseUrl ───────────────────────────────────────────────────────
 
-test('normalizeBaseUrl accepts http(s), rejects everything else, and needs a default to fall back on', () => {
+test('normalizeBaseUrl accepts HTTPS, rejects other schemes, and validates defaults', () => {
     assert.deepStrictEqual(
         normalizeBaseUrl('https://api.example.com/', 'https://default'),
         { ok: true, value: 'https://api.example.com' });
     assert.strictEqual(normalizeBaseUrl('ftp://x', 'https://default').ok, false);
     assert.strictEqual(normalizeBaseUrl('', 'https://default').ok, true, 'empty falls back to the default');
     assert.strictEqual(normalizeBaseUrl('', undefined).ok, false, 'empty with no default must fail');
+    assert.strictEqual(normalizeBaseUrl('  ', 'https://default').ok, true);
+    assert.strictEqual(normalizeBaseUrl('', 'http://public.example.com').ok, false);
 });
 
 test('normalizeBaseUrl accepts an uppercase scheme too', () => {
     assert.strictEqual(normalizeBaseUrl('HTTPS://api.example.com', 'https://default').ok, true);
+});
+
+test('plain HTTP is restricted to loopback and literal private addresses', () => {
+    for (const host of ['localhost', '127.0.0.1', '[::1]', '10.0.0.1', '172.16.0.1', '172.31.255.255', '192.168.1.5', '[fc00::1]', '[fd12:3456::1]']) {
+        assert.strictEqual(normalizeBaseUrl(`http://${host}:11434/v1/`).ok, true, host);
+    }
+    for (const host of ['api.example.com', 'localhost.example.com', '10.0.0.1.example.com', '8.8.8.8', '172.15.255.255', '172.32.0.1', '192.169.0.1', '0.0.0.0', '[2001:db8::1]', '[fe80::1]']) {
+        assert.strictEqual(normalizeBaseUrl(`http://${host}/v1`).ok, false, host);
+    }
+    for (const url of ['https://', 'https://[invalid]', 'https://user:pass@api.example.com', 'https://api.example.com/?key=secret', 'https://api.example.com/#fragment']) {
+        assert.strictEqual(normalizeBaseUrl(url).ok, false, url);
+    }
+    assert.strictEqual(normalizeBaseUrl('http://localhost@public.example.com').ok, false);
+});
+
+test('provider requests reject legacy public HTTP URLs before fetch and forbid redirects', async () => {
+    const calls = [];
+    const request = new Function('normalizeBaseUrl', 'fetch', `${sliceFunction('fetchWithTimeout')}\nreturn fetchWithTimeout;`)(
+        normalizeBaseUrl,
+        async (url, options) => { calls.push({ url, options }); return { ok: true }; },
+    );
+    await assert.rejects(request('http://public.example.com/chat/completions', { method: 'POST' }, 1000), /Use HTTPS/);
+    assert.strictEqual(calls.length, 0, 'unsafe saved URLs must never send credentials or transcript text');
+    for (const url of ['https://api.example.com/v1/chat/completions', 'http://localhost:11434/api/chat']) {
+        await request(url, { method: 'POST', redirect: 'follow' }, 1000);
+        assert.strictEqual(calls.at(-1).url, url);
+        assert.strictEqual(calls.at(-1).options.redirect, 'error');
+    }
 });
 
 // ─── settings:setSummarizer wiring ──────────────────────────────────────────

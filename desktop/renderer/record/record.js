@@ -603,35 +603,67 @@
         if (waveRaf) { cancelAnimationFrame(waveRaf); waveRaf = null; }
         const host = $('record-waveform');
         if (!host) return;
-        host.innerHTML = '';
-        const bars = [];
-        for (let i = 0; i < 64; i++) {
-            const bar = document.createElement('div');
-            bar.className = 'record-waveform-bar';
-            host.appendChild(bar);
-            bars.push(bar);
+        const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        svg.setAttribute('viewBox', '0 0 440 250');
+        svg.setAttribute('preserveAspectRatio', 'none');
+        svg.setAttribute('role', 'img');
+        svg.setAttribute('aria-label', 'Recording in progress');
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        svg.appendChild(path);
+        host.replaceChildren(svg);
+
+        const tau = Math.PI * 2;
+        function hash(i, j) {
+            const value = Math.sin(i * 127.1 + j * 311.7 + 94.7) * 43758.5453;
+            return value - Math.floor(value);
         }
-        let phase = 0;
-        let envelope = 0.75;
-        const noise = new Float32Array(bars.length);
-        function tick() {
-            phase += 0.05;
-            // Slow random-walk amplitude envelope — mimics natural speech bursts.
-            envelope = Math.max(0.55, Math.min(1.0, envelope + (Math.random() - 0.5) * 0.04));
-            // Occasional spike on a random bar — like loud consonants.
-            if (Math.random() < 0.1) {
-                noise[(Math.random() * bars.length) | 0] = 0.8 + Math.random() * 0.7;
-            }
-            for (let i = 0; i < bars.length; i++) {
-                noise[i] = noise[i] * 0.82 + (Math.random() - 0.5) * 0.55;
-                const wave = Math.sin(i * 0.4 + phase) * 0.3
-                           + Math.cos(i * 0.18 + phase * 1.4) * 0.2;
-                const h = 4 + Math.abs(wave + noise[i]) * envelope * 56;
-                bars[i].style.height = Math.max(3, Math.min(54, h)) + 'px';
-            }
-            waveRaf = requestAnimationFrame(tick);
+        function noise(x, y) {
+            const i = Math.floor(x), j = Math.floor(y);
+            let a = x - i, b = y - j;
+            a = a * a * (3 - 2 * a);
+            b = b * b * (3 - 2 * b);
+            const low = hash(i, j) * (1 - a) + hash(i + 1, j) * a;
+            const high = hash(i, j + 1) * (1 - a) + hash(i + 1, j + 1) * a;
+            return low * (1 - b) + high * b;
         }
-        tick();
+        // The lens stays fixed; every irregularity shares one rightward travel
+        // coordinate, so random amplitude changes cannot pull the wave backward.
+        const samples = Array.from({ length: 881 }, (_, i) => {
+            const x = i / 880;
+            const u = Math.max(0, Math.min(1, (x - 0.25) / 0.5));
+            const lens = Math.pow(Math.max(0, Math.sin(Math.PI * u)), 1.35);
+            const integral = 0.5 * (u / 2 - Math.sin(tau * u) / (2 * tau));
+            const fourthIntegral = 0.5 * (3 * u / 8 - Math.sin(tau * u) / (2 * tau)
+                + Math.sin(2 * tau * u) / (16 * tau));
+            // Lens magnification 2.5, with the approved threefold central slowdown.
+            const strength = 1 - 0.38 / 2.5;
+            return {
+                x: (x * 440).toFixed(2),
+                warped: x + (2 - strength) * integral - 2 * strength * fourthIntegral,
+                amplitude: (4.42 + (85 - 4.42) * lens) * (2 - lens) ** 2,
+                drift: 7 * (0.13 + 0.87 * lens),
+            };
+        });
+        const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        let time = 1.8, previous = null;
+        function tick(now) {
+            if (previous !== null) time += Math.max(0, Math.min(0.05, (now - previous) / 1000));
+            previous = now;
+            const commands = samples.map((sample, i) => {
+                const travel = sample.warped - time * 0.085;
+                const breath = 0.78 + 0.22 * noise(travel * 2 + 63, 5);
+                const pulses = Math.pow(noise(travel * 12 + 19, 3), 1.3);
+                const peakVariation = noise(travel * 88 + 151, 13);
+                const speech = 0.12 + 0.88 * Math.pow(0.25 * pulses + 0.75 * peakVariation, 1.05);
+                const phase = tau * 44 * travel + 2.2 * (noise(travel * 4.2 + 41, 7) - 0.5);
+                const drift = sample.drift * (noise(travel * 5 + 101, 11) - 0.5);
+                const y = 125 + drift - sample.amplitude * speech * breath * Math.sin(phase);
+                return `${i === 0 ? 'M' : 'L'}${sample.x},${y.toFixed(2)}`;
+            });
+            path.setAttribute('d', commands.join(' '));
+            if (!reducedMotion) waveRaf = requestAnimationFrame(tick);
+        }
+        tick(performance.now());
     }
 
     function fillRecordFileCard() {

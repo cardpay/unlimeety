@@ -43,6 +43,7 @@ test('Stop now leaves the next call-detect prompt unsuppressed', () => {
         const ipcMain = { on: (_channel, fn) => { handler = fn; } };
         let autoStopTimer = 42;
         let autoStopSlot = 'live';
+        let recordingReminderSlot = null;
         ${source};
         handler();
         return { autoStopTimer, autoStopSlot };

@@ -1159,6 +1159,7 @@
             <input type="radio" name="settings-provider" value="codex-cli" />
             <span class="settings-radio-title">Codex CLI (opt-in) <span class="provider-badge provider-badge-cloud">Cloud</span><span class="provider-badge provider-badge-speed">Speed</span></span>
             <span class="settings-radio-sub">Cloud CLI — read-only sandbox; tools cannot be disabled and may read files</span>
+            <span id="settings-codex-warning" class="settings-radio-sub hidden" role="note"><strong>Privacy risk: Codex can read your files.</strong> Its read-only sandbox prevents writes, but it can read files accessible to your account, including SSH keys and cloud credentials. Malicious transcript instructions can cause those files to be sent to OpenAI and included in the saved summary. Choose Codex only if you accept this risk.</span>
           </label>
           <label class="settings-radio">
             <input type="radio" name="settings-provider" value="openrouter" />
@@ -1343,7 +1344,7 @@
         <div class="provider-choice-grid">
           <button type="button" class="provider-choice" data-provider="local-hf"><strong>Local Hugging Face</strong><span class="provider-choice-badges"><span class="provider-badge provider-badge-local">Local</span><span class="provider-badge provider-badge-safety">Privacy</span></span><small>Download a reviewed Qwen3 model first.</small></button>
           <button type="button" class="provider-choice" data-provider="claude-code"><strong>Claude Code</strong><span class="provider-choice-badges"><span class="provider-badge provider-badge-cloud">Cloud</span><span class="provider-badge provider-badge-quality">Quality</span><span class="provider-badge provider-badge-safety">Safety</span></span></button>
-          <button type="button" class="provider-choice" data-provider="codex-cli"><strong>Codex CLI</strong><span class="provider-choice-badges"><span class="provider-badge provider-badge-cloud">Cloud</span><span class="provider-badge provider-badge-speed">Speed</span></span></button>
+          <button type="button" class="provider-choice" data-provider="codex-cli"><strong>Codex CLI (opt-in)</strong><span class="provider-choice-badges"><span class="provider-badge provider-badge-cloud">Cloud</span><span class="provider-badge provider-badge-speed">Speed</span></span><small>Privacy risk: read-only still allows reading your files, including credentials. Malicious transcript instructions can send them to OpenAI and include them in the saved summary. Choose only if you accept this risk.</small></button>
           <button type="button" class="provider-choice" data-provider="ollama"><strong>Ollama</strong><span class="provider-choice-badges"><span class="provider-badge provider-badge-local">Local</span></span></button>
         </div>
       </div>

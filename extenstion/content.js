@@ -1020,7 +1020,7 @@ const PHONETIC_LETTERS = [
 function isReservedSpeakerLabel(label) {
     const s = String(label || '').trim();
     if (!s) return false;
-    if (s === 'Note' || s === 'Me' || s === 'Speaker' || s === '?' || s === '…') return true;
+    if (/^note\b/i.test(s) || s === 'Me' || s === 'Speaker' || s === '?' || s === '…') return true;
     if (/^S\d+$/i.test(s)) return true;
     // `Beta`, and the wrap-around form `Beta 2`.
     const m = /^(\p{L}+)(?: (\d+))?$/u.exec(s);
@@ -1037,7 +1037,11 @@ function processSubtitle(speaker, text) {
 
     // Break the collision rather than silently laundering it: the label stays
     // readable and visibly not the reserved one.
-    if (isReservedSpeakerLabel(speaker)) {
+    // Colons delimit transcript markers; removing them must not create a new
+    // reserved-label collision (for example, "N:ote" becoming "Note").
+    const wasReserved = isReservedSpeakerLabel(speaker);
+    speaker = speaker.replace(/:/g, '');
+    if (wasReserved || isReservedSpeakerLabel(speaker)) {
         speaker = `${speaker} (guest)`;
     }
 
