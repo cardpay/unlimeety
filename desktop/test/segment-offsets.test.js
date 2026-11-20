@@ -13,9 +13,9 @@
 const assert = require('assert');
 const { region } = require('./lib/find-region');
 
-const { parseSegments, segmentOffsets, resolveEditCaretOffset } = new Function(
+const { fmtTc, parseSegments, segmentOffsets, resolveEditCaretOffset } = new Function(
     `${region('app.js', 'segment offsets')}
-     return { parseSegments, segmentOffsets, resolveEditCaretOffset };`,
+     return { fmtTc, parseSegments, segmentOffsets, resolveEditCaretOffset };`,
 )();
 
 {
@@ -67,6 +67,24 @@ const { parseSegments, segmentOffsets, resolveEditCaretOffset } = new Function(
     assert.strictEqual(segments[1].t, 5);
     assert.strictEqual(content.slice(offsets[0], offsets[0] + 12), '[1:00:32 PM]');
     assert.strictEqual(content.slice(offsets[1], offsets[1] + 6), '[0:05]');
+}
+
+{
+    // Past the first hour the transcript writers (formatHms in main.js) switch
+    // from "mm:ss" to "hh:mm:ss". Those lines are still audio offsets and must
+    // stay seekable.
+    const segments = parseSegments('[59:58] Alice: almost\n[01:00:32] Bob: past the hour\n[2:05:07] Alice: later');
+    assert.deepStrictEqual(segments.map((s) => s.t), [3598, 3632, 7507]);
+}
+
+{
+    // fmtTc renders a parsed offset back as the label shown next to a segment:
+    // "m:ss" under an hour, "h:mm:ss" from the hour on (not "60:32").
+    assert.strictEqual(fmtTc(5), '0:05');
+    assert.strictEqual(fmtTc(3599), '59:59');
+    assert.strictEqual(fmtTc(3600), '1:00:00');
+    assert.strictEqual(fmtTc(3632), '1:00:32');
+    assert.strictEqual(fmtTc(7507.9), '2:05:07');
 }
 
 {
