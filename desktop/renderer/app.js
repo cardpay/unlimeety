@@ -957,14 +957,15 @@ function escHtml(s) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
+// ── segment offsets (extracted verbatim by test/segment-offsets.test.js) ──
 function fmtTc(sec) {
-  const m = Math.floor(sec / 60), s = Math.floor(sec % 60);
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = Math.floor(sec % 60);
+  if (h > 0) return `${h}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
-// ── segment offsets (extracted verbatim by test/segment-offsets.test.js) ──
 // A segment line opens with a bracketed timestamp: either an audio offset
-// "[m:ss]" or a wall-clock time from a text export, e.g. "[1:00:32 PM]".
+// "[m:ss]" / "[h:mm:ss]" or a wall-clock time from a text export, e.g. "[1:00:32 PM]".
 // Shared by parseSegments and segmentOffsets so the two can't drift apart —
 // they must agree line-for-line on what counts as a new segment.
 const SEGMENT_LINE_RE = /^\[(\d[^\]]*)\]\s*(.*)/;
@@ -978,8 +979,8 @@ function parseSegments(content) {
     if (match) {
       if (cur) segments.push(cur);
       const label = match[1].trim();
-      const off = /^(\d+):(\d{2})$/.exec(label);
-      const t = off ? parseInt(off[1]) * 60 + parseInt(off[2]) : null;
+      const off = /^(?:(\d+):(?=\d{2}:))?(\d+):(\d{2})$/.exec(label);
+      const t = off ? parseInt(off[1] || 0) * 3600 + parseInt(off[2]) * 60 + parseInt(off[3]) : null;
       const rest = match[2].trim();
       const isSpeaker = rest.endsWith(":");
       cur = { t, label, speaker: isSpeaker ? rest.slice(0, -1) : null, text: isSpeaker ? "" : rest };
