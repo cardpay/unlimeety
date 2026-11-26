@@ -12,6 +12,7 @@ const { createJobQueue } = require('./job-queue');
 const { LOCAL_MODEL_MANIFEST, modelById, displayModel } = require('./local-model-manifest');
 const { downloadVerifiedArtifact } = require('./local-model-download');
 const { readWaveform } = require('./audio-waveform');
+const { repairUnfinalizedWav } = require('./wav-repair');
 
 // Track entire IPC lifetimes, including permission prompts and final writes.
 // Updates reserve before any await and reject new work until readiness ends.
@@ -4621,6 +4622,7 @@ ipcMain.handle('record:list', () => {
                 try {
                     const stat = fs.statSync(filePath);
                     if (!stat.isFile()) return null;
+                    try { repairUnfinalizedWav(filePath); } catch { /* leave the file as it is */ }
                     const transcriptPath = recordingTranscriptPath(filePath);
                     const hasTranscript = fs.existsSync(transcriptPath);
                     const summaryPath = hasTranscript ? findExistingSummaryPath(transcriptPath) : null;
